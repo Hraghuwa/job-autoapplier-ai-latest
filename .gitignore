@@ -1,0 +1,9 @@
+.venv/
+.agent/
+agent-manager-skill/
+antigravity-awesome-skills/
+__pycache__/
+*.pyc
+config.py
+applied_jobs.json
+.DS_Store
