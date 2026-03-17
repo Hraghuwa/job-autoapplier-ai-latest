@@ -630,9 +630,10 @@ def _apply_on_job_page(driver, config, job_title, company_name, default_note):
     try_click(driver, apply_btn)
     time.sleep(3)
 
-    # Step 2: Skip cover note — leave blank as user requested
-    # (No form filling — just click Apply directly)
-
+    # Step 2: Fill the cover note in the modal 
+    # Use AI or default note, will skip if no textarea is present
+    note_filled = _fill_cover_note(driver, config, job_title, company_name, default_note)
+    
     # Step 4: Upload resume if file input is present
     try:
         resume_path = config.get("resume_path", "")

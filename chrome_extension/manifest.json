@@ -1,0 +1,13 @@
+{
+    "manifest_version": 3,
+    "name": "Job Auto-Applier Smart Fill",
+    "version": "1.0",
+    "description": "Automatically fills job application forms using your profile data.",
+    "permissions": [
+        "activeTab",
+        "scripting"
+    ],
+    "action": {
+        "default_popup": "popup.html"
+    }
+}

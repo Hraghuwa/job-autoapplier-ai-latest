@@ -412,27 +412,16 @@ def handle_generic_apply(driver, config):
     if clicked_apply:
         time.sleep(3)
 
-    # Check if we're now on a form page
-    has_form = False
-    try:
-        forms = driver.find_elements(By.CSS_SELECTOR, "form")
-        file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-        text_inputs = driver.find_elements(By.CSS_SELECTOR,
-            "input[type='text'], input[type='email'], textarea")
-        has_form = bool(forms) or bool(file_inputs) or len(text_inputs) >= 2
-    except Exception:
-        pass
+    # Unconditionally fill all form fields
+    smart_form_filler.fill_all_form_fields(driver, config)
+    time.sleep(1)
 
-    if has_form:
-        # Fill all form fields
-        smart_form_filler.fill_all_form_fields(driver, config)
-        time.sleep(1)
+    # Try multi-step form walk
+    result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=6)
+    if result == "submitted":
+        return True
 
-        # Try multi-step form walk
-        result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=6)
-        return result == "submitted"
-
-    elif not clicked_apply:
+    if not clicked_apply:
         # No apply button and no form — might be a listing page
         # Look for individual job links to check
         print("    [Generic] No form found, looking for job links...")

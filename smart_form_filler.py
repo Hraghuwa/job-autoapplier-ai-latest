@@ -106,7 +106,7 @@ def _build_field_rules(config):
         (["phone", "mobile", "contact number", "contact no", "tel", "whatsapp"], profile.get("phone", "8109580642")),
         (["email", "e-mail", "mail id", "mail", "email id"], profile.get("email", "hraghu3110@outlook.com")),
         (["linkedin", "linkedin id", "linkedin url", "profile url"], profile.get("linkedin", "https://www.linkedin.com/in/harsh-raghuwanshi-570868359/")),
-        (["portfolio", "website", "github"], profile.get("linkedin", "")),
+        (["portfolio", "website", "personal website", "github", "link to your work"], profile.get("personal_website", "https://harshraghuwanshi.figma.site")),
 
         # Location
         (["city", "current city", "hometown", "town", "current location"], profile.get("city", "Bangalore")),
@@ -779,7 +779,10 @@ def fill_all_form_fields(driver, config, container=None):
     Returns True if any field was filled.
     """
     filled = False
-    print("    [SmartFill] Scanning form fields...")
+    from utils.auth import google_login_flow
+    if google_login_flow(driver, "Form Automation", config.get("profile", {}).get("email", "")):
+        filled = True
+        print("    [SmartFill] 🔗 Google login automation triggered")
 
     filled |= upload_resume(driver, config, container)
     filled |= fill_text_inputs(driver, config, container)

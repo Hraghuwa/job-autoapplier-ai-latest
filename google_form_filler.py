@@ -99,6 +99,10 @@ def match_answer(label, config):
     if any(w in c for w in ["linkedin", "linkedin id", "linkedin url"]):
         return profile.get("linkedin", "https://www.linkedin.com/in/harsh-raghuwanshi-570868359/")
 
+    # Portfolio / Personal Website
+    if any(w in c for w in ["portfolio", "website", "personal website", "link to your work"]):
+        return profile.get("personal_website", "https://harshraghuwanshi.figma.site")
+
     # Email
     if any(w in c for w in ["email", "e-mail", "mail id", "email id"]):
         return profile.get("email", "hraghu3110@outlook.com")

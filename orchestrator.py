@@ -22,13 +22,17 @@ import google_form_filler
 import web_search_applier
 import linkedin_outreach
 import wellfound_applier
+import other_platforms
 from main import load_tracker, save_tracker, get_applied_urls, add_applied_urls
 
 def create_driver():
     opts = Options()
-    opts.add_argument("--start-maximized")
+    # Remove --start-maximized to avoid stealing full screen focus
+    opts.add_argument("--window-size=1200,800")
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--disable-notifications")
+    opts.add_argument("--no-first-run")
+    opts.add_argument("--no-default-browser-check")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     # Headless can be configured if needed, but for CAPTCHAs we keep it headed
@@ -36,6 +40,13 @@ def create_driver():
     opts.add_experimental_option("detach", True)
     driver = webdriver.Chrome(options=opts)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    
+    # Try to lower the window so it doesn't pop up directly in user's face
+    try:
+        driver.set_window_position(50, 50)
+    except:
+        pass
+        
     return driver
 
 def run_linkedin_phase():
@@ -182,6 +193,41 @@ def run_wellfound_phase():
                 driver.quit()
             except:
                 pass
+def run_other_platforms_phase():
+    phase_name = "Phase 3: Unstop / Naukri"
+    PERFORMANCE_TRACKER.start_phase(phase_name)
+    driver = None
+    applied = 0
+    try:
+        driver = create_driver()
+        email = CONFIG.get("profile", {}).get("email", "")
+        pwd = CONFIG.get("profile", {}).get("password", "YOUR_PASSWORD")
+        
+        # Naukri Login & Apply
+        other_platforms.naukri_login(driver, email, pwd)
+        n_count, n_urls = other_platforms.naukri_apply(
+            driver, CONFIG["keywords"], CONFIG["locations"], 
+            CONFIG["max_jobs_per_day"], 0, config=CONFIG
+        )
+        applied += n_count
+        
+        # Unstop Login & Apply
+        other_platforms.unstop_login(driver, email, pwd)
+        u_count, u_urls = other_platforms.unstop_apply(
+            driver, CONFIG["keywords"], CONFIG["locations"], 
+            CONFIG["max_jobs_per_day"], 0, config=CONFIG
+        )
+        applied += u_count
+        
+        PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied)
+    except Exception as e:
+        PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
     return applied
 
 def main():
@@ -192,13 +238,32 @@ def main():
     print("🚀 Launching multi-agent execution...")
     print("=" * 60)
 
+    import sys
+    
     # Run phases concurrently
-    phases = [
+    all_phases = [
         run_linkedin_phase,
         run_web_search_and_fill_phase,
         run_outreach_phase,
-        run_wellfound_phase
+        run_wellfound_phase,
+        run_other_platforms_phase
     ]
+    
+    phases = []
+    
+    if len(sys.argv) > 1:
+        # User specified phases to run (e.g. python3 orchestrator.py 1 5)
+        allowed_nums = [int(x) for x in sys.argv[1:] if x.isdigit()]
+        if 1 in allowed_nums: phases.append(run_linkedin_phase)
+        if 2 in allowed_nums: phases.append(run_web_search_and_fill_phase)
+        if 3 in allowed_nums: phases.append(run_other_platforms_phase)
+        if 4 in allowed_nums: phases.append(run_outreach_phase)
+        if 5 in allowed_nums: phases.append(run_wellfound_phase)
+        print(f"🎯 Running ONLY specified phases: {allowed_nums}")
+    else:
+        # Default: run all
+        phases = all_phases
+        print("🎯 Running ALL phases automatically")
     
     with ThreadPoolExecutor(max_workers=len(phases)) as executor:
         futures = {executor.submit(phase): phase.__name__ for phase in phases}

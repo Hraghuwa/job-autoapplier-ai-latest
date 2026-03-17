@@ -301,28 +301,28 @@ def main():
     outreach_connections = 0
     outreach_messages = 0
     print(f"\n{'═' * 60}")
-    print(f"  📌 PHASE 4: LINKEDIN OUTREACH — Connect with Recruiters")
+    print(f"  📌 PHASE 4: LINKEDIN OUTREACH — Connect with Recruiters (HIDDEN)")
     print(f"{'═' * 60}")
 
-    try:
-        outreach_driver = create_driver(headless=False)
-        print(f"  🌐 Outreach browser started")
-
-        # Login to LinkedIn
-        linkedin_applier.login(
-            outreach_driver, CONFIG["linkedin"]["email"], CONFIG["linkedin"]["password"]
-        )
-        time.sleep(3)
-
-        outreach_connections, outreach_messages, _ = linkedin_outreach.run_outreach(
-            outreach_driver, CONFIG
-        )
-
-        # Don't close — leave open for the user
-        print(f"  ✅ Phase 4 complete!")
-    except Exception as e:
-        print(f"  ❌ Outreach error: {e}")
-        traceback.print_exc()
+    # try:
+    #     outreach_driver = create_driver(headless=False)
+    #     print(f"  🌐 Outreach browser started")
+    #
+    #     # Login to LinkedIn
+    #     linkedin_applier.login(
+    #         outreach_driver, CONFIG["linkedin"]["email"], CONFIG["linkedin"]["password"]
+    #     )
+    #     time.sleep(3)
+    #
+    #     outreach_connections, outreach_messages, _ = linkedin_outreach.run_outreach(
+    #         outreach_driver, CONFIG
+    #     )
+    #
+    #     # Don't close — leave open for the user
+    #     print(f"  ✅ Phase 4 complete!")
+    # except Exception as e:
+    #     print(f"  ❌ Outreach error: {e}")
+    #     traceback.print_exc()
 
     # Update tracker
     tracker["total"] = tracker.get("total", 0) + total_applied

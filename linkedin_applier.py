@@ -642,37 +642,35 @@ def dismiss_modal(driver):
 def _is_title_relevant(job_title, keywords):
     """
     Check if a job title is relevant to the target keywords.
-    Uses keyword fragments to match broadly but accurately.
+    Relaxed rules for broader matching.
     """
     title_lower = job_title.lower().strip()
     if not title_lower:
         return False
 
-    # Build a set of relevant terms from the keywords being searched
-    relevant_terms = set()
-    for kw in keywords:
-        # Split each keyword into individual words and add meaningful ones
-        for word in kw.lower().split():
-            # Skip very generic words
-            if word not in ("intern", "interns", "internship", "associate", "the", "a", "an", "in", "at", "for", "of"):
-                relevant_terms.add(word)
+    # ── RULE 1: Entry-level check ──
+    intern_terms = ["intern", "trainee", "apprentice", "fellow", "associate", "candidate", "student", "graduate", "fresher"]
+    is_entry_level = any(t in title_lower for t in intern_terms)
+    
+    # ── RULE 2: Blocklist check ──
+    blocked_roles = [
+        "senior", "lead", "staff", "principal", "architect", "expert", "director", "vp", "manager",
+        "sr.", "sr ", "ii", "iii"
+    ]
+    if any(b in title_lower for b in blocked_roles):
+        return False, "Senior/Lead role blocked"
 
-    # Also add multi-word phrases from keywords for better matching
-    for kw in keywords:
-        kw_lower = kw.lower()
-        # Remove trailing "intern"/"internship" to get the role core
-        for suffix in [" intern", " internship", " associate"]:
-            if kw_lower.endswith(suffix):
-                core = kw_lower[: -len(suffix)].strip()
-                if core:
-                    relevant_terms.add(core)
+    # ── RULE 3: Target Keywords check ──
+    wanted_terms = keywords or ["product", "management", "strategy", "ai", "tech", "business", "analyst"]
+    for term in wanted_terms:
+        if term.lower() in title_lower:
+            return True, f"Matches keyword: {term}"
 
-    # Check if any relevant term appears in the title
-    for term in relevant_terms:
-        if term in title_lower:
-            return True
+    # If it's an intern/trainee role but no keywords matched, we might still want to look
+    if is_entry_level:
+        return True, "Entry-level role (intern/trainee)"
 
-    return False
+    return False, "No keywords matched"
 
 
 def apply_from_search_page(driver, config, applied_count, max_jobs, current_keywords=None):

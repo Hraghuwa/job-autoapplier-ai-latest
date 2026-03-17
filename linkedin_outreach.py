@@ -238,38 +238,10 @@ def analyze_jd(jd_text, job_title, company_name):
 def craft_connection_note(job_title, company_name, jd_text, recruiter_name, themes, config):
     """
     Craft a personalized connection note (max 300 chars).
-    Tries AI first, falls back to templates.
+    Uses the user-provided exact template.
     """
-    # Try GenAI first
-    ai_note = ai_craft_connection_note(job_title, company_name, jd_text, recruiter_name, config)
-    if ai_note:
-        print(f"        🧠 AI-crafted note ({len(ai_note)} chars)")
-        return ai_note
-
-    # Fallback to template
-    profile = config.get("profile", {})
-    name = profile.get("first_name", "Harsh")
-    college = "TAPMI"
-
-    if themes.get("is_product"):
-        note = (f"Hi! I'm {name}, MBA at {college} with 4+ yrs entrepreneurial exp. "
-                f"Excited about {job_title[:30]} at {company_name[:20]}. "
-                f"Built products 0→1, led roadmapping & GTM. Would love to connect!")
-    elif themes.get("is_ai"):
-        note = (f"Hi! I'm {name} from {college}, passionate about AI & product. "
-                f"Built an AI chatbot & hold IBM AI PM cert. "
-                f"Interested in {job_title[:25]} at {company_name[:20]}. Let's connect!")
-    elif themes.get("is_founder_office"):
-        note = (f"Hi! I'm {name}, Cofounder of a retail biz (₹2.5 Cr turnover). "
-                f"MBA at {college}. {job_title[:25]} at {company_name[:20]} "
-                f"aligns with my startup exp. Would love to connect!")
-    elif themes.get("is_business"):
-        note = (f"Hi! I'm {name}, MBA at {college}. 4+ yrs running a biz with 25% YoY growth. "
-                f"Excited about {job_title[:25]} at {company_name[:20]}. Let's connect!")
-    else:
-        note = (f"Hi! I'm {name}, MBA at {college} with 4+ yrs entrepreneurial exp. "
-                f"Very interested in {job_title[:25]} at {company_name[:20]}. Let's connect!")
-
+    note = "Hello, I’m Harsh Raghuwanshi from T.A. Pai Management Institute (TAPMI). I’m reaching out to explore Summer 2026 internships. My interest is at the intersection of tech & business (Tech Consulting, PM, BD). I’d value the chance to discuss how my MBA background can contribute to your team."
+    
     if len(note) > 300:
         note = note[:297] + "..."
     return note
@@ -375,9 +347,12 @@ def search_company_recruiters(driver, company_name, job_title):
     recruiters = []
 
     search_queries = [
-        f"{company_name} HR recruiter hiring",
+        f"{company_name} university recruiter",
+        f"{company_name} early career recruiter",
+        f"{company_name} campus recruiter",
+        f"{company_name} intern hiring",
+        f"{company_name} HR recruiter",
         f"{company_name} talent acquisition",
-        f"{company_name} hiring manager {job_title}",
     ]
 
     for query in search_queries[:2]:

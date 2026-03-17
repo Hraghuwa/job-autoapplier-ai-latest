@@ -14,136 +14,15 @@ WORKFLOW per job:
   5. Close tab → switch back → next job
 """
 
-import time
-import random
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-import smart_form_filler
+from utils.auth import google_login_flow
 
 
-def try_click(driver, element):
-    try:
-        element.click()
-        return True
-    except Exception:
-        pass
-    try:
-        driver.execute_script("arguments[0].click();", element)
-        return True
-    except Exception:
-        pass
-    return False
-
-
-def is_driver_alive(driver):
-    """Check if the browser session is still usable."""
-    try:
-        _ = driver.current_url
-        return True
-    except Exception:
-        return False
-
-
-def ensure_single_tab(driver):
-    """Close all tabs except the first one and switch to it."""
-    try:
-        while len(driver.window_handles) > 1:
-            driver.switch_to.window(driver.window_handles[-1])
-            driver.close()
-        driver.switch_to.window(driver.window_handles[0])
-    except Exception:
-        pass
-
-
-def google_login_flow(driver, platform_name, login_url, email):
-    """Generic Google login flow for any platform."""
-    print(f"\n[{platform_name}] Logging in via Google...")
+def google_login_flow_wrapper(driver, platform_name, login_url, email):
+    """Wrapper for centralized Google login flow."""
+    print(f"\n[{platform_name}] Navigating to login page...")
     driver.get(login_url)
     time.sleep(3)
-
-    # Find Google login button
-    google_btn = None
-    google_selectors = [
-        (By.XPATH, "//button[contains(text(),'Google')]"),
-        (By.XPATH, "//a[contains(text(),'Google')]"),
-        (By.XPATH, "//*[contains(text(),'Sign in with Google')]"),
-        (By.XPATH, "//*[contains(text(),'Login with Google')]"),
-        (By.XPATH, "//*[contains(text(),'Continue with Google')]"),
-        (By.CSS_SELECTOR, "[data-provider='google'], .google-login, .google-btn"),
-        (By.CSS_SELECTOR, "a[href*='google'], button[href*='google']"),
-        (By.XPATH, "//img[contains(@src,'google')]//ancestor::a | //img[contains(@src,'google')]//ancestor::button"),
-        (By.CSS_SELECTOR, ".social-login a, .social-login button"),
-    ]
-
-    for by, sel in google_selectors:
-        try:
-            btns = driver.find_elements(by, sel)
-            for btn in btns:
-                if btn.is_displayed():
-                    text = (btn.text + " " + (btn.get_attribute("aria-label") or "")).lower()
-                    if "google" in text or "google" in (btn.get_attribute("href") or ""):
-                        google_btn = btn
-                        break
-                    if not google_btn:
-                        google_btn = btn
-            if google_btn:
-                break
-        except:
-            continue
-
-    if google_btn:
-        print(f"[{platform_name}] Found Google login, clicking...")
-        try_click(driver, google_btn)
-        time.sleep(3)
-
-        # Handle Google OAuth popup
-        windows = driver.window_handles
-        if len(windows) > 1:
-            driver.switch_to.window(windows[-1])
-            time.sleep(2)
-
-            try:
-                accounts = driver.find_elements(By.CSS_SELECTOR,
-                    "div[data-email], div[data-identifier], .account-name, div[role='link']")
-                if accounts:
-                    try_click(driver, accounts[0])
-                    print(f"[{platform_name}] Selected Google account")
-                    time.sleep(5)
-                else:
-                    try:
-                        email_input = driver.find_element(By.CSS_SELECTOR, "input[type='email']")
-                        email_input.send_keys(email)
-                        email_input.send_keys(Keys.RETURN)
-                        time.sleep(3)
-                    except:
-                        print(f"[{platform_name}] ⏳ Please complete Google login manually...")
-                        time.sleep(20)
-            except Exception:
-                print(f"[{platform_name}] ⏳ Please complete Google login manually...")
-                time.sleep(20)
-
-            try:
-                if len(driver.window_handles) > 0:
-                    driver.switch_to.window(driver.window_handles[0])
-            except:
-                pass
-        else:
-            if "accounts.google.com" in driver.current_url:
-                print(f"[{platform_name}] ⏳ Please complete Google login in the browser...")
-                for _ in range(30):
-                    time.sleep(2)
-                    if platform_name.lower() in driver.current_url.lower():
-                        break
-
-        time.sleep(3)
-        print(f"[{platform_name}] ✅ Google login flow completed")
-        return True
-    else:
-        print(f"[{platform_name}] ⚠️  No Google login button found")
-        return False
+    return google_login_flow(driver, platform_name, email)
 
 
 # ─────────────────────────────────────────────
@@ -152,7 +31,7 @@ def google_login_flow(driver, platform_name, login_url, email):
 
 def unstop_login(driver, email, password):
     """Login to Unstop via Google."""
-    ok = google_login_flow(driver, "Unstop", "https://unstop.com/auth/login", email)
+    ok = google_login_flow_wrapper(driver, "Unstop", "https://unstop.com/auth/login", email)
     if ok:
         return True
 
@@ -358,7 +237,7 @@ def unstop_apply(driver, keywords, locations, max_jobs, applied_count,
 
 def naukri_login(driver, email, password):
     """Login to Naukri via Google."""
-    ok = google_login_flow(driver, "Naukri", "https://www.naukri.com/nlogin/login", email)
+    ok = google_login_flow_wrapper(driver, "Naukri", "https://www.naukri.com/nlogin/login", email)
     if ok:
         return True
 

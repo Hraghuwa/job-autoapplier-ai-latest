@@ -1,0 +1,141 @@
+/Users/hragh/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+============================================================
+🤖 JOB AUTO-APPLIER — CONCURRENT ORCHESTRATOR
+============================================================
+📅 Started: 2026-03-10 00:24
+🚀 Launching multi-agent execution...
+============================================================
+[00:24:01] 🚀 Started Agent Phase: Phase 1: LinkedIn Auto-Apply
+[00:24:01] 🚀 Started Agent Phase: Phase 2 & 3: Web Search + Form Fill
+[00:24:01] 🚀 Started Agent Phase: Phase 4: LinkedIn Outreach
+[00:24:01] 🚀 Started Agent Phase: Phase 5: Wellfound Connect
+[00:24:01] 🚀 Started Agent Phase: Phase 3: Unstop / Naukri
+
+[Wellfound] Logging in...
+[00:24:02] ❌ Finished Agent Phase: Phase 3: Unstop / Naukri | Duration: 1.65s | Applied: 0
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  🚀 MEGA JOB SEARCH ENGINE v3
+  🌐 Searching 100+ websites across the entire internet
+  📋 30 keywords | Every job → own tab
+  📍 Location: India, Remote
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  🌐 MEGA INTERNET SEARCH — 100+ websites
+  📋 Every job opens in its own tab
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  📊 Total search queries: 296
+  🔍 Starting searches...
+
+  🔎 [1/296] Tech Consulting Intern Bangalore apply (site:internshala.com OR s...
+  [Phase 4] 🔐 Logging into LinkedIn...
+
+[LinkedIn] Logging in...
+  [Phase 1] 🔐 Logging into LinkedIn...
+
+[LinkedIn] Logging in...
+[LinkedIn] Submitted login form, waiting for response...
+       → Found 2 jobs, opened in new tabs (total: 2)
+       → Page 2: 5 more jobs
+  🔎 [2/296] Tech Consulting Intern Bangalore intern (site:wellfound.com OR si...
+       → Found 9 jobs, opened in new tabs (total: 16)
+       → Page 2: 4 more jobs
+  🛑 Reached max 20 tabs limit (Google Search Page 2).
+
+  🔍 [Internshala:Tech Consulting Inte] Searching...
+[Wellfound] ✅ Logged in!
+
+════════════════════════════════════════════════════════════
+🔍 WELLFOUND: Searching 'Product Management Intern'
+   URL: https://wellfound.com/jobs?keywords=Product+Management+Intern
+════════════════════════════════════════════════════════════
+  ℹ️  [Internshala:Tech Consulting Inte] No new jobs found
+
+  ═══════════════════════════════════════════════════════
+  🎉 MEGA SEARCH COMPLETE!
+  📊 TOTAL JOBS FOUND: 20
+  📑 TABS OPEN: 21
+  🌐 Each job is in its own tab!
+  👉 Go through tabs and apply manually!
+  ⚠️  Browser stays open — take your time!
+  ═══════════════════════════════════════════════════════
+
+[Web Search] 🔍 Running 90 search queries...
+
+  [1/90] 🔎 ATS: Tech Consulting Intern
+  Query: Tech Consulting Intern "apply" (site:lever.co OR site:greenhouse.io OR site:work...
+  📋 Found 11 results, 3 new
+  Found 0 job listings
+  ⚠️  No listings found. Moving to next keyword.
+
+════════════════════════════════════════════════════════════
+🔍 WELLFOUND: Searching 'Founders Office Intern'
+   URL: https://wellfound.com/jobs?keywords=Founders+Office+Intern
+════════════════════════════════════════════════════════════
+
+  [2/90] 🔎 ATS: Product Management Intern
+  Query: Product Management Intern "apply" (site:lever.co OR site:greenhouse.io OR site:w...
+  📋 Found 10 results, 1 new
+
+  [3/90] 🔎 ATS: Business Development Intern
+  Query: Business Development Intern "apply" (site:lever.co OR site:greenhouse.io OR site...
+  📋 Found 10 results, 9 new
+
+  [4/90] 🔎 ATS: AI Management Intern
+  Query: AI Management Intern "apply" (site:lever.co OR site:greenhouse.io OR site:workda...
+  📋 Found 11 results, 2 new
+
+  [5/90] 🔎 ATS: Founder Office Intern
+  Query: Founder Office Intern "apply" (site:lever.co OR site:greenhouse.io OR site:workd...
+  Found 0 job listings
+  ⚠️  No listings found. Moving to next keyword.
+
+════════════════════════════════════════════════════════════
+🔍 WELLFOUND: Searching 'Business Analyst Intern'
+   URL: https://wellfound.com/jobs?keywords=Business+Analyst+Intern
+════════════════════════════════════════════════════════════
+  📋 Found 10 results, 1 new
+
+  [6/90] 🔎 ATS: Business Strategist Intern
+  Query: Business Strategist Intern "apply" (site:lever.co OR site:greenhouse.io OR site:...
+  Found 0 job listings
+  ⚠️  No listings found. Moving to next keyword.
+
+════════════════════════════════════════════════════════════
+🔍 WELLFOUND: Searching 'Business Strategist Intern'
+   URL: https://wellfound.com/jobs?keywords=Business+Strategist+Intern
+════════════════════════════════════════════════════════════
+  📋 Found 10 results, 9 new
+
+  [7/90] 🔎 ATS: Management Consulting Intern
+  Query: Management Consulting Intern "apply" (site:lever.co OR site:greenhouse.io OR sit...
+  Found 0 job listings
+  ⚠️  No listings found. Moving to next keyword.
+
+════════════════════════════════════════════════════════════
+🔍 WELLFOUND: Searching 'Tech Consultant Intern'
+   URL: https://wellfound.com/jobs?keywords=Tech+Consultant+Intern
+════════════════════════════════════════════════════════════
+  📋 Found 11 results, 7 new
+
+  [8/90] 🔎 ATS: Program Manager Intern
+  Query: Program Manager Intern "apply" (site:lever.co OR site:greenhouse.io OR site:work...
+[LinkedIn] ✅ Logged in successfully!
+  📋 Found 10 results, 9 new
+[LinkedIn] Submitted login form, waiting for response...
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  🤝 LINKEDIN OUTREACH AGENT
+  📋 30 keywords
+  🔍 Find HR → Analyze JD → Send personalized connect
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  🔍 Searching: 'Tech Consulting Intern'
+  Found 0 job listings
+  ⚠️  No listings found. Moving to next keyword.
+
+════════════════════════════════════════════════════════════
+🔍 WELLFOUND: Searching 'AI Management Intern'
+   URL: https://wellfound.com/jobs?keywords=AI+Management+Intern
