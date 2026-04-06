@@ -63,21 +63,8 @@ def create_driver(profile_suffix=""):
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
-    opts.add_experimental_option("detach", True)
-
-    # Persistent profile — each phase gets its own subfolder to avoid lock conflicts
-    profile_path = os.path.abspath(f"chrome_profile{profile_suffix}")
-
-    # Clear stale lock files
-    for lock in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
-        lp = os.path.join(profile_path, lock)
-        try:
-            if os.path.exists(lp) or os.path.islink(lp):
-                os.remove(lp)
-        except Exception:
-            pass
-
-    opts.add_argument(f"--user-data-dir={profile_path}")
+    # Incognito: ensures no cached login session bypasses credential-based login
+    opts.add_argument("--incognito")
 
     import glob as _glob
     wdm_path = ChromeDriverManager().install()
@@ -168,10 +155,14 @@ def run_linkedin_phase():
         traceback.print_exc()
     finally:
         if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            _stop = CONFIG.get("_stop_event")
+            if _stop and getattr(_stop, 'is_set', lambda: False)():
+                print("  [Phase 1] ⏸️  Stopped by user — browser tab preserved for inspection.")
+            else:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
     return applied
 
@@ -226,10 +217,14 @@ def run_web_search_phase():
         traceback.print_exc()
     finally:
         if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            _stop = CONFIG.get("_stop_event")
+            if _stop and getattr(_stop, 'is_set', lambda: False)():
+                print("  [Phase 2] ⏸️  Stopped by user — browser tab preserved for inspection.")
+            else:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
     return applied
 
@@ -268,10 +263,14 @@ def run_form_fill_phase():
         traceback.print_exc()
     finally:
         if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            _stop = CONFIG.get("_stop_event")
+            if _stop and _stop.is_set():
+                print("  [Phase 3] ⏸️  Stopped by user — browser tab preserved for inspection.")
+            else:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
     return filled
 
@@ -334,10 +333,14 @@ def run_wellfound_phase():
         traceback.print_exc()
     finally:
         if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            _stop = CONFIG.get("_stop_event")
+            if _stop and _stop.is_set():
+                print("  [Phase 4] ⏸️  Stopped by user — browser tab preserved for inspection.")
+            else:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
     return applied
 
@@ -378,13 +381,17 @@ def main():
 
     print("=" * 60)
 
+    import concurrent.futures
     with ThreadPoolExecutor(max_workers=len(phases)) as executor:
         futures = {executor.submit(fn): fn.__name__ for fn in phases}
-        for future in as_completed(futures):
-            name = futures[future]
+        # The user instructed to wrap future.result() with a 600s timeout.
+        # Doing this directly on the futures items ensures the timeout applies to the task runtime.
+        for future, name in futures.items():
             try:
-                result = future.result()
+                result = future.result(timeout=600)
                 print(f"\n[{name}] ✅ Completed — result: {result}")
+            except concurrent.futures.TimeoutError:
+                print(f"\n[{name}] 🛑 Failed: 10-minute timeout exceeded.")
             except Exception as e:
                 print(f"\n[{name}] ❌ Failed: {e}")
                 traceback.print_exc()

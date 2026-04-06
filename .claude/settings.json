@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npx shadcn-ui@latest init --defaults)",
+      "Bash(npx shadcn@latest init --defaults)",
+      "Bash(npx shadcn@latest add button card input label badge progress tabs dialog toast skeleton select textarea separator avatar dropdown-menu checkbox --yes)",
+      "Bash(npx shadcn@latest add button card input label badge progress tabs dialog skeleton select textarea separator avatar dropdown-menu checkbox --yes)",
+      "Bash(npm run:*)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/login)"
+    ],
+    "additionalDirectories": [
+      "/private/tmp",
+      "/Users/hragh/Downloads/res/frontend/app/(app)/jobs"
+    ]
+  }
+}

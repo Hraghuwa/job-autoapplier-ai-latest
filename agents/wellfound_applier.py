@@ -131,73 +131,43 @@ def close_popups(driver):
         pass
 
 
-def _is_title_relevant(job_title, keyword):
+def _is_title_relevant(job_title: str, keyword: str, config: dict = None) -> bool:
     """
-    Check if a job title is relevant to the current search keyword.
-    RULES:
-      1. Must be an intern/trainee role (not full-time)
-      2. Must NOT be a blocked role (engineer, developer, HR, sales, etc.)
-      3. Must match at least one wanted management/strategy/AI term
+    Check if a job title matches the user's search keyword using word-boundary
+    matching with seniority and intern-type enforcement.
     """
+    import re as _re
     title_lower = job_title.lower().strip()
     if not title_lower:
         return False
 
-    # ── RULE 1: Must be an intern/trainee role ──
-    intern_terms = ["intern", "trainee", "apprentice"]
-    is_intern = any(t in title_lower for t in intern_terms)
-    if not is_intern:
+    cfg = config or {}
+    employment_types = cfg.get("employment_types", [])
+    INTERN_WORDS = ["intern", "trainee", "apprentice", "graduate", "fresher"]
+    SENIORITY = ["senior", "sr.", "lead", "principal", "director", "vp", "head",
+                 "chief", "staff", "architect", "president", "executive"]
+
+    searching_intern = (
+        any(t.lower() in ("internship", "trainee", "fresher") for t in employment_types)
+        or any(w in keyword.lower() for w in INTERN_WORDS)
+    )
+
+    # Word-boundary match: all meaningful words in keyword must appear in title
+    kw_words = [w for w in _re.split(r'\W+', keyword.lower()) if len(w) > 2]
+    if not kw_words:
         return False
+    all_words_match = all(_re.search(r'\b' + _re.escape(w) + r'\b', title_lower) for w in kw_words)
 
-    # ── RULE 2: BLOCKLIST — roles the user does NOT want ──
-    blocked_roles = [
-        "engineer", "developer", "devops", "sre", "backend", "frontend",
-        "full stack", "fullstack", "software", "sde", "web dev",
-        "designer", "graphic design", "ui/ux", "ux", "ui design",
-        "visual design", "motion design", "illustration",
-        "content writ", "content market", "copywriter", "seo",
-        "video edit", "editor", "photographer", "photo shoot", "fashion",
-        "sales", "lead gen", "lead generation", "telesales", "bdr",
-        "human resource", "hr ", "hr intern", "recruiter", "talent acquisition",
-        "customer support", "customer service", "support exec",
-        "data entry", "typist", "clerk", "accounting", "bookkeep",
-        "legal", "compliance officer", "shopify", "wordpress",
-        "android", "ios developer", "flutter", "react native",
-        "qa ", "quality assurance", "tester", "testing",
-        "community manager", "social media",
-        "marketing", "brand",
-    ]
-    for blocked in blocked_roles:
-        if blocked in title_lower:
+    if all_words_match:
+        # Seniority enforcement: skip senior titles if user didn't ask for them
+        kw_has_seniority = any(s in keyword.lower() for s in SENIORITY)
+        title_has_seniority = any(s in title_lower for s in SENIORITY)
+        if title_has_seniority and not kw_has_seniority:
             return False
-
-    # ── RULE 3: ALLOWLIST — management/strategy/AI intern roles ──
-    wanted_terms = [
-        "management", "manager", "managing",
-        "founder", "chief of staff", "ceo office",
-        "strateg", "strategy", "strategist",
-        "business develop", "biz dev", "bd intern",
-        "consult", "advisory",
-        "operations", "ops intern", "ops associate",
-        "product", "pm intern",
-        "ai ", "artificial intelligence", "machine learning",
-        "growth", "gtm", "go-to-market",
-        "venture", "investment",
-        "analyst", "research",
-        "general management", "gm intern",
-        "tech", "digital",
-    ]
-    for term in wanted_terms:
-        if term in title_lower:
-            return True
-
-    # Also check keyword-specific terms
-    kw_lower = keyword.lower()
-    for word in kw_lower.split():
-        if word not in ("intern", "interns", "internship", "associate", "trainee",
-                        "the", "a", "an", "in", "at", "for", "of"):
-            if word in title_lower:
-                return True
+        # Intern enforcement: if searching for internship, title must indicate it
+        if searching_intern and not any(w in title_lower for w in INTERN_WORDS):
+            return False
+        return True
 
     return False
 
@@ -368,6 +338,7 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
     if applied_urls is None:
         applied_urls = set()
 
+    _stop = config.get("_stop_event")
     new_urls = []
     default_note = config.get("cover_letter", "").strip()[:500] or (
         "I am excited about this role and believe my background in product management, "
@@ -377,6 +348,9 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
 
     for keyword in keywords:
         if applied_count >= max_jobs:
+            break
+        if _stop and _stop.is_set():
+            print("[Wellfound] 🛑 Stop requested — exiting.")
             break
 
         keyword_applied = 0
@@ -407,7 +381,11 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
         time.sleep(2)
 
         # Collect job listing URLs
-        job_links = _collect_job_links(driver)
+        try:
+            job_links = _collect_job_links(driver)
+        except Exception as e:
+            print(f"  ❌ Failed to collect job links for '{keyword}': {type(e).__name__}: {e}")
+            continue
         print(f"  Found {len(job_links)} job listings")
 
         if not job_links:
@@ -416,6 +394,9 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
 
         for idx, (job_url, job_title, company_name) in enumerate(job_links):
             if applied_count >= max_jobs:
+                break
+            if _stop and _stop.is_set():
+                print("[Wellfound] 🛑 Stop requested — exiting.")
                 break
 
             # ── DEDUP CHECK ──
@@ -431,7 +412,7 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
             print(f"\n  📋 [{keyword_applied + 1}] {job_title} @ {company_name}")
 
             # ── TITLE RELEVANCE CHECK ──
-            if not _is_title_relevant(job_title, keyword):
+            if not _is_title_relevant(job_title, keyword, config):
                 print(f"  ⏭️  Skipping (not relevant): {job_title}")
                 continue
 
@@ -474,7 +455,7 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                     pass
 
             except Exception as e:
-                print(f"  ❌ Error: {e}")
+                print(f"  ❌ Error on '{job_title}' @ {company_name} ({job_url}): {type(e).__name__}: {e}")
                 ensure_single_tab(driver)
 
             # Delay between jobs
@@ -517,7 +498,7 @@ def _collect_job_links(driver):
 
     all_selectors = primary_selectors + fallback_selectors
 
-    for sel in all_selectors:
+    def _process_selector(sel):
         try:
             elements = driver.find_elements(By.CSS_SELECTOR, sel)
             for el in elements:
@@ -574,7 +555,18 @@ def _collect_job_links(driver):
 
                 job_links.append((href, title[:80], company[:60]))
         except Exception:
-            continue
+            pass
+
+    for sel in all_selectors:
+        _process_selector(sel)
+
+    if not job_links:
+        try:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(3)
+            _process_selector("a[href*='wellfound.com/jobs']")
+        except Exception:
+            pass
 
     # If primary selectors found jobs, skip fallback results
     # (avoids duplicates from different selectors)

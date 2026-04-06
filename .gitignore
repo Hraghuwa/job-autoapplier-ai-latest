@@ -7,3 +7,16 @@ __pycache__/
 config.py
 applied_jobs.json
 .DS_Store
+chrome_profile/
+chrome_profile_*/
+resume.pdf
+*.pdf
+users/
+
+# New platform
+backend/.env
+frontend/.env.local
+uploads/
+*.db
+backend.db
+jobagent.db

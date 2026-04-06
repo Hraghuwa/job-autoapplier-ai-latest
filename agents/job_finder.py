@@ -254,8 +254,13 @@ def google_mega_search(driver, keywords, config, applied_urls, max_tabs=20):
                 new_urls = new_urls[:space_left]
                 found_urls.extend(new_urls)
                 # Open each new URL in its own tab
+                search_tab = driver.current_window_handle
                 for url in new_urls:
                     open_in_new_tab(driver, url)
+                    try:
+                        driver.switch_to.window(search_tab)
+                    except:
+                        pass
                     try:
                         # Attempt to autofill form immediately on the new tab
                         windows = driver.window_handles
@@ -293,8 +298,13 @@ def google_mega_search(driver, keywords, config, applied_urls, max_tabs=20):
                             space_left = max_tabs - len(found_urls)
                             page2_urls = page2_urls[:space_left]
                             found_urls.extend(page2_urls)
+                            search_tab = driver.current_window_handle
                             for url in page2_urls:
                                 open_in_new_tab(driver, url)
+                                try:
+                                    driver.switch_to.window(search_tab)
+                                except:
+                                    pass
                             print(f"       → Page 2: {len(page2_urls)} more jobs")
                             
                             if len(found_urls) >= max_tabs:
@@ -363,8 +373,13 @@ def search_platform_open_tabs(driver, platform_name, search_urls, selectors, dom
     # Open ALL found jobs in new tabs
     if new_found:
         print(f"  📋 [{platform_name}] Found {len(new_found)} jobs, opening in tabs...")
+        search_tab = driver.current_window_handle
         for url in new_found:
             open_in_new_tab(driver, url)
+            try:
+                driver.switch_to.window(search_tab)
+            except:
+                pass
     else:
         print(f"  ℹ️  [{platform_name}] No new jobs found")
 
@@ -448,8 +463,13 @@ def crawl_career_pages(driver, applied_urls, found_urls, max_new_tabs=20):
 
     if new_found:
         print(f"  📋 [Career Pages] Found {len(new_found)} jobs, opening in tabs...")
+        search_tab = driver.current_window_handle
         for url in new_found:
             open_in_new_tab(driver, url)
+            try:
+                driver.switch_to.window(search_tab)
+            except:
+                pass
     else:
         print(f"  ℹ️  [Career Pages] No new jobs found")
 

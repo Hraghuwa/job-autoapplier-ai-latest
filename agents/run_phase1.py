@@ -43,15 +43,26 @@ def main():
 
     print("  [LinkedIn] ✅ Logged in. Starting agents...\n")
 
+    _stop = CONFIG.get("_stop_event")
     try:
         for i, agent in enumerate(agents, 1):
+            if _stop and _stop.is_set():
+                print("  [Phase 1] 🛑 Stop requested — exiting agent loop.")
+                break
             count = run_linkedin_agent(agent, i, len(agents), tracker, shared_driver=driver)
             total_applied += count
             if i < len(agents):
+                if _stop and _stop.is_set():
+                    break
                 print(f"\n  ⏳ Next agent in 5s...")
                 time.sleep(5)
     finally:
-        safe_quit(driver)
+        _stop = CONFIG.get("_stop_event")
+        if _stop and _stop.is_set():
+            print("  [Phase 1] ⏸️  Stopped by user — browser tab preserved for inspection.")
+            # Do NOT quit driver — leave the browser open so user can see where it stopped
+        else:
+            safe_quit(driver)
 
     print(f"\n  ✅ PHASE 1 COMPLETE: {total_applied} LinkedIn applications")
 
@@ -65,6 +76,8 @@ def main():
     print(f"📊 LinkedIn auto-applied: {total_applied}")
     print(f"📊 Total tracked URLs: {len(get_applied_urls(tracker))}")
     print(f"{'=' * 60}")
+
+    return total_applied
 
 
 if __name__ == "__main__":

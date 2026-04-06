@@ -1,5 +1,6 @@
 # ============================================================
-#  ✏️  FILL IN YOUR DETAILS HERE BEFORE RUNNING
+#  ✏️  COPY THIS FILE TO config.py AND FILL IN YOUR DETAILS
+#  cp config.example.py config.py
 # ============================================================
 
 CONFIG = {
@@ -11,42 +12,42 @@ CONFIG = {
     # ──────────────────────────────────────────
     #  YOUR DETAILS (pre-filled from your resume)
     # ──────────────────────────────────────────
-    "name": "Harsh Raghuwanshi",
-    "phone": "8109580642",
-    "email": "harsh2.tapmiblr2025@learner.manipal.edu",
+    "name": "Your Full Name",
+    "phone": "YOUR_PHONE_NUMBER",
+    "email": "your.email@example.com",
 
     # --- Your Resume (UPDATE THIS PATH!) ---
-    # Windows example: "C:/Users/Harsh/Downloads/Harsh_Resume.pdf"
-    # Mac example:     "/Users/harsh/Downloads/Harsh_Resume.pdf"
-    "resume_path": "/Users/hragh/Desktop/251620140016_HarshRaghuwanshi_TAPMIBLR-2.pdf",
+    # Windows example: "C:/Users/YourName/Downloads/Your_Resume.pdf"
+    # Mac example:     "/Users/yourname/Downloads/Your_Resume.pdf"
+    "resume_path": "/path/to/your/resume.pdf",
 
     # --- LinkedIn Credentials ---
     "linkedin": {
-        "email": "hraghuwanshi3110@gmail.com",
-        "password": "YOUR_LINKEDIN_PASSWORD",     # <-- Fill this!
+        "email": "your.linkedin.email@example.com",
+        "password": "YOUR_LINKEDIN_PASSWORD",
     },
 
     # --- Internshala Credentials ---
     "internshala": {
-        "email": "hraghuwanshi59@gmail.com",
-        "password": "YOUR_INTERNSHALA_PASSWORD",  # <-- Fill this!
+        "email": "your.internshala.email@example.com",
+        "password": "YOUR_INTERNSHALA_PASSWORD",
     },
 
     # --- Unstop Credentials ---
     "unstop": {
-        "email": "harsh2.tapmiblr2025@learner.manipal.edu",
-        "password": "YOUR_UNSTOP_PASSWORD",       # <-- Fill this!
+        "email": "your.unstop.email@example.com",
+        "password": "YOUR_UNSTOP_PASSWORD",
     },
 
     # --- Naukri Credentials ---
     "naukri": {
-        "email": "hraghuwanshi59@gmail.com",
-        "password": "YOUR_NAUKRI_PASSWORD",       # <-- Fill this!
+        "email": "your.naukri.email@example.com",
+        "password": "YOUR_NAUKRI_PASSWORD",
     },
 
     # --- Wellfound Credentials ---
     "wellfound": {
-        "email": "hraghu3110@outlook.com",
+        "email": "your.wellfound.email@example.com",
         "password": "YOUR_WELLFOUND_PASSWORD",
     },
 
@@ -55,6 +56,8 @@ CONFIG = {
     # ──────────────────────────────────────────
     "keywords": [
         "Product Management Intern",
+        "Project Management Intern",
+        "GTM Intern",
         "Founders Office Intern",
         "Business Analyst Intern",
         "Business Strategist Intern",
@@ -71,25 +74,25 @@ CONFIG = {
         "Remote",
     ],
 
-    # Filter for recently posted jobs (used by platforms that support it)
     "recently_posted": True,
 
     # ──────────────────────────────────────────
-    # --- Role Agents (each agent runs across ALL platforms sequentially) ---
+    # --- Role Agents ---
     # ──────────────────────────────────────────
     "role_agents": [
         {
             "name": "AI & Management",
             "emoji": "🧠",
             "keywords": [
+                "Product Management Intern",
+                "Project Management Intern",
+                "GTM Intern",
+                "Tech Consulting Intern",
                 "AI Management Intern",
-                "AI Intern",
-                "AI Product Manager Intern",
-                "AI Strategy Intern",
-                "Generative AI Intern",
-                "AI Business Analyst",
-                "Machine Learning Intern",
-                "AI Operations Intern",
+                "Founder Office Intern",
+                "Business Strategist Intern",
+                "Management Consulting Intern",
+                "Program Manager Intern",
             ],
         },
         {
@@ -149,77 +152,67 @@ CONFIG = {
                 "Management Trainee",
                 "Management Intern",
                 "Growth Intern",
+                "GTM Intern",
+                "Product Management Intern",
                 "Program Manager Intern",
                 "Project Manager Intern",
+                "Project Management Intern",
             ],
         },
     ],
 
-    # --- Cover Letter (auto-filled from your background) ---
+    # --- Cover Letter ---
     "cover_letter": """
-I am Harsh Raghuwanshi, currently pursuing MBA TECH at TAPMI Bengaluru (2025-2027).
+I am [Your Name], currently pursuing [Your Degree] at [Your College] (2025-2027).
 I am very excited to apply for this internship opportunity.
 
-I bring 4+ years of hands-on entrepreneurial experience as Co-founder of Apna Supermarket,
-where I led product management, GTM strategy, and growth initiatives — achieving 25% annual
-revenue growth and scaling turnover to approximately ₹2.5 Cr. I have strong experience in
-product roadmapping, requirements gathering, story mapping, design thinking, and agile
-methodologies.
-
-I am skilled in ERP, CRM, AI tools (Gemini, Claude, n8n), Figma, Power BI, SQL, and Python.
-I hold an IBM AI Product Manager certification and have built AI-driven products including
-chatbots and automation systems.
-
-My background in product lifecycle management, market research, data-driven decision making,
-and cross-functional team leadership makes me a strong fit for this role.
-
-I am eager to contribute meaningfully to your organization during the 3-month internship period.
+[Write your cover letter here...]
 
 Warm regards,
-Harsh Raghuwanshi
-MBA TECH | TAPMI Bengaluru
-8109580642 | harsh2.tapmiblr2025@learner.manipal.edu
+[Your Name]
+[Your Degree] | [Your College]
+[Phone] | [Email]
 """.strip(),
 
     # --- Profile for smart form filling ---
     "profile": {
-        "full_name": "Harsh Raghuwanshi",
-        "first_name": "Harsh",
-        "last_name": "Raghuwanshi",
+        "full_name": "Your Full Name",
+        "first_name": "First",
+        "last_name": "Last",
         "gender": "Male",
         "age": "24",
-        "phone": "8109580642",
-        "email": "hraghu3110@outlook.com",
-        "alt_email": "harsh2.tapmiblr2025@learner.manipal.edu",
-        "city": "Bangalore",
-        "location": "Bangalore",
+        "phone": "YOUR_PHONE",
+        "email": "your.email@example.com",
+        "alt_email": "your.alt.email@example.com",
+        "city": "Your City",
+        "location": "Your City",
         "country": "India",
-        "linkedin": "https://www.linkedin.com/in/harsh-raghuwanshi-570868359/",
+        "linkedin": "https://www.linkedin.com/in/your-profile/",
+        "personal_website": "",
 
         # Education
         "degree": "MBA",
         "course": "MBA",
         "branch": "Technology Management",
-        "university": "Manipal/T.A Pai Management Institute",
-        "college": "Manipal/T.A Pai Management Institute",
+        "university": "Your University",
+        "college": "Your College",
         "graduation_year": "2027",
 
-        # Education marks (separate for each level)
-        "tenth_marks": "85",       # 10th percentage
-        "twelfth_marks": "78",     # 12th percentage
-        "grad_cgpa": "7.80",       # Graduation CGPA (BA Programme, Delhi University)
-        "mba_cgpa": "6.97",        # MBA CGPA (TAPMI)
-        "cgpa": "7.80",            # Default CGPA (graduation)
-        "percentage": "78",        # Default percentage (12th)
+        "tenth_marks": "85",
+        "twelfth_marks": "78",
+        "grad_cgpa": "7.80",
+        "mba_cgpa": "6.97",
+        "cgpa": "7.80",
+        "percentage": "78",
 
-        "previous_degree": "BA Programme (Political Science & Computer Applications)",
-        "previous_university": "University of Delhi",
+        "previous_degree": "Your Previous Degree",
+        "previous_university": "Your Previous University",
         "previous_cgpa": "7.80",
 
         # Experience
         "years_experience": "4",
-        "current_company": "Apna Supermarket",
-        "current_role": "Cofounder",
+        "current_company": "Your Company",
+        "current_role": "Your Role",
         "internship_duration": "3 months",
         "availability": "01/04/2026",
         "join_date": "01/04/2026",
@@ -232,26 +225,21 @@ MBA TECH | TAPMI Bengaluru
         "willing_to_relocate": "Yes",
         "has_laptop": "Yes",
 
-        # AI / Product experience
         "has_product_ai_experience": "Yes",
-        "tools_used": "Google AI Studio, Anti Gravity, Replit, Gemini, Claude",
+        "tools_used": "Gemini, Claude, Python, SQL",
         "rag_explanation": "Sourcing information directly from the origin eliminates hallucinations.",
 
-        # Google Form specific
-        "google_form_name": "Harsh Raghuwanshi",
-        "google_form_mobile": "8109580642",
-        "google_form_email": "hraghu3110@outlook.com",
-        "google_form_college": "Manipal/T.A Pai Management Institute",
+        "google_form_name": "Your Full Name",
+        "google_form_mobile": "YOUR_PHONE",
+        "google_form_email": "your.email@example.com",
+        "google_form_college": "Your College",
         "google_form_passing_year": "2027",
 
-        # Skills
-        "skills": "Product Management, Product Roadmapping, Requirements Gathering, Story Mapping, Design Thinking, Market Research, Data Analysis, Python, SQL, Power BI, Figma, ERP, CRM, AI Tools (Gemini, Claude), n8n, Shopify, GTM Strategy",
-        "tools": "Google AI Studio, Anti Gravity, Replit, Gemini, Claude, Figma, Python, SQL, Power BI, n8n",
+        "skills": "Product Management, Business Analysis, Python, SQL, Power BI, Figma",
+        "tools": "Gemini, Claude, Figma, Python, SQL, Power BI",
 
-        # Certifications
-        "certifications": "IBM AI Product Manager, Stanford IoT Fundamentals, AWS Cloud Practitioner (Pursuing), Finlatics Generative AI Programme",
+        "certifications": "Your Certifications Here",
 
-        # Quick answers for common form fields
         "work_authorization": "Yes",
         "require_sponsorship": "No",
         "legally_authorized": "Yes",
@@ -265,34 +253,12 @@ MBA TECH | TAPMI Bengaluru
         "enabled": True,
         "max_results_per_query": 15,
         "target_companies": [
-            # Big Tech
-            "google", "microsoft", "amazon", "apple", "meta",
-            "atlassian", "adobe", "salesforce", "sap", "oracle",
-            "notion", "stripe", "twilio", "databricks", "snowflake",
-            # Indian Unicorns & Startups
-            "flipkart", "razorpay", "cred", "meesho", "swiggy",
-            "zomato", "paytm", "phonepe", "groww", "zerodha",
-            "freshworks", "zoho", "ola", "myntra", "nykaa",
-            "unacademy", "byju", "upgrad", "sharechat", "dream11",
-            "slice", "jupiter", "bharatpe", "lenskart", "boat",
-            "mamaearth", "rapido", "urbancompany", "curefit",
-            "indmoney", "smallcase", "dunzo", "spinny", "cars24",
-            "delhivery", "shiprocket", "cleartax", "chargebee",
-            "postman", "browserstack", "hasura", "razorpay",
-            "vedantu", "physicswallah", "scaler", "interviewbit",
-            # Consulting
-            "bcg", "mckinsey", "bain", "accenture", "deloitte",
-            "kpmg", "ey", "pwc", "capgemini", "wipro",
-            "tcs", "infosys", "cognizant", "hcl",
-            # Others
-            "uber", "grab", "airbnb", "netflix",
+            "google", "microsoft", "amazon", "meta", "flipkart",
+            "razorpay", "swiggy", "zomato", "freshworks", "zoho",
         ],
         "ats_domains": [
             "lever.co", "greenhouse.io", "workday.com",
-            "smartrecruiters.com", "icims.com", "ashbyhq.com",
-            "breezy.hr", "bamboohr.com", "recruitee.com",
-            "freshteam.com", "zohorecruit.com", "cutshort.io",
-            "darwinbox.com", "keka.com", "hirist.com",
+            "smartrecruiters.com", "ashbyhq.com", "cutshort.io",
         ],
     },
 
@@ -300,18 +266,19 @@ MBA TECH | TAPMI Bengaluru
     # --- Limits ---
     # ──────────────────────────────────────────
     "max_jobs_per_day": 100,
-    "min_per_keyword": 10,  # Apply to at least 10 jobs per keyword
-    "delay_between_applies_sec": (3, 8),   # random delay range in seconds
+    "min_per_keyword": 10,
+    "max_outreach_per_run": 20,
+    "delay_between_applies_sec": (3, 8),
 
     # ──────────────────────────────────────────
     # --- Continuous Mode ---
     # ──────────────────────────────────────────
-    "continuous_mode": True,         # 🔁 Keep looping forever
-    "cycle_delay_minutes": 30,       # ⏱️  Wait between cycles (minutes)
+    "continuous_mode": True,
+    "cycle_delay_minutes": 30,
 
     # ──────────────────────────────────────────
     # --- Behaviour ---
     # ──────────────────────────────────────────
-    "headless": False,    # Set True to run browser in background
-    "dry_run": False,      # ⚠️ SET TO False WHEN READY TO ACTUALLY APPLY!
+    "headless": False,
+    "dry_run": False,
 }

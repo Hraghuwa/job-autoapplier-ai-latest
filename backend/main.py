@@ -1,0 +1,138 @@
+import asyncio
+import json
+from typing import Dict, Set, Optional
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi.middleware.cors import CORSMiddleware
+from jose import JWTError, jwt
+
+from backend.config import settings
+from backend.database import engine
+import backend.models  # noqa: F401 — imports all models, registers with database.Base
+from backend.routers import auth, onboarding, agents, jobs, users, payments, admin, resumes, ai
+
+# ── In-memory WebSocket connection manager (Redis fallback) ───────────────────
+class ConnectionManager:
+    def __init__(self):
+        self.connections: Dict[str, Set[WebSocket]] = {}
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def register(self, user_id: str, ws: WebSocket):
+        self.connections.setdefault(user_id, set()).add(ws)
+
+    def unregister(self, user_id: str, ws: WebSocket):
+        self.connections.get(user_id, set()).discard(ws)
+
+    async def broadcast(self, user_id: str, message: str):
+        for ws in list(self.connections.get(user_id, [])):
+            try:
+                await ws.send_text(message)
+            except Exception:
+                self.connections.get(user_id, set()).discard(ws)
+
+    def send_from_thread(self, user_id: str, message: str):
+        """Called from background threads — schedules broadcast on the stored event loop.
+        Never calls asyncio.get_event_loop() from a thread: in Python 3.10+ that returns
+        a new (non-running) loop, causing run_coroutine_threadsafe to silently fail.
+        """
+        loop = self.loop
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.broadcast(user_id, message), loop)
+        # else: app not yet started or shutting down — drop silently
+
+
+manager = ConnectionManager()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from backend.database import Base
+    import backend.models  # noqa — ensure all models are registered before create_all
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    manager.loop = asyncio.get_event_loop()
+    yield
+
+
+app = FastAPI(title="JobAgent API", version="1.0.0", lifespan=lifespan)
+
+_allowed_origins = [settings.frontend_url]
+if settings.frontend_url not in ("http://localhost:3000", "http://localhost:3001"):
+    _allowed_origins += ["http://localhost:3000", "http://localhost:3001"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Routers ───────────────────────────────────────────────────────────────────
+app.include_router(auth.router,       prefix="/auth",       tags=["auth"])
+app.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
+app.include_router(agents.router,     prefix="/agents",     tags=["agents"])
+app.include_router(jobs.router,       prefix="/jobs",       tags=["jobs"])
+app.include_router(users.router,      prefix="/users",      tags=["users"])
+app.include_router(payments.router,   prefix="/payments",   tags=["payments"])
+app.include_router(admin.router,      prefix="/admin",      tags=["admin"])
+app.include_router(resumes.router,    prefix="/resumes",    tags=["resumes"])
+app.include_router(ai.router,         prefix="/ai",         tags=["ai"])
+
+
+# ── WebSocket — live agent feed ───────────────────────────────────────────────
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Query("")):
+    # Validate JWT token before accepting connection
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        if payload.get("sub") != user_id:
+            await websocket.close(code=4003)
+            return
+    except JWTError:
+        await websocket.close(code=4001)
+        return
+    await websocket.accept()
+    manager.register(user_id, websocket)
+
+    # Try Redis pub/sub for Celery workers; in-memory handles background threads
+    redis_task = None
+    try:
+        import redis.asyncio as aioredis
+        redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe(f"user:{user_id}:progress")
+
+        async def redis_reader():
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    await websocket.send_text(message["data"])
+
+        redis_task = asyncio.create_task(redis_reader())
+    except Exception:
+        redis_client = None
+        pubsub = None
+
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        manager.unregister(user_id, websocket)
+        if redis_task:
+            redis_task.cancel()
+        if pubsub:
+            try:
+                await pubsub.unsubscribe(f"user:{user_id}:progress")
+                await redis_client.aclose()
+            except Exception:
+                pass
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "ws_connections": {k: len(v) for k, v in manager.connections.items()}}
+
+

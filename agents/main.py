@@ -54,7 +54,15 @@ def load_tracker():
 
 def save_tracker(tracker):
     with open(TRACKER_FILE, "w") as f:
-        json.dump(tracker, f, indent=2)
+        try:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX)
+            json.dump(tracker, f, indent=2)
+            fcntl.flock(f, fcntl.LOCK_UN)
+        except ImportError:
+            # fcntl not available on Windows — write without lock
+            # Sequential execution (Fix 6) makes this safe in practice
+            json.dump(tracker, f, indent=2)
 
 def get_applied_urls(tracker):
     return set(tracker.get("applied_urls", []))
@@ -83,22 +91,9 @@ def create_driver(headless=False):
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_argument("--disable-blink-features=AutomationControlled")
-    
-    # ── PERSISTENT PROFILE (Saves Google/LinkedIn logins) ──
-    # This creates a 'chrome_profile' folder in the project directory
-    profile_path = os.path.abspath("chrome_profile")
-    # Clear stale lock files that prevent Chrome from starting after a crash
-    for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
-        lock_path = os.path.join(profile_path, lock_file)
-        try:
-            if os.path.exists(lock_path) or os.path.islink(lock_path):
-                os.remove(lock_path)
-        except Exception:
-            pass
-    options.add_argument(f"--user-data-dir={profile_path}")
-    
-    # Keep browser open after script ends
-    options.add_experimental_option("detach", True)
+    # Use incognito so no cached session bypasses login —
+    # the agent always logs in fresh using the credentials from the DB.
+    options.add_argument("--incognito")
 
     # webdriver-manager returns wrong path on newer Chrome; find the binary directly
     import glob as _glob
@@ -116,12 +111,15 @@ def create_driver(headless=False):
 
 
 def safe_quit(driver):
-    """
-    User requested: PROCEED TO NOT CLOSE THE TAB.
-    We skip driver.quit() so tabs stay open for manual review.
-    """
-    print("  🌐 Browser persistence active (tabs left open).")
-    pass
+    _stop = CONFIG.get("_stop_event")
+    if _stop and getattr(_stop, 'is_set', lambda: False)():
+        print("  🛑 Stop requested: Leaving browser open for review.")
+        return
+    try:
+        driver.quit()
+        print("  🌐 Browser closed.")
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────

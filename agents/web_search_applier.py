@@ -481,23 +481,22 @@ def _submit_application(driver, config):
             btns = driver.find_elements(By.XPATH, xpath)
             for btn in btns:
                 if btn.is_displayed() and btn.is_enabled():
-                    # btn_text = btn.text.strip() or btn.get_attribute("value") or "Submit"
-                    # print(f"    ✅ Clicking submit: '{btn_text[:30]}'")
-                    # try_click(driver, btn)
-                    print("    ✅ Check point reached. Skipping submit step as requested.")
+                    btn_text = btn.text.strip() or btn.get_attribute("value") or "Submit"
+                    print(f"    ✅ Clicking submit: '{btn_text[:30]}'")
+                    try_click(driver, btn)
                     time.sleep(1)
 
                     # Verify submission
-                    # try:
-                    #     body = driver.find_element(By.TAG_NAME, "body").text.lower()
-                    #     if any(t in body for t in [
-                    #         "success", "submitted", "thank you", "applied",
-                    #         "received", "congratulations", "confirmation"
-                    #     ]):
-                    #         print("    ✅ Application submitted successfully!")
-                    #         return True
-                    # except Exception:
-                    #     pass
+                    try:
+                        body = driver.find_element(By.TAG_NAME, "body").text.lower()
+                        if any(t in body for t in [
+                            "success", "submitted", "thank you", "applied",
+                            "received", "congratulations", "confirmation"
+                        ]):
+                            print("    ✅ Application submitted successfully!")
+                            return True
+                    except Exception:
+                        pass
                     # Assume submitted if button was clicked
                     return True
         except Exception:
@@ -517,6 +516,11 @@ def apply_to_job_url(driver, url, config, dry_run=False):
     Navigate to a job URL, detect ATS type, fill form, and apply.
     Returns True if application was submitted (or attempted).
     """
+    # Check stop event at entry — avoids starting a 30s fill if already stopped
+    _stop = config.get("_stop_event")
+    if _stop and _stop.is_set():
+        return False
+
     print(f"\n    🌐 Opening: {url[:80]}...")
 
     try:
@@ -554,6 +558,9 @@ def apply_to_job_url(driver, url, config, dry_run=False):
         }
 
         handler = handlers.get(ats_type, handle_generic_apply)
+        # Check stop again right before the potentially long form-fill step
+        if _stop and _stop.is_set():
+            return False
         success = handler(driver, config)
 
         if success:
@@ -596,11 +603,15 @@ def search_and_apply(driver, config, applied_urls=None):
     all_job_urls = []
     new_applied_urls = []
     applied_count = 0
+    _stop = config.get("_stop_event")
 
     print(f"\n[Web Search] 🔍 Running {len(queries)} search queries...")
 
     # Phase 1: Collect all job URLs from Google
     for i, (query, label) in enumerate(queries):
+        if _stop and _stop.is_set():
+            print("[Web Search] 🛑 Stop requested — exiting search.")
+            break
         if not is_driver_alive(driver):
             print("[Web Search] ❌ Browser died, stopping")
             break
@@ -608,7 +619,11 @@ def search_and_apply(driver, config, applied_urls=None):
         print(f"\n  [{i+1}/{len(queries)}] 🔎 {label}")
         print(f"  Query: {query[:80]}...")
 
-        urls = google_search_jobs(driver, query, max_results)
+        try:
+            urls = google_search_jobs(driver, query, max_results)
+        except Exception as e:
+            print(f"  ❌ Google search failed for '{label}': {type(e).__name__}: {e}")
+            continue
         new_urls = [u for u in urls if u not in applied_urls and u not in all_job_urls]
 
         print(f"  📋 Found {len(urls)} results, {len(new_urls)} new")
@@ -633,12 +648,15 @@ def search_and_apply(driver, config, applied_urls=None):
     print(f"\n[Web Search] 🎯 Applying to {len(all_job_urls)} jobs...")
 
     for i, url in enumerate(all_job_urls):
+        if _stop and _stop.is_set():
+            print("[Web Search] 🛑 Stop requested — exiting apply.")
+            break
         if not is_driver_alive(driver):
             print("[Web Search] ❌ Browser died, stopping")
             break
 
         print(f"\n{'─' * 50}")
-        print(f"  [{i+1}/{len(all_job_urls)}] Applying...")
+        print(f"  [{i+1}/{len(all_job_urls)}] Applying: {url[:80]}")
 
         try:
             success = apply_to_job_url(driver, url, config, dry_run)
@@ -652,8 +670,13 @@ def search_and_apply(driver, config, applied_urls=None):
                 new_applied_urls.append(url)
 
         except Exception as e:
-            print(f"  ❌ Error: {e}")
+            print(f"  ❌ Error on {url[:80]}: {type(e).__name__}: {e}")
             traceback.print_exc()
+
+        # Check stop after each job — ensures we exit promptly after the current URL
+        if _stop and _stop.is_set():
+            print("[Web Search] 🛑 Stop requested — exiting after current job.")
+            break
 
         # Ensure we're back to one tab - NO, we want to keep them open for manual review
         # ensure_single_tab(driver)

@@ -22,6 +22,18 @@ import agent_vision
 import job_finder
 import google_form_filler
 
+def _retry(fn, retries=3, delay=2, label=""):
+    """Retry a lambda up to `retries` times on transient Selenium exceptions."""
+    for attempt in range(retries):
+        try:
+            return fn()
+        except (StaleElementReferenceException, ElementClickInterceptedException) as e:
+            if attempt == retries - 1:
+                raise
+            print(f"  ⚠️  Retrying ({attempt+1}/{retries}) {label}: {type(e).__name__}")
+            time.sleep(delay)
+
+
 # ─────────────────────────────────────────────
 #  GEMINI AI for smart form filling
 # ─────────────────────────────────────────────
@@ -39,38 +51,44 @@ def _ask_ai(question, config):
             from google import genai
             _ai_client = genai.Client(api_key=api_key)
 
-        prompt = f"""You are filling a LinkedIn job application form for Harsh Raghuwanshi.
+        profile = config.get("profile", {})
+        name = config.get("name", profile.get("full_name", "the applicant"))
+        prompt = f"""You are filling a LinkedIn job application form for {name}.
 Read the EXACT question carefully and answer with ONLY the value, nothing else.
 
-Harsh's profile:
-- Name: Harsh Raghuwanshi
-- MBA at TAPMI Bengaluru (2025-2027), MBA CGPA: 6.97
-- BA Programme from Delhi University, Graduation CGPA: 7.80
-- 12th marks: 78% | 10th marks: 85%
-- Cofounder of Apna Supermarket (4 years, ₹2.5 Cr turnover)
-- Skills: Product Management, Python, SQL, Power BI, Figma, AI Tools
-- IBM AI Product Manager certified
-- Phone: 8109580642, Email: hraghu3110@outlook.com
-- Location: Bengaluru, Karnataka, India, Pin: 560001
-- Notice period: 20 days, Can join: 01/04/2026
-- Expected salary: 40000, Current/Previous salary: 80000
-- Years of experience: 4
+Applicant profile:
+- Name: {name}
+- Email: {config.get("email", profile.get("email", ""))}
+- Phone: {config.get("phone", profile.get("phone", ""))}
+- Location: {profile.get("location", "")}
+- Skills: {profile.get("skills", "")}
+- LinkedIn: {profile.get("linkedin", "")}
+- Experience: {profile.get("experience_summary", profile.get("experience", ""))}
+- Education: {profile.get("education", "")}
+- 10th marks: {profile.get("marks_10th", "80")}
+- 12th marks: {profile.get("marks_12th", "78")}
+- Graduation CGPA: {profile.get("graduation_cgpa", "7.5")}
+- Current CGPA: {profile.get("current_cgpa", profile.get("graduation_cgpa", "7.0"))}
+- Notice period: {profile.get("notice_period", "30 days")}
+- Expected salary: {profile.get("expected_salary", profile.get("salary", ""))}
+- Current/prev salary: {profile.get("current_salary", "")}
+- Years of experience: {profile.get("years_of_experience", "")}
 
 Form question: "{question}"
 
-CRITICAL RULES — READ CAREFULLY:
-- If asking for 10th / SSC / Class X marks → answer "85"
-- If asking for 12th / HSC / Class XII marks → answer "78"
-- If asking for graduation / UG CGPA → answer "7.80"
-- If asking for MBA / PG / current CGPA → answer "6.97"
-- If asking for generic "marks" or "percentage" → answer "78" (12th default)
-- If asking for generic "CGPA/GPA" → answer "7.80" (graduation default)
-- If asking about experience with a tool/skill, answer years (e.g., "4")
-- If yes/no question, answer "Yes" if Harsh likely qualifies
-- If asking about salary/CTC/stipend, answer "40000"
-- If asking about current salary, answer "80000"
-- If asking about notice period, answer "20 days"
-- If asking about location/city, answer "Bangalore"
+CRITICAL RULES:
+- If asking for 10th/SSC/Class X marks → use 10th marks above
+- If asking for 12th/HSC/Class XII marks → use 12th marks above
+- If asking for graduation/UG CGPA → use graduation CGPA above
+- If asking for current/PG CGPA → use current CGPA above
+- If asking for generic "marks" or "percentage" → use 12th marks
+- If asking for generic "CGPA/GPA" → use graduation CGPA
+- If asking about experience with a tool/skill → answer years of experience
+- If yes/no question → answer "Yes" if applicant likely qualifies
+- If asking about salary/CTC/stipend → use expected salary
+- If asking about current salary → use current/prev salary
+- If asking about notice period → use notice period above
+- If asking about location/city → use location above
 - Do NOT say "I" — just give the direct answer value
 
 Output ONLY the answer, nothing else."""
@@ -90,18 +108,12 @@ Output ONLY the answer, nothing else."""
 def login(driver, email, password):
     print("\n[LinkedIn] Logging in...")
 
-    if not password or password.startswith("YOUR_"):
-        print("[LinkedIn] ❌ Password not set! Update config.py with your real password.")
+    if not email or not password or password.startswith("YOUR_"):
+        print("[LinkedIn] ❌ Credentials not set! Add them in the Credentials page.")
         return False
 
     driver.get("https://www.linkedin.com/login")
     time.sleep(3)
-
-    # Already logged in via saved profile?
-    current = driver.current_url
-    if any(x in current for x in ("feed", "mynetwork", "jobs")):
-        print("[LinkedIn] ✅ Already logged in (profile session active)!")
-        return True
 
     try:
         # Check for alternative login form IDs
@@ -180,76 +192,76 @@ def fill_modal_fields(driver, config):
 
     # Field matching rules: (keywords_to_match, value_to_fill)
     # ⚠️ ORDER MATTERS — more specific rules FIRST, generic ones last
+    # Derive full_name and split for first/last
+    full_name = profile.get("full_name", config.get("name", ""))
+    name_parts = full_name.split(" ", 1) if full_name else ["", ""]
+    first_name = profile.get("first_name", name_parts[0])
+    last_name = profile.get("last_name", name_parts[1] if len(name_parts) > 1 else "")
+
     field_rules = [
         # ── Name fields ──
-        (["first name", "given name"], profile.get("first_name", "Harsh")),
-        (["last name", "surname", "family name"], profile.get("last_name", "Raghuwanshi")),
-        (["full name", "your name", "candidate name"], profile.get("full_name", "Harsh Raghuwanshi")),
+        (["first name", "given name"], first_name),
+        (["last name", "surname", "family name"], last_name),
+        (["full name", "your name", "candidate name"], full_name),
 
         # ── Contact ──
-        (["phone", "mobile", "contact number", "tel", "whatsapp"], profile.get("phone", "8109580642")),
-        (["email", "e-mail", "mail id"], profile.get("email", "hraghu3110@outlook.com")),
+        (["phone", "mobile", "contact number", "tel", "whatsapp"], profile.get("phone", config.get("phone", ""))),
+        (["email", "e-mail", "mail id"], profile.get("email", config.get("email", ""))),
         (["linkedin", "profile url", "portfolio"], profile.get("linkedin", "")),
 
         # ── Location ──
-        (["city", "current city", "hometown"], profile.get("location", "Bangalore")),
-        (["state"], "Karnataka"),
+        (["city", "current city", "hometown"], profile.get("location", "")),
+        (["state"], profile.get("state", "")),
         (["country"], profile.get("country", "India")),
-        (["address", "street", "location"], "Bangalore, Karnataka, India"),
-        (["pin", "zip", "postal"], "560001"),
+        (["address", "street", "location"], profile.get("address", profile.get("location", ""))),
+        (["pin", "zip", "postal"], profile.get("pin_code", "")),
 
         # ── Education marks — SPECIFIC rules first! ──
-        # 10th / SSC / Class X
         (["10th", "ssc", "class 10", "class x", "xth", "tenth", "matric"],
-         profile.get("tenth_marks", "85")),
-        # 12th / HSC / Class XII
+         profile.get("tenth_marks", profile.get("marks_10th", ""))),
         (["12th", "hsc", "class 12", "class xii", "xiith", "twelfth", "inter", "plus two", "+2", "senior secondary"],
-         profile.get("twelfth_marks", "78")),
-        # MBA / Current CGPA
+         profile.get("twelfth_marks", profile.get("marks_12th", ""))),
         (["mba cgpa", "mba gpa", "current cgpa", "pg cgpa", "postgrad"],
-         profile.get("mba_cgpa", "6.97")),
-        # Graduation / UG CGPA
+         profile.get("mba_cgpa", profile.get("current_cgpa", ""))),
         (["grad cgpa", "ug cgpa", "undergrad", "bachelor", "btech", "b.tech", "ba ", "bsc", "b.sc", "b.com"],
-         profile.get("grad_cgpa", "7.80")),
-        # Generic CGPA — graduation by default
-        (["cgpa", "gpa"], profile.get("grad_cgpa", "7.80")),
-        # Generic percentage — 12th by default (most common ask)
+         profile.get("grad_cgpa", profile.get("graduation_cgpa", ""))),
+        (["cgpa", "gpa"], profile.get("grad_cgpa", profile.get("graduation_cgpa", ""))),
         (["percentage", "percent", "%", "marks", "score", "grade"],
-         profile.get("twelfth_marks", "78")),
+         profile.get("twelfth_marks", profile.get("marks_12th", ""))),
 
         # ── Education details ──
-        (["university", "college", "school", "institution"], profile.get("university", "TAPMI Bengaluru")),
-        (["degree", "qualification", "course"], profile.get("degree", "MBA")),
-        (["major", "field of study", "specialization", "branch", "stream"], "Technology Management"),
-        (["graduation", "passing year", "end year", "year of completion", "batch"], profile.get("graduation_year", "2027")),
-        (["start year", "joining year", "enrollment"], "2025"),
+        (["university", "college", "school", "institution"], profile.get("university", profile.get("education", ""))),
+        (["degree", "qualification", "course"], profile.get("degree", "")),
+        (["major", "field of study", "specialization", "branch", "stream"], profile.get("specialization", "")),
+        (["graduation", "passing year", "end year", "year of completion", "batch"], profile.get("graduation_year", "")),
+        (["start year", "joining year", "enrollment"], profile.get("enrollment_year", "")),
 
         # ── Experience & duration ──
         (["years of experience", "total experience", "work experience", "relevant experience"],
-         profile.get("years_experience", "4")),
-        (["duration", "internship period", "period", "how long", "months"], profile.get("internship_duration", "3 months")),
-        (["notice period", "joining time", "notice"], profile.get("notice_period", "20")),
-        (["current company", "current organization", "employer", "company name"], profile.get("current_company", "Apna Supermarket")),
-        (["current role", "current title", "designation", "job title", "position"], profile.get("current_role", "Cofounder")),
-        (["available", "availability", "start date", "join date", "earliest"], profile.get("availability", "01/04/2026")),
+         profile.get("years_experience", profile.get("years_of_experience", ""))),
+        (["duration", "internship period", "period", "how long", "months"], profile.get("internship_duration", "")),
+        (["notice period", "joining time", "notice"], profile.get("notice_period", "")),
+        (["current company", "current organization", "employer", "company name"], profile.get("current_company", "")),
+        (["current role", "current title", "designation", "job title", "position"], profile.get("current_role", "")),
+        (["available", "availability", "start date", "join date", "earliest"], profile.get("availability", "")),
 
         # ── Salary & compensation ──
         (["current salary", "current ctc", "present salary", "present ctc", "last drawn"],
-         profile.get("previous_salary", "80000")),
+         profile.get("current_salary", profile.get("previous_salary", ""))),
         (["expected salary", "expected ctc", "salary expectation"],
-         profile.get("expected_salary", "40000")),
-        (["salary", "ctc", "compensation", "stipend"], profile.get("expected_salary", "40000")),
+         profile.get("expected_salary", "")),
+        (["salary", "ctc", "compensation", "stipend"], profile.get("expected_salary", "")),
 
         # ── Authorization ──
         (["authorized", "authorization", "legally", "eligible", "visa", "permit"],
          profile.get("legally_authorized", "Yes")),
         (["sponsorship", "sponsor"], profile.get("require_sponsorship", "No")),
         (["relocat", "willing to relocate"], profile.get("willing_to_relocate", "Yes")),
-        (["how did you hear", "source", "referral", "where did you"], profile.get("heard_about_us", "LinkedIn")),
+        (["how did you hear", "source", "referral", "where did you"], "LinkedIn"),
 
         # ── Skills & Certifications ──
-        (["skill", "expertise", "competenc", "proficien"], profile.get("skills", "Product Management, Python, SQL, Power BI")),
-        (["certif", "credential"], profile.get("certifications", "IBM AI Product Manager")),
+        (["skill", "expertise", "competenc", "proficien"], profile.get("skills", "")),
+        (["certif", "credential"], profile.get("certifications", "")),
     ]
 
     # Fill empty text inputs
@@ -290,17 +302,14 @@ def fill_modal_fields(driver, config):
 
                 if not matched:
                     # AI-powered fallback: ask Gemini to answer the question
-                    ai_answer = _ask_ai(combined, config)
+                    question = label_text or aria or placeholder or combined
+                    ai_answer = _ask_ai(question, config)
                     if ai_answer:
                         inp.clear()
                         inp.send_keys(ai_answer)
                         filled_something = True
-                        print(f"    [AI] {combined[:40]}: {ai_answer[:30]}")
-                    else:
-                        inp.clear()
-                        inp.send_keys("Yes")
-                        filled_something = True
-                        print(f"    [Fill] Unknown ({combined[:40]}): Yes")
+                        print(f"    [AI] {question[:40]}: {ai_answer[:30]}")
+                    # Leave unmatched, non-AI-answered fields blank rather than guessing
 
             except (StaleElementReferenceException, Exception):
                 continue
@@ -329,25 +338,37 @@ def fill_modal_fields(driver, config):
                 combined = f"{label_text} {aria}".lower()
 
                 if any(w in combined for w in ["month", "duration", "period", "internship length"]):
+                    val = profile.get("internship_duration", "3").split()[0]
                     inp.clear()
-                    inp.send_keys("3")
-                    print("    [Fill] Duration/months: 3")
+                    inp.send_keys(val)
+                    print(f"    [Fill] Duration/months: {val}")
                 elif any(w in combined for w in ["experience", "year"]):
+                    val = profile.get("years_experience", profile.get("years_of_experience", ""))
+                    if not val:
+                        val = _ask_ai(combined, config) or "1"
                     inp.clear()
-                    inp.send_keys(profile.get("years_experience", "4"))
-                    print(f"    [Fill] Years experience: {profile.get('years_experience', '4')}")
+                    inp.send_keys(str(val))
+                    print(f"    [Fill] Years experience: {val}")
                 elif any(w in combined for w in ["gpa", "cgpa", "grade"]):
+                    val = profile.get("grad_cgpa", profile.get("graduation_cgpa", profile.get("cgpa", "")))
+                    if not val:
+                        val = _ask_ai(combined, config) or "7.0"
                     inp.clear()
-                    inp.send_keys(profile.get("cgpa", "7.80"))
-                    print(f"    [Fill] GPA: {profile.get('cgpa', '7.80')}")
+                    inp.send_keys(str(val))
+                    print(f"    [Fill] GPA: {val}")
                 elif any(w in combined for w in ["salary", "ctc", "stipend"]):
+                    val = profile.get("expected_salary", "")
+                    if not val:
+                        val = _ask_ai(combined, config) or "0"
                     inp.clear()
-                    inp.send_keys("0")
-                    print("    [Fill] Salary: 0")
+                    inp.send_keys(str(val))
+                    print(f"    [Fill] Salary: {val}")
                 else:
+                    ai_val = _ask_ai(combined, config)
+                    final = ai_val if ai_val and ai_val.isdigit() else "0"
                     inp.clear()
-                    inp.send_keys("0")
-                    print(f"    [Fill] Numeric ({combined[:30]}): 0")
+                    inp.send_keys(final)
+                    print(f"    [Fill] Numeric ({combined[:30]}): {final}")
                 filled_something = True
             except:
                 continue
@@ -470,8 +491,17 @@ def fill_modal_fields(driver, config):
 def process_easy_apply_modal(driver, config):
     """Walk through the multi-step Easy Apply modal until submitted."""
     max_steps = 15
+    _stop = config.get("_stop_event")
 
     for step in range(max_steps):
+        if _stop and _stop.is_set():
+            print("    [Modal] 🛑 Stop requested — closing modal.")
+            try:
+                driver.find_element(By.CSS_SELECTOR,
+                    "button[aria-label='Dismiss'], button.artdeco-modal__dismiss").click()
+            except Exception:
+                pass
+            return "stopped"
         time.sleep(2)
 
         # Check if modal is still open
@@ -657,97 +687,82 @@ def dismiss_modal(driver):
         pass
 
 
-def _is_title_relevant(job_title, keywords):
+def _is_title_relevant(job_title, keywords, config=None):
     """
-    Check if a job title is relevant to the target keywords.
-    Keyword match takes priority over blocklist — so configured keywords
-    like 'Program Manager Intern' are never wrongly rejected.
+    Relaxed stem-based title relevance check.
+
+    Algorithm:
+    1. At least ONE keyword must have a partial stem match against the title.
+       Stem matching uses the first 5 chars so 'manage' matches 'manager',
+       'intern' matches 'internship', 'market' matches 'marketing', etc.
+       Requires at least HALF the keyword's meaningful words to match.
+    2. Seniority check only fires when user is explicitly searching for
+       internship/entry-level roles — prevents senior roles from slipping in.
+    3. If keyword implies internship, title must also be internship-level.
+    No hard tech blocklist — that was causing all MBA/management roles to be rejected.
     """
+    import re as _re
+
     title_lower = job_title.lower().strip()
     if not title_lower:
         return False, "Empty title"
 
-    # ── RULE 1: Target Keywords check (FIRST — overrides blocklist) ──
-    wanted_terms = keywords or ["product", "management", "strategy", "ai", "tech", "business", "analyst"]
-    for term in wanted_terms:
-        if term.lower() in title_lower:
-            return True, f"Matches keyword: {term}"
+    cfg = config or {}
+    employment_types = cfg.get("employment_types", [])
+    searching_intern = (
+        any(t.lower() in ("internship", "trainee") for t in employment_types)
+        or any("intern" in kw.lower() or "trainee" in kw.lower() for kw in (keywords or []))
+    )
 
-    # ── RULE 2: Blocklist check (only if no keyword matched) ──
-    blocked_roles = [
-        "senior", "lead", "staff", "principal", "architect", "expert", "director", "vp", "manager",
-        "sr.", "sr ", "ii", "iii",
-        "engineer", "developer", "devops", "sre", "backend", "frontend",
-        "full stack", "fullstack", "software", "sde", "web dev", "data scientist"
+    SENIORITY = [
+        "senior", "sr.", "sr ", "lead", "principal", "director", "vp",
+        "head", "chief", "staff", "architect", "president", "executive",
     ]
-    if any(b in title_lower for b in blocked_roles):
-        return False, "Blocked role (Senior/Tech/Engineering)"
+    INTERN_WORDS = ["intern", "trainee", "apprentice", "graduate", "fresher", "student"]
 
-    # ── RULE 3: Entry-level catch-all ──
-    intern_terms = ["intern", "trainee", "apprentice", "fellow", "associate", "candidate", "student", "graduate", "fresher"]
-    if any(t in title_lower for t in intern_terms):
-        return True, "Entry-level role (intern/trainee)"
+    def _stem_match(kw: str, title: str) -> bool:
+        """
+        Returns True if at least HALF the meaningful words from kw appear in title
+        via 5-char stem prefix matching. This allows:
+          'management' → stem 'manag' matches 'manager', 'managing'
+          'marketing'  → stem 'marke' matches 'marketing', 'marketer'
+          'internship' → stem 'inter' matches 'intern', 'internship'
+        """
+        words = [w for w in _re.split(r'\W+', kw.lower()) if len(w) > 3]
+        if not words:
+            return False
+        matched = sum(
+            1 for w in words
+            if _re.search(r'\b' + _re.escape(w[:5]), title)
+        )
+        return matched >= max(1, len(words) // 2)
+
+    # ── RULE 1: stem-based keyword match ─────────────────────────────────────
+    for kw in (keywords or []):
+        if not _stem_match(kw, title_lower):
+            continue  # not enough stem overlap — try next keyword
+
+        kw_lower = kw.lower()
+        title_has_seniority = any(s.strip() in title_lower for s in SENIORITY)
+        kw_has_seniority    = any(s.strip() in kw_lower    for s in SENIORITY)
+
+        # Only block senior titles when user is explicitly searching entry-level/intern
+        if title_has_seniority and not kw_has_seniority and searching_intern:
+            return False, f"Senior role blocked for intern search: '{job_title}'"
+
+        # If keyword implies internship, title must also be an internship
+        kw_is_intern    = any(w in kw_lower    for w in INTERN_WORDS)
+        title_is_intern = any(w in title_lower for w in INTERN_WORDS)
+        if kw_is_intern and not title_is_intern:
+            return False, f"Intern keyword but title '{job_title}' is not an internship"
+
+        return True, f"Matched keyword: {kw}"
+
+    # ── RULE 2: if explicitly searching for internships, title must say so ───
+    if searching_intern and not any(w in title_lower for w in INTERN_WORDS):
+        return False, "Not an internship role"
 
     return False, "No keywords matched"
-
-
-def _extract_jd_text(driver):
-    """Extract the full job description text from the right panel."""
-    try:
-        # Common selectors for LinkedIn job description
-        selectors = [
-            "div.jobs-description-content__text",
-            "div.jobs-description__container",
-            "div#job-details",
-            "article.jobs-description__container",
-            "div.jobs-details__main-content",
-        ]
-        for sel in selectors:
-            try:
-                el = driver.find_element(By.CSS_SELECTOR, sel)
-                if el.is_displayed():
-                    return el.text.strip()
-            except:
-                continue
-    except:
-        pass
-    return ""
-
-
-def _is_jd_relevant(jd_text, keywords, config):
-    """
-    Analyze the JD text to ensure it's a good match for the user.
-    Checks for:
-    - Seniority (Senior/Lead/Staff) vs Intern/Junior
-    - Role type (Full-time vs Internship)
-    - Key skills alignment
-    - AI-powered deep analysis if key is available
-    """
-    if not jd_text:
-        return True, "No JD text found to analyze"
-
-    jd_lower = jd_text.lower()
-    
-    # --- RULE 1: Seniority Check (if user wants Intern roles) ---
-    is_intern_search = any("intern" in k.lower() for k in keywords)
-    if is_intern_search:
-        blocked_seniority = ["senior", "sr.", "lead", "staff", "principal", "director", "architect", "5+ years", "10+ years"]
-        if any(s in jd_lower[:500] for s in blocked_seniority):
-            return False, "JD mentions Senior/Lead requirements"
-
-    # --- RULE 2: Role Type Check ---
-    if is_intern_search:
-        # If it's a search for Interns, but JD explicitly says "Full-time" and lacks "Intern", skip
-        if "full-time" in jd_lower and "intern" not in jd_lower and "student" not in jd_lower:
-            return False, "JD specifies Full-time role only"
-
-    # --- RULE 3: Skill/Keyword Match ---
-    # At least one major keyword should be in the JD
-    must_have = ["product", "management", "strategy", "business", "analyst", "founder", "operations", "startup"]
-    if not any(m in jd_lower for m in must_have):
-        return False, "JD lacks core requested keywords"
-
-    return True, "JD looks relevant"
 
 
 def handle_external_application(driver, config, original_handles, linkedin_tab):
@@ -888,8 +903,14 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
 
     card_index = 0
     processed = 0
+    _stop = config.get("_stop_event")  # threading.Event — set when user clicks Stop
 
     while card_index < total_count and applied_count < max_jobs:
+        # ── Stop check: bail out immediately when user clicks Stop ──
+        if _stop and _stop.is_set():
+            print("  [LinkedIn] 🛑 Stop requested — exiting card loop.")
+            return applied_count
+
         # Re-find cards fresh each iteration to avoid stale elements
         current_cards = find_cards()
         if card_index >= len(current_cards):
@@ -931,49 +952,27 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
 
             # ── Title relevance filter ──
             filter_keywords = current_keywords or config.get("keywords", [])
-            is_relevant, reason = _is_title_relevant(job_title, filter_keywords)
+            is_relevant, reason = _is_title_relevant(job_title, filter_keywords, config)
             if not is_relevant:
                 print(f"  ⏭️  Skipping (not relevant): {job_title} ({reason})")
                 continue
 
-            # ── JD relevance filter ──
-            try:
-                jd_text = _extract_jd_text(driver)
-                jd_ok, jd_reason = _is_jd_relevant(jd_text, filter_keywords, config)
-                
-                if not jd_ok:
-                    print(f"  ⏭️  Skipping (irrelevant JD): {job_title} ({jd_reason})")
-                    continue
-                else:
-                    print(f"  ✅ JD Verified: {jd_reason}")
-            except Exception as e:
-                print(f"  ⚠️  Error checking JD relevance: {e}")
+            # ── Duration filter: only for internship searches + user set explicit duration ──
+            _intern_types = {"internship", "trainee", "fresher"}
+            _searching_intern = any(t.lower() in _intern_types for t in config.get("employment_types", []))
+            _preferred_duration = config.get("internship_duration", "").lower().strip()
+            _duration_strict = _preferred_duration and _preferred_duration not in ("", "any", "flexible")
 
-            # ── Duration filter: only apply to 3-month internships ──
-            try:
-                desc_el = driver.find_element(By.CSS_SELECTOR, "div.jobs-description, article, div.job-details-jobs-unified-top-card")
-                desc_text = desc_el.text.lower()
-
-                is_3_month = (
-                    "3 month" in desc_text or "3-month" in desc_text or
-                    "three month" in desc_text or "3months" in desc_text
-                )
-                non_3_month_durations = [
-                    "1 month", "1-month", "2 month", "2-month",
-                    "4 month", "4-month", "5 month", "5-month",
-                    "6 month", "6-month", "six month",
-                    "8 month", "8-month", "9 month", "9-month",
-                    "10 month", "10-month", "11 month", "11-month",
-                    "12 month", "12-month", "one year", "1 year",
-                ]
-                has_non_3 = any(d in desc_text for d in non_3_month_durations)
-
-                # Skip if description explicitly states a non-3-month duration
-                if has_non_3 and not is_3_month:
-                    print(f"  ⏭️  Skipping (non-3-month duration): {job_title}")
-                    continue
-            except:
-                pass
+            if _searching_intern and _duration_strict:
+                try:
+                    desc_el = driver.find_element(By.CSS_SELECTOR,
+                        "div.jobs-description, article, div.job-details-jobs-unified-top-card")
+                    desc_text = desc_el.text.lower()
+                    if _preferred_duration not in desc_text:
+                        print(f"  ⏭️  Skipping (duration mismatch: want '{_preferred_duration}'): {job_title}")
+                        continue
+                except Exception:
+                    pass  # description not found, don't skip
 
             # Look for Easy Apply button in the right panel / detail area
             easy_apply_btn = None
@@ -1032,7 +1031,7 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             print(f"  🎯 Clicking Apply for: {job_title}")
             handles_before = set(driver.window_handles)
             linkedin_tab = driver.current_window_handle
-            try_click(driver, easy_apply_btn)
+            _retry(lambda: try_click(driver, easy_apply_btn), label=f"Apply btn for '{job_title}'")
             time.sleep(3)
 
             # Check if an external tab opened first
@@ -1061,7 +1060,7 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             print(f"  [Retry] Card went stale, will re-find on next iteration")
             # Don't increment index — it will re-find from same position
         except Exception as e:
-            print(f"  ❌ Error processing job card: {e}")
+            print(f"  ❌ Error on '{job_title}': {type(e).__name__}: {e}")
             dismiss_modal(driver)
 
     return applied_count
@@ -1069,81 +1068,135 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
 
 def run(driver, config, applied_count, max_jobs, applied_urls=None):
     """
-    Main entry point. For each keyword:
-      1. Try to apply to at least min_per_keyword jobs (default 10)
-      2. Search across all locations and paginate to find enough jobs
-      3. Move to next keyword once target is reached
+    Main entry point. Cycles keywords continuously until:
+    - max_jobs reached, OR
+    - stop event is set (user clicks Stop).
+
+    Each keyword is searched across all locations with pagination.
+    After exhausting all keywords, cycles back to keyword 1 to keep applying.
     """
     if applied_urls is None:
         applied_urls = set()
     min_per_kw = config.get("min_per_keyword", 10)
     keyword_stats = {}
+    _stop = config.get("_stop_event")  # threading.Event — set when user clicks Stop
+    keywords = config.get("keywords", [])
+    if not keywords:
+        print("[LinkedIn] ⚠️  No keywords configured. Aborting.")
+        return applied_count
 
-    for keyword in config["keywords"]:
+    cycle = 0
+    while True:
         if applied_count >= max_jobs:
+            print(f"[LinkedIn] ✅ Reached max_jobs={max_jobs}. Stopping.")
+            break
+        if _stop and _stop.is_set():
+            print("[LinkedIn] 🛑 Stop requested by user — exiting.")
             break
 
-        kw_applied = 0
-        keyword_stats[keyword] = 0
+        cycle += 1
+        print(f"\n{'═'*60}\n[LinkedIn] 🔄 CYCLE {cycle} — {applied_count}/{max_jobs} applied so far\n{'═'*60}")
 
-        print(f"\n{'═' * 60}")
-        print(f"🎯 KEYWORD: '{keyword}' — Target: {min_per_kw} applications")
-        print(f"{'═' * 60}")
-
-        for location in config["locations"]:
-            if kw_applied >= min_per_kw or applied_count >= max_jobs:
+        cycle_applied = 0
+        for keyword in keywords:
+            if applied_count >= max_jobs or (_stop and _stop.is_set()):
                 break
 
-            # Paginate through multiple pages of search results
-            for page in range(5):  # Up to 5 pages per location
-                if kw_applied >= min_per_kw or applied_count >= max_jobs:
+            kw_applied = 0
+            keyword_stats[keyword] = keyword_stats.get(keyword, 0)
+
+            print(f"\n{'═' * 60}")
+            print(f"🎯 KEYWORD: '{keyword}' — Target: {min_per_kw} applications")
+            print(f"{'═' * 60}")
+
+            for location in config.get("locations", ["India"]):
+                if applied_count >= max_jobs or (_stop and _stop.is_set()):
                     break
 
-                start = page * 25  # LinkedIn uses 25 results per page
+                # Paginate through multiple pages of search results
+                for page in range(5):  # Up to 5 pages per location
+                    if applied_count >= max_jobs or (_stop and _stop.is_set()):
+                        break
 
-                print(f"\n{'─' * 50}")
-                print(f"🔍 '{keyword}' in '{location}' (page {page + 1})")
-                print(f"   Progress: {kw_applied}/{min_per_kw} for this keyword | {applied_count}/{max_jobs} total")
-                print(f"{'─' * 50}")
+                    start = page * 25  # LinkedIn uses 25 results per page
 
-                search_url = (
-                    f"https://www.linkedin.com/jobs/search/?"
-                    f"keywords={keyword.replace(' ', '%20')}"
-                    f"&location={location.replace(' ', '%20')}"
-                    f"&f_AL=true"
-                    f"&f_E=1"
-                    f"&f_TPR=r86400"
-                    f"&sortBy=DD"
-                    f"&start={start}"
-                )
+                    print(f"\n{'─' * 50}")
+                    print(f"🔍 '{keyword}' in '{location}' (page {page + 1})")
+                    print(f"   Progress: {kw_applied}/{min_per_kw} for this keyword | {applied_count}/{max_jobs} total")
+                    print(f"{'─' * 50}")
 
-                driver.get(search_url)
-                time.sleep(5)
+                    # ── Build LinkedIn filters from user preferences ──────────────
+                    _JT_MAP = {
+                        "Full-time": "F", "Internship": "I", "Part-time": "P",
+                        "Contract": "C", "Trainee": "I", "Fresher": "I",
+                    }
+                    employment_types = config.get("employment_types", [])
+                    jt_codes = list({_JT_MAP[et] for et in employment_types if et in _JT_MAP})
+                    if not jt_codes:
+                        kw_lower = keyword.lower()
+                        if any(w in kw_lower for w in ("intern", "trainee", "apprentice")):
+                            jt_codes = ["I"]
+                        else:
+                            jt_codes = ["F"]
+                    jt_param = "".join(f"&f_JT={c}" for c in jt_codes)
 
-                before = applied_count
-                applied_count = apply_from_search_page(
-                    driver, config, applied_count, max_jobs,
-                    current_keywords=[keyword]
-                )
-                page_applied = applied_count - before
-                kw_applied += page_applied
+                    has_intern = "I" in jt_codes
+                    has_fulltime = any(c in jt_codes for c in ("F", "C", "P"))
+                    if has_intern and has_fulltime:
+                        fe_param = "&f_E=1%2C2%2C3"
+                    elif has_intern:
+                        fe_param = "&f_E=1"
+                    else:
+                        fe_param = "&f_E=2%2C3%2C4"
 
-                print(f"\n  📊 This page: +{page_applied} | Keyword total: {kw_applied}/{min_per_kw} | Overall: {applied_count}/{max_jobs}")
+                    search_url = (
+                        f"https://www.linkedin.com/jobs/search/?"
+                        f"keywords={keyword.replace(' ', '%20')}"
+                        f"&location={location.replace(' ', '%20')}"
+                        f"&f_AL=true"
+                        f"{fe_param}"
+                        f"{jt_param}"
+                        f"&f_TPR=r604800"    # last 7 days
+                        f"&sortBy=DD"
+                        f"&start={start}"
+                    )
+                    print(f"  [Search] {keyword} | {location} | Types: {employment_types or ['Any']} | URL: ...{jt_param}{fe_param}")
 
-                # If no jobs were found/applied on this page, skip remaining pages for this location
-                if page_applied == 0:
-                    print(f"  [Info] No applications on this page, trying next location...")
-                    break
+                    driver.get(search_url)
+                    time.sleep(5)
 
-        keyword_stats[keyword] = kw_applied
-        print(f"\n✅ '{keyword}': Applied to {kw_applied} jobs")
+                    before = applied_count
+                    applied_count = apply_from_search_page(
+                        driver, config, applied_count, max_jobs,
+                        current_keywords=[keyword]
+                    )
+                    page_applied = applied_count - before
+                    kw_applied += page_applied
+                    cycle_applied += page_applied
+
+                    print(f"\n  📊 This page: +{page_applied} | Keyword total: {kw_applied}/{min_per_kw} | Overall: {applied_count}/{max_jobs}")
+
+                    # Only skip remaining pages if two consecutive pages yield 0
+                    if page_applied == 0 and page >= 1:
+                        print(f"  [Info] Two empty pages — moving to next location.")
+                        break
+
+            keyword_stats[keyword] = keyword_stats.get(keyword, 0) + kw_applied
+            print(f"\n✅ '{keyword}': Applied to {kw_applied} jobs this cycle")
+
+        # After one full cycle, brief pause then loop again unless stopped
+        if _stop and _stop.is_set():
+            break
+        if applied_count >= max_jobs:
+            break
+        print(f"\n[LinkedIn] ⏳ Cycle {cycle} complete ({cycle_applied} applied). Looping again in 10s…")
+        time.sleep(10)
 
     print(f"\n{'═' * 60}")
-    print(f"[LinkedIn] ✅ SESSION COMPLETE")
+    print(f"[LinkedIn] ✅ SESSION COMPLETE after {cycle} cycle(s)")
     print(f"{'═' * 60}")
     for kw, count in keyword_stats.items():
-        status = "✅" if count >= min_per_kw else "⚠️"
-        print(f"  {status} {kw}: {count}/{min_per_kw}")
+        print(f"  {'✅' if count > 0 else '⚠️'} {kw}: {count} applications")
     print(f"  📊 Total applied: {applied_count}")
     print(f"{'═' * 60}")
 
