@@ -31,6 +31,7 @@ from selenium.common.exceptions import (
 )
 
 import smart_form_filler
+import google_form_filler
 import agent_vision
 
 
@@ -353,6 +354,10 @@ def handle_lever_apply(driver, config):
     # Fill the Lever form
     smart_form_filler.fill_all_form_fields(driver, config)
     time.sleep(1)
+    
+    # Run generic web filler as a fallback for standard inputs
+    google_form_filler.fill_web_form(driver, config)
+    time.sleep(1)
 
     # Lever has a single submit button
     return _submit_application(driver, config)
@@ -374,6 +379,10 @@ def handle_greenhouse_apply(driver, config):
 
     # Fill all fields
     smart_form_filler.fill_all_form_fields(driver, config)
+    time.sleep(1)
+    
+    # Run generic web filler as a fallback
+    google_form_filler.fill_web_form(driver, config)
     time.sleep(1)
 
     # Submit
@@ -414,6 +423,10 @@ def handle_generic_apply(driver, config):
 
     # Unconditionally fill all form fields
     smart_form_filler.fill_all_form_fields(driver, config)
+    time.sleep(1)
+    
+    # Generic web fallback is perfect here
+    google_form_filler.fill_web_form(driver, config)
     time.sleep(1)
 
     # Try multi-step form walk

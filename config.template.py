@@ -114,13 +114,12 @@ CONFIG = {
             ],
         },
         {
-            "name": "Business Development",
-            "emoji": "💼",
+            "name": "Business Analyst",
+            "emoji": "📈",
             "keywords": [
-                "Business Development Intern",
                 "Business Analyst Intern",
-                "Business Development Associate",
-                "BDA Intern",
+                "Data Analyst Intern",
+                "Product Analyst Intern",
             ],
         },
         {
@@ -302,7 +301,6 @@ MBA TECH | TAPMI Bengaluru
     # ──────────────────────────────────────────
     "max_jobs_per_day": 100,
     "min_per_keyword": 10,  # Apply to at least 10 jobs per keyword
-    "max_outreach_per_run": 20,  # Max connection requests per Phase 4 run
     "delay_between_applies_sec": (3, 8),   # random delay range in seconds
 
     # ──────────────────────────────────────────

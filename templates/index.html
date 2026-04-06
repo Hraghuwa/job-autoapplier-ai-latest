@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Auto-Applier AI — Dashboard</title>
+    <meta name="description"
+        content="AI-powered job auto-applier that searches 100+ websites and applies to internships automatically.">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+    <!-- Animated BG -->
+    <div class="bg-effects">
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+    </div>
+
+    <div class="app-container">
+
+        <!-- Header -->
+        <div class="app-header">
+            <div class="logo">🤖</div>
+            <h1>Job Auto-Applier AI</h1>
+            <p>Your AI-powered internship hunting machine</p>
+        </div>
+
+        <!-- ═══════════════════════════════════════ -->
+        <!--  AUTH VIEW                              -->
+        <!-- ═══════════════════════════════════════ -->
+        <div id="view-auth" class="view active">
+            <div class="card">
+                <!-- Tabs: Login / Signup -->
+                <div class="nav-tabs">
+                    <div class="nav-tab active" onclick="switchAuthTab('login')">Sign In</div>
+                    <div class="nav-tab" onclick="switchAuthTab('signup')">Create Account</div>
+                </div>
+
+                <!-- Login Form -->
+                <div id="auth-login">
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input type="text" id="login-username" placeholder="your_username">
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" id="login-password" placeholder="••••••••">
+                    </div>
+                    <div id="login-error" class="error-msg"></div>
+                    <button class="btn btn-primary btn-block mt-24" onclick="doLogin()">Sign In →</button>
+                </div>
+
+                <!-- Signup Form -->
+                <div id="auth-signup" style="display:none">
+                    <div class="form-group">
+                        <label>Choose a Username</label>
+                        <input type="text" id="signup-username" placeholder="e.g. harsh_r">
+                    </div>
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="email" id="signup-email" placeholder="you@example.com">
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" id="signup-password" placeholder="Min 6 characters">
+                    </div>
+                    <div class="form-group">
+                        <label>Confirm Password</label>
+                        <input type="password" id="signup-password2" placeholder="••••••••">
+                    </div>
+                    <div id="signup-error" class="error-msg"></div>
+                    <button class="btn btn-primary btn-block mt-24" onclick="doSignup()">Create Account →</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════ -->
+        <!--  MAIN DASHBOARD VIEW (after login)      -->
+        <!-- ═══════════════════════════════════════ -->
+        <div id="view-dashboard" class="view">
+
+            <!-- User Bar -->
+            <div class="user-bar">
+                <div class="greeting">👋 Welcome, <span id="greet-name">User</span></div>
+                <button class="btn btn-secondary" onclick="doLogout()"
+                    style="padding:8px 16px;font-size:12px;">Logout</button>
+            </div>
+
+            <!-- Stepper -->
+            <div class="stepper" id="stepper">
+                <div class="step done" data-step="0"></div>
+                <div class="step" data-step="1"></div>
+                <div class="step" data-step="2"></div>
+                <div class="step" data-step="3"></div>
+                <div class="step" data-step="4"></div>
+            </div>
+
+            <!-- ── STEP 0: Phase Introduction ── -->
+            <div id="step-0" class="wizard-step">
+                <div class="card">
+                    <div class="card-title">🎯 How It Works</div>
+                    <div class="card-subtitle">Your bot runs through these powerful phases</div>
+
+                    <div class="phase-card" onclick="goToStep(1)">
+                        <div class="phase-header">
+                            <span class="phase-icon">💼</span>
+                            <span class="phase-name">Phase 1 — LinkedIn Auto-Apply</span>
+                        </div>
+                        <div class="phase-desc">Automatically searches LinkedIn jobs by your keywords, detects Easy
+                            Apply modals, fills every field using AI, and submits applications — all hands-free.</div>
+                    </div>
+
+                    <div class="phase-card" onclick="goToStep(2)">
+                        <div class="phase-header">
+                            <span class="phase-icon">🌐</span>
+                            <span class="phase-name">Phase 2 — Internet-Wide Job Search</span>
+                        </div>
+                        <div class="phase-desc">Google-powered mega search across 100+ career sites, ATS platforms
+                            (Lever, Greenhouse, Workday), and company career pages. Opens every job in its own tab and
+                            auto-fills forms.</div>
+                    </div>
+
+                    <div class="phase-card" onclick="goToStep(3)">
+                        <div class="phase-header">
+                            <span class="phase-icon">📝</span>
+                            <span class="phase-name">Phase 3 — Smart Form Autofill</span>
+                        </div>
+                        <div class="phase-desc">Scans ALL open browser tabs for Google Forms, Typeform, and standard web
+                            forms. Auto-fills name, email, phone, resume, and answers custom questions using your
+                            profile.</div>
+                    </div>
+
+                    <div class="phase-card" onclick="goToStep(4)">
+                        <div class="phase-header">
+                            <span class="phase-icon">🚀</span>
+                            <span class="phase-name">Phase 5 — Wellfound Connect</span>
+                        </div>
+                        <div class="phase-desc">Logs into Wellfound (AngelList) and mass-connects with startups hiring
+                            for your target roles in your preferred location.</div>
+                    </div>
+
+                    <button class="btn btn-primary btn-block mt-24" onclick="goToStep(1)">Get Started — Set Up Your
+                        Profile →</button>
+                </div>
+            </div>
+
+            <!-- ── STEP 1: Profile & Credentials ── -->
+            <div id="step-1" class="wizard-step" style="display:none">
+                <div class="card">
+                    <div class="card-title">👤 Your Profile & Credentials</div>
+                    <div class="card-subtitle">Saved securely — you only need to do this once</div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Full Name</label>
+                            <input type="text" id="p-name" placeholder="John Doe">
+                        </div>
+                        <div class="form-group">
+                            <label>Phone</label>
+                            <input type="text" id="p-phone" placeholder="9876543210">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Email</label>
+                            <input type="email" id="p-email" placeholder="you@example.com">
+                        </div>
+                        <div class="form-group">
+                            <label>City</label>
+                            <input type="text" id="p-city" placeholder="Bangalore">
+                        </div>
+                    </div>
+
+                    <div class="divider"></div>
+                    <div class="card-title" style="font-size:15px;">🎓 Education</div>
+                    <div class="form-row mt-12">
+                        <div class="form-group">
+                            <label>Degree / Course</label>
+                            <input type="text" id="p-degree" placeholder="MBA, B.Tech, etc.">
+                        </div>
+                        <div class="form-group">
+                            <label>College / University</label>
+                            <input type="text" id="p-college" placeholder="Your Institution">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Graduation Year</label>
+                            <input type="text" id="p-grad-year" placeholder="2027">
+                        </div>
+                        <div class="form-group">
+                            <label>CGPA / Percentage</label>
+                            <input type="text" id="p-cgpa" placeholder="7.8">
+                        </div>
+                    </div>
+
+                    <div class="divider"></div>
+                    <div class="card-title" style="font-size:15px;">💻 Experience</div>
+                    <div class="form-row mt-12">
+                        <div class="form-group">
+                            <label>Years of Experience</label>
+                            <input type="text" id="p-exp" placeholder="2">
+                        </div>
+                        <div class="form-group">
+                            <label>Skills (comma separated)</label>
+                            <input type="text" id="p-skills" placeholder="Python, SQL, Product Mgmt...">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Cover Letter / About You</label>
+                        <textarea id="p-cover"
+                            placeholder="Write a brief cover letter about yourself, your experience, and why companies should hire you..."></textarea>
+                    </div>
+
+                    <div class="divider"></div>
+                    <div class="card-title" style="font-size:15px;">🔑 Platform Credentials</div>
+                    <div class="card-subtitle">Used to log into job platforms automatically</div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>LinkedIn Email</label>
+                            <input type="text" id="c-li-email" placeholder="your@email.com">
+                        </div>
+                        <div class="form-group">
+                            <label>LinkedIn Password</label>
+                            <input type="password" id="c-li-pass" placeholder="••••••••">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Wellfound Email</label>
+                            <input type="text" id="c-wf-email" placeholder="your@email.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Wellfound Password</label>
+                            <input type="password" id="c-wf-pass" placeholder="••••••••">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Internshala Email</label>
+                            <input type="text" id="c-ish-email" placeholder="your@email.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Internshala Password</label>
+                            <input type="password" id="c-ish-pass" placeholder="••••••••">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Unstop Email</label>
+                            <input type="text" id="c-unstop-email" placeholder="your@email.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Unstop Password</label>
+                            <input type="password" id="c-unstop-pass" placeholder="••••••••">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Naukri Email</label>
+                            <input type="text" id="c-naukri-email" placeholder="your@email.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Naukri Password</label>
+                            <input type="password" id="c-naukri-pass" placeholder="••••••••">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Gemini API Key (for AI features)</label>
+                        <input type="text" id="c-gemini" placeholder="AIza...">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Resume File Path (on your computer)</label>
+                        <input type="text" id="c-resume" placeholder="/Users/you/Downloads/Resume.pdf">
+                    </div>
+
+                    <div id="profile-saved" class="success-msg">✅ Profile saved successfully!</div>
+                    <div id="sync-status" class="sync-status" style="display:none">
+                        <span class="sync-dot"></span> Saving...
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-secondary" onclick="goToStep(0)">← Back</button>
+                        <button class="btn btn-primary" onclick="saveProfileAndNext()" style="flex:1">Save & Continue
+                            →</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── STEP 2: LinkedIn Phase Setup ── -->
+            <div id="step-2" class="wizard-step" style="display:none">
+                <div class="card">
+                    <div class="card-title">💼 Phase 1 & 2 — Job Search Configuration</div>
+                    <div class="card-subtitle">Tell the bot what kind of jobs to search and apply for</div>
+
+                    <div class="form-group">
+                        <label>Job Keywords (press Enter to add)</label>
+                        <div class="tags-container" id="keywords-tags"
+                            onclick="document.getElementById('keyword-input').focus()">
+                            <input type="text" class="tag-input" id="keyword-input"
+                                placeholder="e.g. Product Management Intern">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Preferred Locations (press Enter to add)</label>
+                        <div class="tags-container" id="locations-tags"
+                            onclick="document.getElementById('location-input').focus()">
+                            <input type="text" class="tag-input" id="location-input" placeholder="e.g. Bangalore">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Internship Duration</label>
+                            <select id="ph-duration">
+                                <option value="3 months">3 Months Only</option>
+                                <option value="6 months">6 Months</option>
+                                <option value="any">Any Duration</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Max Applications Per Day</label>
+                            <input type="number" id="ph-max-apps" value="100" placeholder="100">
+                        </div>
+                    </div>
+
+                    <div class="toggle-row">
+                        <div class="toggle-label">
+                            Recently Posted Jobs Only
+                            <small>Filter for jobs posted in the last few days</small>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="ph-recent" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-row">
+                        <div class="toggle-label">
+                            Enable Web Search (Phase 2)
+                            <small>Search Google, ATS platforms, and company career pages</small>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="ph-websearch" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="divider"></div>
+                    <div class="card-title" style="font-size:15px; margin-top: 10px;">🛡️ Phase Configuration</div>
+                    <div class="card-subtitle">Enable or disable specific platforms for the bot</div>
+
+                    <div class="toggle-row">
+                        <div class="toggle-label">
+                            LinkedIn Phase
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="toggle-linkedin" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-row">
+                        <div class="toggle-label">
+                            Wellfound Phase
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="toggle-wellfound" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-row">
+                        <div class="toggle-label">
+                            Internshala Phase
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="toggle-internshala" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-row">
+                        <div class="toggle-label">
+                            Unstop Phase
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="toggle-unstop" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-row">
+                        <div class="toggle-label">
+                            Naukri Phase
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="toggle-naukri" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-row">
+                        <div class="toggle-label">
+                            Google Forms / Web Autofill
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" id="toggle-forms" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="btn-group">
+                        <button class="btn btn-secondary" onclick="goToStep(1)">← Back</button>
+                        <button class="btn btn-primary" onclick="savePhaseAndNext(2)" style="flex:1">Save & Continue
+                            →</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── STEP 3: Google Form Autofill Setup ── -->
+            <div id="step-3" class="wizard-step" style="display:none">
+                <div class="card">
+                    <div class="card-title">📝 Phase 3 — Google Form Autofill Answers</div>
+                    <div class="card-subtitle">Pre-define answers for common form questions so the bot can auto-fill
+                        them</div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>LinkedIn Profile URL</label>
+                            <input type="text" id="gf-linkedin" placeholder="https://linkedin.com/in/you">
+                        </div>
+                        <div class="form-group">
+                            <label>Portfolio / Website</label>
+                            <input type="text" id="gf-portfolio" placeholder="https://yoursite.com">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Expected Stipend (₹/month)</label>
+                            <input type="text" id="gf-stipend" placeholder="40000">
+                        </div>
+                        <div class="form-group">
+                            <label>Available From (Date)</label>
+                            <input type="text" id="gf-available" placeholder="01/04/2026">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Work Authorization</label>
+                            <select id="gf-auth">
+                                <option value="Yes">Yes — legally authorized</option>
+                                <option value="No">No</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Willing to Relocate?</label>
+                            <select id="gf-relocate">
+                                <option value="Yes">Yes</option>
+                                <option value="No">No</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>How did you hear about us? (default answer)</label>
+                        <input type="text" id="gf-heard" value="LinkedIn" placeholder="LinkedIn">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Any extra Q&A (one per line: Question = Answer)</label>
+                        <textarea id="gf-extra"
+                            placeholder="Why do you want to join? = I am passionate about this field&#10;Are you a student? = Yes"></textarea>
+                    </div>
+
+                    <div class="btn-group">
+                        <button class="btn btn-secondary" onclick="goToStep(2)">← Back</button>
+                        <button class="btn btn-primary" onclick="savePhaseAndNext(3)" style="flex:1">Save & Go to
+                            Dashboard →</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── STEP 4: Dashboard / Run Bot ── -->
+            <div id="step-4" class="wizard-step" style="display:none">
+                <div class="card">
+                    <div class="card-title">🚀 Launch Dashboard</div>
+                    <div class="card-subtitle">Your bot is configured and ready to apply to jobs</div>
+
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+                        <div>
+                            <div style="font-size:14px;font-weight:600;">Bot Status</div>
+                        </div>
+                        <div id="bot-status" class="status-badge stopped">
+                            <div class="status-dot"></div>
+                            <span>Stopped</span>
+                        </div>
+                    </div>
+
+                    <div class="btn-group" style="margin-top:0">
+                        <button id="btn-start" class="btn btn-primary" onclick="startBot()" style="flex:1">▶ Start
+                            Bot</button>
+                        <button id="btn-stop" class="btn btn-danger" onclick="stopBot()" style="flex:1;display:none">■
+                            Stop Bot</button>
+                        <button class="btn btn-secondary" onclick="goToStep(0)">⚙ Reconfigure</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">📟 Live Console</div>
+                    <div class="card-subtitle">Real-time output from the automation engine</div>
+                    <div class="console" id="console-output">
+                        <div class="line info">Waiting for bot to start...</div>
+                    </div>
+                </div>
+            </div>
+
+        </div><!-- /view-dashboard -->
+    </div><!-- /app-container -->
+
+    <script>
+        // ─── STATE ───
+        let currentStep = 0;
+        let userData = {};
+        let keywordsList = [];
+        let locationsList = [];
+        let pollInterval = null;
+        let saveTimeout = null;
+
+        /**
+         * Debounce helper
+         */
+        function debounce(func, timeout = 1000) {
+            return (...args) => {
+                clearTimeout(saveTimeout);
+                saveTimeout = setTimeout(() => { func.apply(this, args); }, timeout);
+            };
+        }
+
+        // ─── AUTH ───
+        function switchAuthTab(tab) {
+            document.querySelectorAll('#view-auth .nav-tab').forEach((t, i) => {
+                t.classList.toggle('active', (tab === 'login' && i === 0) || (tab === 'signup' && i === 1));
+            });
+            document.getElementById('auth-login').style.display = tab === 'login' ? 'block' : 'none';
+            document.getElementById('auth-signup').style.display = tab === 'signup' ? 'block' : 'none';
+        }
+
+        async function doLogin() {
+            const username = document.getElementById('login-username').value.trim();
+            const password = document.getElementById('login-password').value;
+            const errEl = document.getElementById('login-error');
+            errEl.style.display = 'none';
+
+            if (!username || !password) { errEl.textContent = 'Please fill in all fields'; errEl.style.display = 'block'; return; }
+
+            const res = await fetch('/api/login', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+            const data = await res.json();
+            if (!res.ok) { errEl.textContent = data.error; errEl.style.display = 'block'; return; }
+            await loadAndShowDashboard(data.username);
+        }
+
+        async function doSignup() {
+            const username = document.getElementById('signup-username').value.trim();
+            const email = document.getElementById('signup-email').value.trim();
+            const password = document.getElementById('signup-password').value;
+            const password2 = document.getElementById('signup-password2').value;
+            const errEl = document.getElementById('signup-error');
+            errEl.style.display = 'none';
+
+            if (!username || !email || !password) { errEl.textContent = 'Please fill in all fields'; errEl.style.display = 'block'; return; }
+            if (password.length < 6) { errEl.textContent = 'Password must be at least 6 characters'; errEl.style.display = 'block'; return; }
+            if (password !== password2) { errEl.textContent = 'Passwords do not match'; errEl.style.display = 'block'; return; }
+
+            const res = await fetch('/api/signup', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, email, password })
+            });
+            const data = await res.json();
+            if (!res.ok) { errEl.textContent = data.error; errEl.style.display = 'block'; return; }
+            await loadAndShowDashboard(data.username);
+        }
+
+        async function doLogout() {
+            await fetch('/api/logout', { method: 'POST' });
+            if (pollInterval) clearInterval(pollInterval);
+            document.getElementById('view-dashboard').classList.remove('active');
+            document.getElementById('view-auth').classList.add('active');
+        }
+
+        // ─── DASHBOARD LOAD ───
+        async function loadAndShowDashboard(username) {
+            document.getElementById('view-auth').classList.remove('active');
+            document.getElementById('view-dashboard').classList.add('active');
+            document.getElementById('greet-name').textContent = username;
+
+            const res = await fetch('/api/profile');
+            if (res.ok) {
+                userData = await res.json();
+                populateFields();
+            }
+            goToStep(0);
+        }
+
+        function populateFields() {
+            const p = userData.profile || {};
+            const li = userData.linkedin || {};
+            const wf = userData.wellfound || {};
+            const ish = userData.internshala || {};
+            const unstop = userData.unstop || {};
+            const naukri = userData.naukri || {};
+            const phases = userData.phases || {};
+            const liPhase = phases.linkedin || {};
+            const gf = phases.google_form || {};
+
+            // Profile
+            setValue('p-name', p.full_name);
+            setValue('p-phone', p.phone);
+            setValue('p-email', p.email);
+            setValue('p-city', p.city);
+            setValue('p-degree', p.degree);
+            setValue('p-college', p.college);
+            setValue('p-grad-year', p.graduation_year);
+            setValue('p-cgpa', p.cgpa);
+            setValue('p-exp', p.years_experience);
+            setValue('p-skills', p.skills);
+            setValue('p-cover', userData.cover_letter || p.cover_letter || '');
+
+            // Credentials
+            const profileEmail = p.email || '';
+            setValue('c-li-email', li.email || profileEmail);
+            setValue('c-li-pass', li.password);
+            setValue('c-wf-email', wf.email || profileEmail);
+            setValue('c-wf-pass', wf.password);
+            setValue('c-ish-email', ish.email || profileEmail);
+            setValue('c-ish-pass', ish.password);
+            setValue('c-unstop-email', unstop.email || profileEmail);
+            setValue('c-unstop-pass', unstop.password);
+            setValue('c-naukri-email', naukri.email || profileEmail);
+            setValue('c-naukri-pass', naukri.password);
+            setValue('c-gemini', userData.gemini_api_key);
+            setValue('c-resume', userData.resume_path);
+
+            // LinkedIn Phase
+            keywordsList = liPhase.keywords || [];
+            locationsList = liPhase.locations || [];
+            renderTags('keywords-tags', keywordsList, 'keyword-input');
+            renderTags('locations-tags', locationsList, 'location-input');
+            if (liPhase.duration) document.getElementById('ph-duration').value = liPhase.duration;
+            if (liPhase.max_apps) document.getElementById('ph-max-apps').value = liPhase.max_apps;
+            if (liPhase.recently_posted !== undefined) document.getElementById('ph-recent').checked = liPhase.recently_posted;
+            if (phases.web_search) document.getElementById('ph-websearch').checked = phases.web_search.enabled !== false;
+
+            // Phase Toggles
+            document.getElementById('toggle-linkedin').checked = phases.linkedin ? phases.linkedin.enabled !== false : true;
+            document.getElementById('toggle-wellfound').checked = phases.wellfound ? phases.wellfound.enabled !== false : true;
+            document.getElementById('toggle-internshala').checked = phases.internshala ? phases.internshala.enabled !== false : true;
+            document.getElementById('toggle-unstop').checked = phases.unstop ? phases.unstop.enabled !== false : true;
+            document.getElementById('toggle-naukri').checked = phases.naukri ? phases.naukri.enabled !== false : true;
+            document.getElementById('toggle-forms').checked = phases.google_form ? phases.google_form.enabled !== false : true;
+
+            // Google Form
+            const ca = gf.custom_answers || {};
+            setValue('gf-linkedin', p.linkedin || ca.linkedin);
+            setValue('gf-portfolio', ca.portfolio);
+            setValue('gf-stipend', p.expected_stipend || ca.expected_stipend);
+            setValue('gf-available', p.availability || ca.availability);
+            if (ca.work_authorization) document.getElementById('gf-auth').value = ca.work_authorization;
+            if (ca.willing_to_relocate) document.getElementById('gf-relocate').value = ca.willing_to_relocate;
+            setValue('gf-heard', ca.heard_about_us || 'LinkedIn');
+        }
+
+        function setValue(id, val) {
+            const el = document.getElementById(id);
+            if (el) el.value = val || '';
+        }
+
+        // ─── STEPPER & WIZARD ───
+        function goToStep(n) {
+            document.querySelectorAll('.wizard-step').forEach(el => el.style.display = 'none');
+            document.getElementById(`step-${n}`).style.display = 'block';
+            currentStep = n;
+            updateStepper();
+
+            if (n === 4) startPolling();
+            else if (pollInterval) clearInterval(pollInterval);
+        }
+
+        function updateStepper() {
+            document.querySelectorAll('.stepper .step').forEach((el, i) => {
+                el.classList.remove('done', 'active');
+                if (i < currentStep) el.classList.add('done');
+                if (i === currentStep) el.classList.add('active');
+            });
+        }
+
+        // ─── TAG INPUTS ───
+        function renderTags(containerId, list, inputId) {
+            const container = document.getElementById(containerId);
+            // Remove existing tags
+            container.querySelectorAll('.tag').forEach(t => t.remove());
+            const input = document.getElementById(inputId);
+            list.forEach((text, i) => {
+                const tag = document.createElement('span');
+                tag.className = 'tag';
+                tag.innerHTML = `${text} <span class="remove" onclick="removeTag('${containerId}', ${i}, '${inputId}')">&times;</span>`;
+                container.insertBefore(tag, input);
+            });
+        }
+
+        function removeTag(containerId, index, inputId) {
+            if (containerId === 'keywords-tags') { keywordsList.splice(index, 1); renderTags(containerId, keywordsList, inputId); }
+            if (containerId === 'locations-tags') { locationsList.splice(index, 1); renderTags(containerId, locationsList, inputId); }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Auto-save listeners for Step 1
+            const autoSaveFields = [
+                'p-name', 'p-phone', 'p-email', 'p-city', 'p-degree', 'p-college',
+                'p-grad-year', 'p-cgpa', 'p-exp', 'p-skills', 'p-cover',
+                'c-li-email', 'c-li-pass', 'c-wf-email', 'c-wf-pass', 
+                'c-ish-email', 'c-ish-pass', 'c-unstop-email', 'c-unstop-pass', 
+                'c-naukri-email', 'c-naukri-pass', 'c-gemini', 'c-resume'
+            ];
+            
+            autoSaveFields.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.addEventListener('input', () => {
+                        // Sync email if main email changes
+                        if (id === 'p-email') {
+                            const email = el.value.trim();
+                            const liEmail = document.getElementById('c-li-email');
+                            const wfEmail = document.getElementById('c-wf-email');
+                            if (liEmail && !liEmail.value.trim()) liEmail.value = email;
+                            if (wfEmail && !wfEmail.value.trim()) wfEmail.value = email;
+                        }
+                        debouncedAutoSave();
+                    });
+                }
+            });
+
+            document.getElementById('keyword-input').addEventListener('keydown', e => {
+                if (e.key === 'Enter' && e.target.value.trim()) {
+                    e.preventDefault();
+                    keywordsList.push(e.target.value.trim());
+                    e.target.value = '';
+                    renderTags('keywords-tags', keywordsList, 'keyword-input');
+                }
+            });
+            document.getElementById('location-input').addEventListener('keydown', e => {
+                if (e.key === 'Enter' && e.target.value.trim()) {
+                    e.preventDefault();
+                    locationsList.push(e.target.value.trim());
+                    e.target.value = '';
+                    renderTags('locations-tags', locationsList, 'location-input');
+                }
+            });
+        });
+
+        // ─── SAVE PROFILE ───
+        async function saveProfileAndNext() {
+            await autoSaveProfile();
+            goToStep(2);
+        }
+
+        /**
+         * Collects all current form data and sends to /api/profile
+         */
+        async function autoSaveProfile() {
+            const syncEl = document.getElementById('sync-status');
+            if (syncEl) syncEl.style.display = 'inline-flex';
+
+            const payload = {
+                profile: {
+                    full_name: document.getElementById('p-name').value,
+                    first_name: document.getElementById('p-name').value.split(' ')[0],
+                    last_name: document.getElementById('p-name').value.split(' ').slice(1).join(' '),
+                    phone: document.getElementById('p-phone').value,
+                    email: document.getElementById('p-email').value,
+                    city: document.getElementById('p-city').value,
+                    location: document.getElementById('p-city').value,
+                    country: 'India',
+                    degree: document.getElementById('p-degree').value,
+                    course: document.getElementById('p-degree').value,
+                    college: document.getElementById('p-college').value,
+                    university: document.getElementById('p-college').value,
+                    graduation_year: document.getElementById('p-grad-year').value,
+                    cgpa: document.getElementById('p-cgpa').value,
+                    years_experience: document.getElementById('p-exp').value,
+                    skills: document.getElementById('p-skills').value,
+                    cover_letter: document.getElementById('p-cover').value,
+                },
+                linkedin: {
+                    email: document.getElementById('c-li-email').value,
+                    password: document.getElementById('c-li-pass').value,
+                },
+                wellfound: {
+                    email: document.getElementById('c-wf-email').value,
+                    password: document.getElementById('c-wf-pass').value,
+                },
+                internshala: {
+                    email: document.getElementById('c-ish-email').value,
+                    password: document.getElementById('c-ish-pass').value,
+                },
+                unstop: {
+                    email: document.getElementById('c-unstop-email').value,
+                    password: document.getElementById('c-unstop-pass').value,
+                },
+                naukri: {
+                    email: document.getElementById('c-naukri-email').value,
+                    password: document.getElementById('c-naukri-pass').value,
+                },
+                gemini_api_key: document.getElementById('c-gemini').value,
+                resume_path: document.getElementById('c-resume').value,
+                cover_letter: document.getElementById('p-cover').value, // Explicitly save cover letter
+            };
+
+            try {
+                const res = await fetch('/api/profile', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (res.ok) {
+                    userData = { ...userData, ...payload };
+                }
+            } catch (e) {
+                console.error("Auto-save failed:", e);
+            } finally {
+                if (syncEl) setTimeout(() => syncEl.style.display = 'none', 1000);
+            }
+        }
+
+        const debouncedAutoSave = debounce(autoSaveProfile, 1500);
+
+        // ─── SAVE PHASE CONFIG ───
+        async function savePhaseAndNext(fromStep) {
+            let payload = { phases: userData.phases || {} };
+
+            if (fromStep === 2) {
+                payload.phases.linkedin = {
+                    keywords: keywordsList,
+                    locations: locationsList,
+                    duration: document.getElementById('ph-duration').value,
+                    max_apps: parseInt(document.getElementById('ph-max-apps').value) || 100,
+                    recently_posted: document.getElementById('ph-recent').checked,
+                };
+                payload.phases.web_search = {
+                    enabled: document.getElementById('ph-websearch').checked,
+                };
+                
+                // Enabled status for each phase
+                payload.phases.linkedin.enabled = document.getElementById('toggle-linkedin').checked;
+                payload.phases.wellfound = { enabled: document.getElementById('toggle-wellfound').checked };
+                payload.phases.internshala = { enabled: document.getElementById('toggle-internshala').checked };
+                payload.phases.unstop = { enabled: document.getElementById('toggle-unstop').checked };
+                payload.phases.naukri = { enabled: document.getElementById('toggle-naukri').checked };
+                // Google form enabled will be merged below
+            }
+
+            if (fromStep === 3) {
+                payload.phases.google_form = {
+                    enabled: document.getElementById('toggle-forms').checked,
+                    custom_answers: {
+                        linkedin: document.getElementById('gf-linkedin').value,
+                        portfolio: document.getElementById('gf-portfolio').value,
+                        expected_stipend: document.getElementById('gf-stipend').value,
+                        availability: document.getElementById('gf-available').value,
+                        work_authorization: document.getElementById('gf-auth').value,
+                        willing_to_relocate: document.getElementById('gf-relocate').value,
+                        heard_about_us: document.getElementById('gf-heard').value,
+                    }
+                };
+
+                // Parse extra Q&A
+                const extra = document.getElementById('gf-extra').value;
+                if (extra) {
+                    extra.split('\n').forEach(line => {
+                        const parts = line.split('=');
+                        if (parts.length === 2) {
+                            const key = parts[0].trim().toLowerCase().replace(/[^a-z0-9]/g, '_');
+                            payload.phases.google_form.custom_answers[key] = parts[1].trim();
+                        }
+                    });
+                }
+            }
+
+            const res = await fetch('/api/profile', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (res.ok) {
+                userData.phases = payload.phases;
+                goToStep(fromStep === 2 ? 3 : 4);
+            }
+        }
+
+        // ─── BOT CONTROL ───
+        async function startBot() {
+            const res = await fetch('/api/run_bot', { method: 'POST' });
+            const data = await res.json();
+            if (res.ok) {
+                updateBotUI(true);
+                startPolling();
+            } else {
+                alert(data.error || 'Failed to start bot');
+            }
+        }
+
+        async function stopBot() {
+            await fetch('/api/stop_bot', { method: 'POST' });
+            updateBotUI(false);
+        }
+
+        function updateBotUI(running) {
+            const badge = document.getElementById('bot-status');
+            const btnStart = document.getElementById('btn-start');
+            const btnStop = document.getElementById('btn-stop');
+            if (running) {
+                badge.className = 'status-badge running';
+                badge.innerHTML = '<div class="status-dot"></div><span>Running</span>';
+                btnStart.style.display = 'none';
+                btnStop.style.display = 'flex';
+            } else {
+                badge.className = 'status-badge stopped';
+                badge.innerHTML = '<div class="status-dot"></div><span>Stopped</span>';
+                btnStart.style.display = 'flex';
+                btnStop.style.display = 'none';
+            }
+        }
+
+        function startPolling() {
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(pollBotStatus, 2000);
+            pollBotStatus();
+        }
+
+        async function pollBotStatus() {
+            try {
+                const res = await fetch('/api/bot_status');
+                if (!res.ok) return;
+                const data = await res.json();
+                updateBotUI(data.running);
+
+                const consoleEl = document.getElementById('console-output');
+                if (data.logs && data.logs.length > 0) {
+                    consoleEl.innerHTML = data.logs.map(line => {
+                        let cls = '';
+                        if (line.includes('✅') || line.includes('success') || line.includes('Applied')) cls = 'success';
+                        else if (line.includes('❌') || line.includes('error') || line.includes('Error')) cls = 'error';
+                        else if (line.includes('🔎') || line.includes('🌐') || line.includes('📌')) cls = 'info';
+                        return `<div class="line ${cls}">${escapeHtml(line)}</div>`;
+                    }).join('');
+                    consoleEl.scrollTop = consoleEl.scrollHeight;
+                }
+
+                if (!data.running && pollInterval) {
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                }
+            } catch (e) { }
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+    </script>
+</body>
+
+</html>

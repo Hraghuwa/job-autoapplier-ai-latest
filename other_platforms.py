@@ -1,20 +1,51 @@
-"""
-Unstop & Naukri Auto-Apply Module (UPGRADED)
-- Google login support
-- Smart form filling using shared smart_form_filler
-- Pagination support
-- URL deduplication — skips already-applied jobs
-- Driver health checks — catches dead sessions early
-
-WORKFLOW per job:
-  1. Check dedup → skip if already applied
-  2. Open job in new tab
-  3. Find Apply button → click
-  4. Fill form → submit
-  5. Close tab → switch back → next job
-"""
-
+import time
+import random
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException,
+    ElementClickInterceptedException, StaleElementReferenceException
+)
+import smart_form_filler
 from utils.auth import google_login_flow
+
+
+def try_click(driver, element):
+    """Try multiple click methods."""
+    try:
+        element.click()
+        return True
+    except (ElementClickInterceptedException, Exception):
+        pass
+    try:
+        driver.execute_script("arguments[0].click();", element)
+        return True
+    except Exception:
+        pass
+    return False
+
+
+def is_driver_alive(driver):
+    """Check if the browser session is still usable."""
+    try:
+        _ = driver.current_url
+        return True
+    except Exception:
+        return False
+
+
+def ensure_single_tab(driver):
+    """Close all tabs except the first one and switch to it."""
+    try:
+        while len(driver.window_handles) > 1:
+            driver.switch_to.window(driver.window_handles[-1])
+            driver.close()
+        driver.switch_to.window(driver.window_handles[0])
+    except Exception:
+        pass
+    return True
 
 
 def google_login_flow_wrapper(driver, platform_name, login_url, email):

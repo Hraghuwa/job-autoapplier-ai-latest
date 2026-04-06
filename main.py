@@ -14,8 +14,9 @@ PHASE 3: AUTO-FILL FORMS
    Scans all opened tabs for Google Forms & web forms
    Auto-fills fields + uploads resume
 
-PHASE 4: LINKEDIN OUTREACH (GenAI personalized)
-   AI-crafted connection notes & DMs per job/company/recruiter
+PHASE 3: AUTO-FILL FORMS
+   Scans all opened tabs for Google Forms & web forms
+   Auto-fills fields + uploads resume
 
 Location: Bangalore / Bengaluru / Remote
 """
@@ -27,12 +28,13 @@ import traceback
 from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 from config import CONFIG
 import linkedin_applier
 import job_finder
 import google_form_filler
-import linkedin_outreach
 import web_search_applier
 
 
@@ -81,27 +83,54 @@ def create_driver(headless=False):
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_argument("--disable-blink-features=AutomationControlled")
+    
+    # ── PERSISTENT PROFILE (Saves Google/LinkedIn logins) ──
+    # This creates a 'chrome_profile' folder in the project directory
+    profile_path = os.path.abspath("chrome_profile")
+    # Clear stale lock files that prevent Chrome from starting after a crash
+    for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+        lock_path = os.path.join(profile_path, lock_file)
+        try:
+            if os.path.exists(lock_path) or os.path.islink(lock_path):
+                os.remove(lock_path)
+        except Exception:
+            pass
+    options.add_argument(f"--user-data-dir={profile_path}")
+    
     # Keep browser open after script ends
     options.add_experimental_option("detach", True)
 
-    driver = webdriver.Chrome(options=options)
+    # webdriver-manager returns wrong path on newer Chrome; find the binary directly
+    import glob as _glob
+    wdm_path = ChromeDriverManager().install()
+    driver_dir = os.path.dirname(wdm_path)
+    candidates = _glob.glob(os.path.join(driver_dir, "chromedriver*"))
+    binary = next((p for p in candidates if os.path.isfile(p) and "NOTICES" not in p), wdm_path)
+    os.chmod(binary, 0o755)
+    driver = webdriver.Chrome(service=Service(binary), options=options)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    
+    # Wait a moment for profile to initialize
+    time.sleep(2)
     return driver
 
 
 def safe_quit(driver):
-    try:
-        driver.quit()
-        print("  🌐 Browser closed.")
-    except Exception:
-        pass
+    """
+    User requested: PROCEED TO NOT CLOSE THE TAB.
+    We skip driver.quit() so tabs stay open for manual review.
+    """
+    print("  🌐 Browser persistence active (tabs left open).")
+    pass
 
 
 # ─────────────────────────────────────────────
 #  PHASE 1: LINKEDIN AUTO-APPLY (per agent)
 # ─────────────────────────────────────────────
-def run_linkedin_agent(agent, agent_num, total_agents, tracker):
-    """Run one role agent on LinkedIn only. Auto-applies."""
+def run_linkedin_agent(agent, agent_num, total_agents, tracker, shared_driver=None):
+    """Run one role agent on LinkedIn only. Auto-applies.
+    If shared_driver is provided, reuses it (no new login needed).
+    """
     agent_name = agent["name"]
     agent_emoji = agent.get("emoji", "🔹")
     agent_keywords = agent["keywords"]
@@ -116,24 +145,27 @@ def run_linkedin_agent(agent, agent_num, total_agents, tracker):
 
     applied_urls = get_applied_urls(tracker)
     applied_count = 0
-    driver = None
+    owns_driver = shared_driver is None  # only quit if we created it
 
     linkedin_pwd = CONFIG["linkedin"]["password"]
     if not linkedin_pwd or linkedin_pwd.startswith("YOUR_"):
         print(f"  [LinkedIn] ⏭️  Skipping (password not set).")
         return 0
 
+    driver = shared_driver
     try:
-        driver = create_driver(headless=CONFIG.get("headless", False))
-        print(f"  [LinkedIn] 🔐 Logging in...")
-
-        login_ok = linkedin_applier.login(
-            driver, CONFIG["linkedin"]["email"], linkedin_pwd
-        )
-
-        if not login_ok:
-            print(f"  [LinkedIn] ⏭️  Login failed, skipping.")
-            return 0
+        if driver is None:
+            driver = create_driver(headless=CONFIG.get("headless", False))
+            print(f"  [LinkedIn] 🔐 Logging in...")
+            login_ok = linkedin_applier.login(
+                driver, CONFIG["linkedin"]["email"], linkedin_pwd
+            )
+            if not login_ok:
+                print(f"  [LinkedIn] ⏭️  Login failed, skipping.")
+                safe_quit(driver)
+                return 0
+        else:
+            print(f"  [LinkedIn] ♻️  Reusing existing browser session...")
 
         print(f"  [LinkedIn] 🎯 Applying to {agent_name} roles...")
         applied_count = linkedin_applier.run(
@@ -148,8 +180,7 @@ def run_linkedin_agent(agent, agent_num, total_agents, tracker):
         traceback.print_exc()
 
     finally:
-        # Close LinkedIn browser (LinkedIn is done)
-        if driver:
+        if owns_driver and driver:
             safe_quit(driver)
 
     return applied_count
@@ -214,7 +245,6 @@ def main():
     print(f"   2A: Open jobs in tabs from all platforms")
     print(f"   2B: Auto-apply on ATS/career pages")
     print(f"\n📌 PHASE 3: Auto-Fill Forms + Upload Resume")
-    print(f"\n📌 PHASE 4: LinkedIn Outreach (GenAI personalized)")
     print(f"\n📍 Location: {', '.join(CONFIG['locations'])}")
     print(f"📄 Resume: {CONFIG['resume_path'].split('/')[-1]}")
     print("=" * 60)
@@ -295,36 +325,7 @@ def main():
         print(f"  👉 Review filled forms and submit manually.")
         print(f"  ⚠️  Browser stays open — take your time!")
 
-    # ════════════════════════════════════════════
-    # PHASE 4: LinkedIn Outreach Agent
-    # ════════════════════════════════════════════
-    outreach_connections = 0
-    outreach_messages = 0
-    print(f"\n{'═' * 60}")
-    print(f"  📌 PHASE 4: LINKEDIN OUTREACH — Connect with Recruiters (HIDDEN)")
-    print(f"{'═' * 60}")
 
-    # try:
-    #     outreach_driver = create_driver(headless=False)
-    #     print(f"  🌐 Outreach browser started")
-    #
-    #     # Login to LinkedIn
-    #     linkedin_applier.login(
-    #         outreach_driver, CONFIG["linkedin"]["email"], CONFIG["linkedin"]["password"]
-    #     )
-    #     time.sleep(3)
-    #
-    #     outreach_connections, outreach_messages, _ = linkedin_outreach.run_outreach(
-    #         outreach_driver, CONFIG
-    #     )
-    #
-    #     # Don't close — leave open for the user
-    #     print(f"  ✅ Phase 4 complete!")
-    # except Exception as e:
-    #     print(f"  ❌ Outreach error: {e}")
-    #     traceback.print_exc()
-
-    # Update tracker
     tracker["total"] = tracker.get("total", 0) + total_applied
     tracker["cycles"] = tracker.get("cycles", 0) + 1
     tracker["last_run"] = datetime.now().isoformat()
@@ -337,8 +338,6 @@ def main():
     print(f"📑 Jobs opened in tabs: {found_count}")
     print(f"🌐 Web search applied: {web_applied}")
     print(f"📝 Forms auto-filled: {filled_tabs}")
-    print(f"🤝 Outreach connects sent: {outreach_connections}")
-    print(f"💬 Direct messages sent: {outreach_messages}")
     print(f"📊 Total tracked URLs: {len(get_applied_urls(tracker))}")
     print(f"👉 Go to your browser — review and submit!")
     print(f"{'=' * 60}")

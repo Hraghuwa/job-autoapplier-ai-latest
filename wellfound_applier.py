@@ -214,9 +214,11 @@ def login(driver, email, password):
         return False
 
     driver.get("https://wellfound.com/login")
+    print("[Wellfound] Waiting 4 seconds for page load...")
     time.sleep(4)
 
     try:
+        print("[Wellfound] Looking for email field...")
         # Find email field
         email_field = None
         for sel in [
@@ -228,6 +230,7 @@ def login(driver, email, password):
                 el = driver.find_element(By.CSS_SELECTOR, sel)
                 if el.is_displayed():
                     email_field = el
+                    print(f"[Wellfound] Found email field using selector: {sel}")
                     break
             except NoSuchElementException:
                 continue
@@ -237,6 +240,7 @@ def login(driver, email, password):
             try:
                 email_field = driver.find_element(By.XPATH,
                     "//input[@type='email' or contains(@placeholder,'email') or contains(@name,'email')]")
+                print(f"[Wellfound] Found email field using XPath")
             except:
                 pass
 
@@ -246,6 +250,7 @@ def login(driver, email, password):
             time.sleep(20)
             return _check_login_status(driver)
 
+        print("[Wellfound] Clear and type email...")
         email_field.clear()
         email_field.send_keys(email)
         time.sleep(1)
@@ -489,11 +494,10 @@ def _collect_job_links(driver):
     seen_urls = set()
 
     # Wellfound job URLs follow patterns like:
-    #   /jobs/COMPANY-NAME/JOB-TITLE-SLUG
+    #   /jobs/ID-JOB-TITLE
     #   /company/COMPANY/jobs/ID
-    # We use a regex to match only these patterns
     job_url_pattern = re.compile(
-        r"wellfound\.com/(jobs/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+"
+        r"wellfound\.com/(jobs/[a-zA-Z0-9_-]+"
         r"|company/[a-zA-Z0-9_-]+/jobs/[a-zA-Z0-9_-]+)"
     )
 

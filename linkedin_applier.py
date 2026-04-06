@@ -14,11 +14,13 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
-    TimeoutException, NoSuchElementException,
-    ElementClickInterceptedException, StaleElementReferenceException,
-    ElementNotInteractableException
+    NoSuchElementException, ElementNotInteractableException,
+    ElementClickInterceptedException, TimeoutException,
+    StaleElementReferenceException, JavascriptException
 )
 import agent_vision
+import job_finder
+import google_form_filler
 
 # ─────────────────────────────────────────────
 #  GEMINI AI for smart form filling
@@ -95,6 +97,12 @@ def login(driver, email, password):
     driver.get("https://www.linkedin.com/login")
     time.sleep(3)
 
+    # Already logged in via saved profile?
+    current = driver.current_url
+    if any(x in current for x in ("feed", "mynetwork", "jobs")):
+        print("[LinkedIn] ✅ Already logged in (profile session active)!")
+        return True
+
     try:
         # Check for alternative login form IDs
         try:
@@ -126,14 +134,20 @@ def login(driver, email, password):
         return False
 
     url = driver.current_url
-    if "feed" in url or "checkpoint" in url or "mynetwork" in url or "jobs" in url:
+    if "feed" in url or "mynetwork" in url or "jobs" in url:
         print("[LinkedIn] ✅ Logged in successfully!")
         return True
-    elif "challenge" in url or "security" in url:
+    elif "checkpoint" in url or "challenge" in url or "security" in url:
         print("[LinkedIn] ⚠️  Security challenge detected. Please solve it manually in the browser.")
-        print("[LinkedIn] ⏳ Waiting 30 seconds for you to complete the challenge...")
-        time.sleep(30)
-        return True
+        print("[LinkedIn] ⏳ Waiting 60 seconds for you to complete the challenge...")
+        time.sleep(60)
+        # Re-check URL after user completes the challenge
+        url = driver.current_url
+        if "feed" in url or "mynetwork" in url or "jobs" in url:
+            print("[LinkedIn] ✅ Challenge solved! Logged in successfully.")
+            return True
+        print(f"[LinkedIn] ❌ Challenge not resolved. Current URL: {url}")
+        return False
     else:
         print(f"[LinkedIn] ⚠️  Login may have failed. Current URL: {url}")
         return False
@@ -314,7 +328,11 @@ def fill_modal_fields(driver, config):
                     pass
                 combined = f"{label_text} {aria}".lower()
 
-                if any(w in combined for w in ["experience", "year"]):
+                if any(w in combined for w in ["month", "duration", "period", "internship length"]):
+                    inp.clear()
+                    inp.send_keys("3")
+                    print("    [Fill] Duration/months: 3")
+                elif any(w in combined for w in ["experience", "year"]):
                     inp.clear()
                     inp.send_keys(profile.get("years_experience", "4"))
                     print(f"    [Fill] Years experience: {profile.get('years_experience', '4')}")
@@ -642,35 +660,178 @@ def dismiss_modal(driver):
 def _is_title_relevant(job_title, keywords):
     """
     Check if a job title is relevant to the target keywords.
-    Relaxed rules for broader matching.
+    Keyword match takes priority over blocklist — so configured keywords
+    like 'Program Manager Intern' are never wrongly rejected.
     """
     title_lower = job_title.lower().strip()
     if not title_lower:
-        return False
+        return False, "Empty title"
 
-    # ── RULE 1: Entry-level check ──
-    intern_terms = ["intern", "trainee", "apprentice", "fellow", "associate", "candidate", "student", "graduate", "fresher"]
-    is_entry_level = any(t in title_lower for t in intern_terms)
-    
-    # ── RULE 2: Blocklist check ──
-    blocked_roles = [
-        "senior", "lead", "staff", "principal", "architect", "expert", "director", "vp", "manager",
-        "sr.", "sr ", "ii", "iii"
-    ]
-    if any(b in title_lower for b in blocked_roles):
-        return False, "Senior/Lead role blocked"
-
-    # ── RULE 3: Target Keywords check ──
+    # ── RULE 1: Target Keywords check (FIRST — overrides blocklist) ──
     wanted_terms = keywords or ["product", "management", "strategy", "ai", "tech", "business", "analyst"]
     for term in wanted_terms:
         if term.lower() in title_lower:
             return True, f"Matches keyword: {term}"
 
-    # If it's an intern/trainee role but no keywords matched, we might still want to look
-    if is_entry_level:
+    # ── RULE 2: Blocklist check (only if no keyword matched) ──
+    blocked_roles = [
+        "senior", "lead", "staff", "principal", "architect", "expert", "director", "vp", "manager",
+        "sr.", "sr ", "ii", "iii",
+        "engineer", "developer", "devops", "sre", "backend", "frontend",
+        "full stack", "fullstack", "software", "sde", "web dev", "data scientist"
+    ]
+    if any(b in title_lower for b in blocked_roles):
+        return False, "Blocked role (Senior/Tech/Engineering)"
+
+    # ── RULE 3: Entry-level catch-all ──
+    intern_terms = ["intern", "trainee", "apprentice", "fellow", "associate", "candidate", "student", "graduate", "fresher"]
+    if any(t in title_lower for t in intern_terms):
         return True, "Entry-level role (intern/trainee)"
 
     return False, "No keywords matched"
+
+
+def _extract_jd_text(driver):
+    """Extract the full job description text from the right panel."""
+    try:
+        # Common selectors for LinkedIn job description
+        selectors = [
+            "div.jobs-description-content__text",
+            "div.jobs-description__container",
+            "div#job-details",
+            "article.jobs-description__container",
+            "div.jobs-details__main-content",
+        ]
+        for sel in selectors:
+            try:
+                el = driver.find_element(By.CSS_SELECTOR, sel)
+                if el.is_displayed():
+                    return el.text.strip()
+            except:
+                continue
+    except:
+        pass
+    return ""
+
+
+def _is_jd_relevant(jd_text, keywords, config):
+    """
+    Analyze the JD text to ensure it's a good match for the user.
+    Checks for:
+    - Seniority (Senior/Lead/Staff) vs Intern/Junior
+    - Role type (Full-time vs Internship)
+    - Key skills alignment
+    - AI-powered deep analysis if key is available
+    """
+    if not jd_text:
+        return True, "No JD text found to analyze"
+
+    jd_lower = jd_text.lower()
+    
+    # --- RULE 1: Seniority Check (if user wants Intern roles) ---
+    is_intern_search = any("intern" in k.lower() for k in keywords)
+    if is_intern_search:
+        blocked_seniority = ["senior", "sr.", "lead", "staff", "principal", "director", "architect", "5+ years", "10+ years"]
+        if any(s in jd_lower[:500] for s in blocked_seniority):
+            return False, "JD mentions Senior/Lead requirements"
+
+    # --- RULE 2: Role Type Check ---
+    if is_intern_search:
+        # If it's a search for Interns, but JD explicitly says "Full-time" and lacks "Intern", skip
+        if "full-time" in jd_lower and "intern" not in jd_lower and "student" not in jd_lower:
+            return False, "JD specifies Full-time role only"
+
+    # --- RULE 3: Skill/Keyword Match ---
+    # At least one major keyword should be in the JD
+    must_have = ["product", "management", "strategy", "business", "analyst", "founder", "operations", "startup"]
+    if not any(m in jd_lower for m in must_have):
+        return False, "JD lacks core requested keywords"
+
+    return True, "JD looks relevant"
+
+
+def handle_external_application(driver, config, original_handles, linkedin_tab):
+    """
+    Detects if clicking Apply opened a new external tab.
+    If so: switches to it, auto-fills the form, uploads resume, tries to submit.
+    Returns 'submitted', 'filled' (needs manual submit), or None (no external tab).
+    """
+    time.sleep(3)
+    current_handles = driver.window_handles
+
+    new_tabs = [h for h in current_handles if h not in original_handles]
+    if not new_tabs:
+        return None  # No external tab opened — must be Easy Apply modal
+
+    ext_tab = new_tabs[-1]
+    print(f"  🌐 External application tab detected — switching to it...")
+    driver.switch_to.window(ext_tab)
+
+    try:
+        # Wait for page to fully load
+        WebDriverWait(driver, 15).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+        time.sleep(3)
+        url = driver.current_url
+        print(f"  🔗 External URL: {url[:80]}")
+
+        import google_form_filler
+
+        # Walk through up to 8 steps (multi-step ATS forms)
+        submitted = False
+        for step in range(8):
+            if google_form_filler.is_google_form(driver):
+                count = google_form_filler.fill_google_form(driver, config)
+            else:
+                count = google_form_filler.fill_web_form(driver, config)
+
+            print(f"  ✏️  Step {step+1}: filled {count} fields")
+            time.sleep(1)
+
+            # Try Submit first, then Next/Continue to advance multi-step form
+            clicked = False
+            for btn_text in ["Submit Application", "Submit", "Apply", "Send Application",
+                             "Next", "Continue", "Next Step", "Proceed"]:
+                try:
+                    btns = driver.find_elements(By.XPATH,
+                        f"//button[contains(normalize-space(),'{btn_text}')] | "
+                        f"//input[@type='submit'] | "
+                        f"//a[contains(normalize-space(),'{btn_text}')]")
+                    for btn in btns:
+                        if btn.is_displayed() and btn.is_enabled():
+                            print(f"  👆 Clicking: '{btn.text.strip() or btn_text}'")
+                            try_click(driver, btn)
+                            time.sleep(3)
+                            clicked = True
+                            if any(w in btn_text.lower() for w in ["submit", "apply", "send"]):
+                                submitted = True
+                            break
+                except Exception:
+                    continue
+                if clicked:
+                    break
+
+            if submitted:
+                break
+            if not clicked:
+                print(f"  ℹ️  No next/submit button found at step {step+1} — stopping")
+                break
+
+        # Keep the external tab open so user can review / submit manually
+        # Switch back to LinkedIn tab
+        driver.switch_to.window(linkedin_tab)
+        time.sleep(1)
+
+        return "submitted" if submitted else "filled"
+
+    except Exception as e:
+        print(f"  ❌ External tab error: {e}")
+        try:
+            driver.switch_to.window(linkedin_tab)
+        except Exception:
+            pass
+        return None
 
 
 def apply_from_search_page(driver, config, applied_count, max_jobs, current_keywords=None):
@@ -770,9 +931,49 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
 
             # ── Title relevance filter ──
             filter_keywords = current_keywords or config.get("keywords", [])
-            if not _is_title_relevant(job_title, filter_keywords):
-                print(f"  ⏭️  Skipping (not relevant): {job_title}")
+            is_relevant, reason = _is_title_relevant(job_title, filter_keywords)
+            if not is_relevant:
+                print(f"  ⏭️  Skipping (not relevant): {job_title} ({reason})")
                 continue
+
+            # ── JD relevance filter ──
+            try:
+                jd_text = _extract_jd_text(driver)
+                jd_ok, jd_reason = _is_jd_relevant(jd_text, filter_keywords, config)
+                
+                if not jd_ok:
+                    print(f"  ⏭️  Skipping (irrelevant JD): {job_title} ({jd_reason})")
+                    continue
+                else:
+                    print(f"  ✅ JD Verified: {jd_reason}")
+            except Exception as e:
+                print(f"  ⚠️  Error checking JD relevance: {e}")
+
+            # ── Duration filter: only apply to 3-month internships ──
+            try:
+                desc_el = driver.find_element(By.CSS_SELECTOR, "div.jobs-description, article, div.job-details-jobs-unified-top-card")
+                desc_text = desc_el.text.lower()
+
+                is_3_month = (
+                    "3 month" in desc_text or "3-month" in desc_text or
+                    "three month" in desc_text or "3months" in desc_text
+                )
+                non_3_month_durations = [
+                    "1 month", "1-month", "2 month", "2-month",
+                    "4 month", "4-month", "5 month", "5-month",
+                    "6 month", "6-month", "six month",
+                    "8 month", "8-month", "9 month", "9-month",
+                    "10 month", "10-month", "11 month", "11-month",
+                    "12 month", "12-month", "one year", "1 year",
+                ]
+                has_non_3 = any(d in desc_text for d in non_3_month_durations)
+
+                # Skip if description explicitly states a non-3-month duration
+                if has_non_3 and not is_3_month:
+                    print(f"  ⏭️  Skipping (non-3-month duration): {job_title}")
+                    continue
+            except:
+                pass
 
             # Look for Easy Apply button in the right panel / detail area
             easy_apply_btn = None
@@ -829,18 +1030,28 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 continue
 
             print(f"  🎯 Clicking Apply for: {job_title}")
+            handles_before = set(driver.window_handles)
+            linkedin_tab = driver.current_window_handle
             try_click(driver, easy_apply_btn)
             time.sleep(3)
 
-            # Process the Easy Apply modal
-            result = process_easy_apply_modal(driver, config)
+            # Check if an external tab opened first
+            ext_result = handle_external_application(driver, config, handles_before, linkedin_tab)
 
-            if result == "submitted" or result == "closed":
+            if ext_result in ("submitted", "filled"):
                 applied_count += 1
-                print(f"  📊 Progress: {applied_count}/{max_jobs} applications\n")
+                label = "submitted" if ext_result == "submitted" else "filled (review & submit)"
+                print(f"  📊 External form {label}: {applied_count}/{max_jobs}\n")
             else:
-                print(f"  ⚠️  Could not complete: {job_title}")
-                dismiss_modal(driver)
+                # No external tab — process LinkedIn Easy Apply modal
+                result = process_easy_apply_modal(driver, config)
+
+                if result == "submitted" or result == "closed":
+                    applied_count += 1
+                    print(f"  📊 Progress: {applied_count}/{max_jobs} applications\n")
+                else:
+                    print(f"  ⚠️  Could not complete: {job_title}")
+                    dismiss_modal(driver)
 
             # Short delay between applications
             delay = random.uniform(3, 8)

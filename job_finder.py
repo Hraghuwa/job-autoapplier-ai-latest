@@ -22,6 +22,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
+import google_form_filler
+
 
 # ─────────────────────────────────────────────
 #  HELPERS
@@ -254,7 +256,24 @@ def google_mega_search(driver, keywords, config, applied_urls, max_tabs=20):
                 # Open each new URL in its own tab
                 for url in new_urls:
                     open_in_new_tab(driver, url)
-                print(f"       → Found {len(new_urls)} jobs, opened in new tabs (total: {len(found_urls)})")
+                    try:
+                        # Attempt to autofill form immediately on the new tab
+                        windows = driver.window_handles
+                        driver.switch_to.window(windows[-1])
+                        time.sleep(2) # let page load
+                        if google_form_filler.is_google_form(driver):
+                            google_form_filler.fill_google_form(driver, config)
+                        else:
+                            google_form_filler.fill_web_form(driver, config)
+                        driver.switch_to.window(search_tab)
+                    except Exception as ef:
+                        print(f"       ⚠️  Autofill error on new tab: {ef}")
+                        try:
+                            driver.switch_to.window(search_tab)
+                        except:
+                            pass
+
+                print(f"       → Found {len(new_urls)} jobs, opened and autofilled where possible (total: {len(found_urls)})")
 
                 if len(found_urls) >= max_tabs:
                     print("  🛑 Reached max 20 tabs limit (Google Search).")
