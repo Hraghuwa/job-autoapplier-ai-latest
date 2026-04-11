@@ -1,4 +1,4 @@
-# Core App Dependencies
+# ── Backend (FastAPI server) ──────────────────────────────────────────────────
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 sqlalchemy[asyncio]>=2.0.0
@@ -17,11 +17,6 @@ google-generativeai==0.8.6
 razorpay
 resend
 httpx
-
-# Agent / Browser Selenium
-selenium==4.18.1
-webdriver-manager==4.0.1
-undetected-chromedriver>=3.5.5
+networkx>=3.0
 pyotp
 python-dotenv
-networkx>=3.0
