@@ -197,7 +197,7 @@ export default function JobDetailPage() {
                     </p>
                     <p className="text-sm font-medium text-slate-800">{event.message}</p>
                     {event.data?.reason && (
-                      <p className="text-xs text-slate-500 italic">"{event.data.reason}"</p>
+                      <p className="text-xs text-slate-500 italic">&quot;{event.data.reason}&quot;</p>
                     )}
                   </div>
                 </div>

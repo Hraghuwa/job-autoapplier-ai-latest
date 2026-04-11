@@ -11,6 +11,7 @@ import {
   User as UserIcon, Zap, Key, Briefcase, ShieldCheck
 } from 'lucide-react'
 import { BugReportButton } from '@/components/BugReportButton'
+import { TokenBadge } from '@/components/TokenBadge'
 
 const navItems = [
   { name: 'Command Center', href: '/dashboard', icon: BarChart3 },
@@ -224,6 +225,11 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             <span className="font-display text-base font-bold">JobAgent</span>
           </div>
         </header>
+
+        {/* Top bar desktop — shows token/credit balance */}
+        <div className="hidden lg:flex items-center justify-end gap-3 h-12 px-6 border-b border-border bg-white/60 dark:bg-[hsl(234,28%,12%)]/60 backdrop-blur-sm shrink-0">
+          <TokenBadge />
+        </div>
 
         {/* Page content */}
         <main className="flex-1 overflow-auto">

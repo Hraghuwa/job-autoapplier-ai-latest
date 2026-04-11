@@ -51,7 +51,7 @@ export default function SettingsPage() {
     try {
       await api.post(`/users/${provider}-key`, { api_key: key.trim() })
       setKeyMsg({ type: 'ok', text: `${provider === 'gemini' ? 'Gemini' : 'Groq'} key saved & validated.` })
-      provider === 'gemini' ? setGeminiKey('') : setGroqKey('')
+      if (provider === 'gemini') { setGeminiKey('') } else { setGroqKey('') }
       qc.invalidateQueries({ queryKey: ['api-keys'] })
     } catch (err: any) {
       setKeyMsg({ type: 'err', text: err?.response?.data?.detail || `Failed to save ${provider} key` })

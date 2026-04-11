@@ -335,7 +335,7 @@ export default function KnowledgeGraphPage() {
                   </CardTitle>
               </CardHeader>
               <CardContent className="py-2 px-4">
-                  <p className="text-xs text-indigo-600">Lines show 'Applied', 'Matched', or 'Missing' relationships between entities.</p>
+                  <p className="text-xs text-indigo-600">Lines show &apos;Applied&apos;, &apos;Matched&apos;, or &apos;Missing&apos; relationships between entities.</p>
               </CardContent>
           </Card>
       </div>
