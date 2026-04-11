@@ -29,6 +29,7 @@ from selenium.common.exceptions import (
 )
 import smart_form_filler
 from utils.auth import google_login_flow
+from agent_stop import should_stop
 
 
 def try_click(driver, element):
@@ -138,6 +139,9 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
     location_str = ",".join(city_locations) if city_locations else "bangalore,mumbai,delhi"
 
     for keyword in keywords:
+        if should_stop():
+            print("  ⏹  Stop requested — exiting agent early.")
+            break
         if applied_count >= max_jobs:
             break
 

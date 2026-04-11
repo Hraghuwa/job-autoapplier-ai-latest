@@ -20,3 +20,6 @@ uploads/
 *.db
 backend.db
 jobagent.db
+
+# Claude worktrees
+.claude/worktrees/

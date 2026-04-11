@@ -1,14 +1,23 @@
 """
 🔍 Job Finder v3 — MASSIVE INTERNET-WIDE SEARCH
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Searches 100+ websites across the internet for intern jobs.
+Searches 100+ websites across the internet for ANY roles the user
+configured — intern, full-time, contract, whatever their role_agents
+or keywords list specifies. The role detection is driven by
+CONFIG["role_agents"] and CONFIG["keywords"], NOT hardcoded to "intern".
+
 EVERY found job opens in its OWN NEW TAB.
 Search tab stays separate — never navigates away.
-Browser stays OPEN with all tabs for manual application.
+Browser stays OPEN with all tabs for manual application (tabs are
+preserved on both stop AND normal completion — see orchestrator.py).
 
 Strategy: Use Google as the search engine to discover jobs
 across ALL websites (not just specific platforms).
 Each Google search finds jobs across many sites at once.
+
+Role orchestration: when multiple role_agents are configured, queries
+are round-robin interleaved so every role gets equal coverage in
+parallel rather than one role consuming the entire query budget.
 """
 
 import time
@@ -23,6 +32,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 import google_form_filler
+import web_search_applier
 
 
 # ─────────────────────────────────────────────
@@ -124,83 +134,142 @@ def extract_google_links(driver, found_urls, applied_urls):
 # ─────────────────────────────────────────────
 #  GOOGLE MEGA-SEARCH: 100+ websites
 # ─────────────────────────────────────────────
+
+# Global job-board sites to target across Google queries.
+# These are searched alongside the user's configured keywords so the
+# agent gets broad internet coverage in a single run. The user can
+# override/extend via config["web_search"]["extra_sites"].
+MAINSTREAM_JOB_BOARDS = [
+    # Indian + international mainstream
+    "internshala.com", "unstop.com", "naukri.com",
+    "indeed.com", "indeed.co.in", "glassdoor.com", "glassdoor.co.in", "foundit.in",
+    "wellfound.com", "instahyre.com", "cutshort.io",
+    "hirect.in", "workindia.in", "apna.co", "iimjobs.com",
+    "hirist.com", "angel.co", "linkedin.com/jobs",
+    # Added per user request: large mainstream + developer + remote boards
+    "simplyhired.com", "stackoverflow.com/jobs", "jobspresso.co",
+]
+
+REMOTE_JOB_BOARDS = [
+    # Remote-first boards requested by the user
+    "nodesk.co", "remotive.com", "remote4me.com", "pangian.com",
+    "remotees.com", "remotehabits.com", "skiptheachive.com",
+    # Common remote boards kept because they pair well with the above
+    "weworkremotely.com", "remoteok.com", "justremote.co",
+    "himalayas.app", "remote.co", "workingnomads.co",
+]
+
+ATS_PLATFORMS = [
+    "lever.co", "greenhouse.io", "ashbyhq.com",
+    "smartrecruiters.com", "workday.com", "icims.com",
+    "bamboohr.com", "freshteam.com", "breezy.hr",
+    "zohorecruit.com", "darwinbox.com",
+]
+
+
 def build_search_queries(keywords, config):
     """
-    Build a comprehensive list of Google search queries
-    that will find jobs across 100+ websites.
+    Build a comprehensive list of Google `site:` queries covering:
+
+      • Mainstream boards (Indeed, Glassdoor, Wellfound, LinkedIn, StackOverflow...)
+      • Remote boards (NoDesk, Remotive, Pangian, Remotees, RemoteHabits...)
+      • ATS platforms (Lever, Greenhouse, Ashby, Workday...)
+      • Target company career pages (from config)
+      • Google Form applications
+      • Extra sites the user provides via config["web_search"]["extra_sites"]
+
+    Duplicate queries are de-duplicated at the end so the same search isn't
+    issued twice in a single run — one of the explicit user requirements.
+    The role language ("intern"/"full-time") is taken from the user's
+    keywords, NOT hardcoded, so job_finder stays role-agnostic.
     """
     queries = []
 
-    # ── 1. Platform-specific searches ──
-    platforms = [
-        "internshala.com", "unstop.com", "naukri.com",
-        "indeed.co.in", "glassdoor.co.in", "foundit.in",
-        "wellfound.com", "instahyre.com", "cutshort.io",
-        "hirect.in", "workindia.in", "apna.co", "iimjobs.com",
-        "hirist.com", "angel.co", "linkedin.com/jobs",
-    ]
-    for kw in keywords[:6]:
-        platform_group = " OR ".join(f"site:{p}" for p in platforms[:6])
-        queries.append(f'{kw} Bangalore apply ({platform_group})')
-        platform_group2 = " OR ".join(f"site:{p}" for p in platforms[6:])
-        if platform_group2:
-            queries.append(f'{kw} Bangalore intern ({platform_group2})')
+    web_cfg = config.get("web_search", {}) or {}
+    extra_sites = web_cfg.get("extra_sites", []) or []
+
+    # Full list of job boards the user wants searched every run.
+    # Order: mainstream → remote → ATS → user-provided extras.
+    job_boards = MAINSTREAM_JOB_BOARDS + REMOTE_JOB_BOARDS + list(extra_sites)
+
+    locations = config.get("locations") or ["Bangalore"]
+    primary_loc = locations[0] if locations else ""
+
+    # ── 1. Group every ~6 sites into a single OR'd `site:` query so one
+    #    Google search covers multiple boards at once. This keeps the
+    #    total query count manageable while still hitting every board.
+    def _chunks(seq, size):
+        for i in range(0, len(seq), size):
+            yield seq[i:i + size]
+
+    for kw in keywords[:8]:
+        for chunk in _chunks(job_boards, 6):
+            site_group = " OR ".join(f"site:{p}" for p in chunk)
+            if primary_loc:
+                queries.append(f'{kw} {primary_loc} apply ({site_group})')
+            else:
+                queries.append(f'{kw} apply ({site_group})')
 
     # ── 2. ATS platform searches ──
-    ats_platforms = [
-        "lever.co", "greenhouse.io", "ashbyhq.com",
-        "smartrecruiters.com", "workday.com", "icims.com",
-        "bamboohr.com", "freshteam.com", "breezy.hr",
-        "zohorecruit.com", "darwinbox.com",
-    ]
-    for kw in keywords[:5]:
-        ats_group = " OR ".join(f"site:{a}" for a in ats_platforms[:5])
-        queries.append(f'{kw} intern ({ats_group})')
-        ats_group2 = " OR ".join(f"site:{a}" for a in ats_platforms[5:])
+    for kw in keywords[:6]:
+        ats_group = " OR ".join(f"site:{a}" for a in ATS_PLATFORMS[:5])
+        queries.append(f'{kw} ({ats_group})')
+        ats_group2 = " OR ".join(f"site:{a}" for a in ATS_PLATFORMS[5:])
         if ats_group2:
             queries.append(f'{kw} apply ({ats_group2})')
 
-    # ── 3. Company career page searches (all target companies) ──
-    target_companies = config.get("web_search", {}).get("target_companies", [])
+    # ── 3. Target company career pages (from config) ──
+    target_companies = web_cfg.get("target_companies", []) or []
     for company in target_companies[:40]:
-        queries.append(f'site:{company}.com careers intern apply')
-
+        queries.append(f'site:{company}.com careers apply')
     for company in target_companies[40:]:
-        queries.append(f'site:{company}.com internship hiring')
+        queries.append(f'site:{company}.com hiring')
 
-    # ── 4. Broad internet searches (config keywords ONLY) ──
-    locations = config.get("locations", ["Bangalore"])
+    # ── 4. Broad internet searches across user locations + "remote" ──
     for kw in keywords:
-        for loc in locations[:2]:  # Bangalore + Bengaluru
+        for loc in locations[:2]:
             queries.append(f'{kw} {loc} apply 2025 2026')
             queries.append(f'{kw} {loc} hiring apply now')
-        # Remote option
-        queries.append(f'{kw} India remote apply intern 2025')
+        queries.append(f'{kw} remote apply')
 
-    # ── 5. Consulting/Corp searches (role-specific only) ──
+    # ── 5. Consulting/Corp searches (only if user keywords mention them) ──
     consulting_firms = "BCG McKinsey Bain Deloitte KPMG EY PwC Accenture"
     consulting_keywords = [kw for kw in keywords if any(w in kw.lower() for w in
         ["consultant", "strategy", "management trainee", "business"])]
     for kw in consulting_keywords[:4]:
         queries.append(f'{kw} {consulting_firms} apply 2025')
 
-    # ── 6. Platform discovery (config keywords only) ──
+    # ── 6. Platform discovery using user keywords ──
     for kw in keywords[:10]:
-        queries.append(f'"apply now" {kw} Bangalore')
-        queries.append(f'"we are hiring" {kw} Bangalore')
+        if primary_loc:
+            queries.append(f'"apply now" {kw} {primary_loc}')
+            queries.append(f'"we are hiring" {kw} {primary_loc}')
+        else:
+            queries.append(f'"apply now" {kw}')
+            queries.append(f'"we are hiring" {kw}')
 
-    # ── 7. Startup aggregators (config keywords only) ──
+    # ── 7. Startup aggregators ──
     startup_sites = ["ycombinator.com", "workatastartup.com", "wellfound.com"]
     for site in startup_sites:
         for kw in keywords[:4]:
-            queries.append(f'site:{site} {kw} India')
+            queries.append(f'site:{site} {kw}')
 
-    # ── 8. Google Form job applications (config keywords only) ──
+    # ── 8. Google Form job applications ──
     for kw in keywords[:8]:
         queries.append(f'site:docs.google.com/forms "{kw}" apply')
-    queries.append(f'site:docs.google.com/forms intern Bangalore apply')
 
-    return queries
+    # ── De-duplicate while preserving order — one of the user's explicit
+    # anti-repetition requirements. Without this the same site-chunk
+    # query can appear multiple times because keyword loops overlap.
+    seen = set()
+    deduped = []
+    for q in queries:
+        norm = " ".join(q.lower().split())
+        if norm in seen:
+            continue
+        seen.add(norm)
+        deduped.append(q)
+    return deduped
 
 
 def google_mega_search(driver, keywords, config, applied_urls, max_tabs=20):
@@ -254,26 +323,29 @@ def google_mega_search(driver, keywords, config, applied_urls, max_tabs=20):
                 new_urls = new_urls[:space_left]
                 found_urls.extend(new_urls)
                 # Open each new URL in its own tab
+                search_tab = driver.current_window_handle
                 for url in new_urls:
-                    open_in_new_tab(driver, url)
+                    print(f"       🚀 Starting active apply for: {url[:60]}...")
+                    # Try to apply immediately
                     try:
-                        # Attempt to autofill form immediately on the new tab
-                        windows = driver.window_handles
-                        driver.switch_to.window(windows[-1])
-                        time.sleep(2) # let page load
-                        if google_form_filler.is_google_form(driver):
-                            google_form_filler.fill_google_form(driver, config)
+                        # Re-calculate windows before attempt
+                        search_tab = driver.current_window_handle
+                        success = web_search_applier.apply_to_job_url(driver, url, config)
+                        if success:
+                            print(f"       ✅ SUCCESS: Application completed!")
                         else:
-                            google_form_filler.fill_web_form(driver, config)
+                            print(f"       ⚠️  Active apply failed — tab remains open for review.")
+                        
+                        # Always switch back to search tab
                         driver.switch_to.window(search_tab)
                     except Exception as ef:
-                        print(f"       ⚠️  Autofill error on new tab: {ef}")
+                        print(f"       ⚠️  Active apply error: {ef}")
                         try:
                             driver.switch_to.window(search_tab)
                         except:
                             pass
 
-                print(f"       → Found {len(new_urls)} jobs, opened and autofilled where possible (total: {len(found_urls)})")
+                print(f"       → Proccessed {len(new_urls)} jobs (total found: {len(found_urls)})")
 
                 if len(found_urls) >= max_tabs:
                     print("  🛑 Reached max 20 tabs limit (Google Search).")
@@ -293,8 +365,13 @@ def google_mega_search(driver, keywords, config, applied_urls, max_tabs=20):
                             space_left = max_tabs - len(found_urls)
                             page2_urls = page2_urls[:space_left]
                             found_urls.extend(page2_urls)
+                            search_tab = driver.current_window_handle
                             for url in page2_urls:
                                 open_in_new_tab(driver, url)
+                                try:
+                                    driver.switch_to.window(search_tab)
+                                except:
+                                    pass
                             print(f"       → Page 2: {len(page2_urls)} more jobs")
                             
                             if len(found_urls) >= max_tabs:
@@ -360,11 +437,18 @@ def search_platform_open_tabs(driver, platform_name, search_urls, selectors, dom
 
         time.sleep(random.uniform(1, 2))
 
-    # Open ALL found jobs in new tabs
+    # Apply to ALL found jobs
     if new_found:
-        print(f"  📋 [{platform_name}] Found {len(new_found)} jobs, opening in tabs...")
+        print(f"  📋 [{platform_name}] Found {len(new_found)} jobs, proceeding to active apply...")
+        search_tab = driver.current_window_handle
         for url in new_found:
-            open_in_new_tab(driver, url)
+            print(f"    🚀 Active apply: {url[:60]}...")
+            try:
+                web_search_applier.apply_to_job_url(driver, url, config)
+                driver.switch_to.window(search_tab)
+            except:
+                try: driver.switch_to.window(search_tab)
+                except: pass
     else:
         print(f"  ℹ️  [{platform_name}] No new jobs found")
 
@@ -447,9 +531,16 @@ def crawl_career_pages(driver, applied_urls, found_urls, max_new_tabs=20):
         time.sleep(random.uniform(0.5, 1.5))
 
     if new_found:
-        print(f"  📋 [Career Pages] Found {len(new_found)} jobs, opening in tabs...")
+        print(f"  📋 [Career Pages] Found {len(new_found)} jobs, proceeding to active apply...")
+        search_tab = driver.current_window_handle
         for url in new_found:
-            open_in_new_tab(driver, url)
+            print(f"    🚀 Active apply: {url[:60]}...")
+            try:
+                web_search_applier.apply_to_job_url(driver, url, config)
+                driver.switch_to.window(search_tab)
+            except:
+                try: driver.switch_to.window(search_tab)
+                except: pass
     else:
         print(f"  ℹ️  [Career Pages] No new jobs found")
 

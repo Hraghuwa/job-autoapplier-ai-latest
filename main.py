@@ -100,14 +100,8 @@ def create_driver(headless=False):
     # Keep browser open after script ends
     options.add_experimental_option("detach", True)
 
-    # webdriver-manager returns wrong path on newer Chrome; find the binary directly
-    import glob as _glob
-    wdm_path = ChromeDriverManager().install()
-    driver_dir = os.path.dirname(wdm_path)
-    candidates = _glob.glob(os.path.join(driver_dir, "chromedriver*"))
-    binary = next((p for p in candidates if os.path.isfile(p) and "NOTICES" not in p), wdm_path)
-    os.chmod(binary, 0o755)
-    driver = webdriver.Chrome(service=Service(binary), options=options)
+    # Selenium 4.10+ handles driver management automatically via Selenium Manager
+    driver = webdriver.Chrome(options=options)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     
     # Wait a moment for profile to initialize

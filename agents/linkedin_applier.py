@@ -100,14 +100,90 @@ Output ONLY the answer, nothing else."""
         answer = response.text.strip().strip('"').strip("'")
         if answer and len(answer) < 200:
             return answer
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"    [AI Error] {type(e).__name__}: {str(e)[:100]}")
+        # Fallback logic if Gemini fails — try to provide a generic but safe answer
+        q = question.lower()
+        if "notice period" in q: return config.get("profile", {}).get("notice_period", "30 days")
+        if "salary" in q or "ctc" in q: return config.get("profile", {}).get("expected_salary", "0")
+        if "experience" in q or "years" in q: return config.get("profile", {}).get("years_of_experience", "1")
+        if "authorized" in q or "eligible" in q: return "Yes"
+        if "sponsorship" in q: return "No"
+        if "relocate" in q: return "Yes"
     return None
 
 
-def login(driver, email, password):
-    print("\n[LinkedIn] Logging in...")
+def _try_cookie_login(driver, cookies_json: str) -> bool:
+    """
+    Inject stored browser session cookies to bypass LinkedIn login challenge.
+    cookies_json: JSON array exported from EditThisCookie / Cookie-Editor.
+    Returns True if cookie injection results in a valid session.
+    """
+    import json as _json
+    try:
+        cookies = _json.loads(cookies_json)
+        if not isinstance(cookies, list) or not cookies:
+            return False
 
+        # Navigate to linkedin.com so browser is on the right domain before adding cookies
+        driver.get("https://www.linkedin.com")
+        time.sleep(2)
+
+        injected = 0
+        for c in cookies:
+            if not isinstance(c, dict):
+                continue
+            try:
+                # Selenium requires 'name' and 'value'; other fields are optional
+                cookie = {"name": c["name"], "value": c["value"]}
+                if c.get("domain"):
+                    cookie["domain"] = c["domain"].lstrip(".")  # strip leading dot
+                if c.get("path"):
+                    cookie["path"] = c["path"]
+                # Skip expiry/httpOnly/secure — can cause add_cookie to reject
+                driver.add_cookie(cookie)
+                injected += 1
+            except Exception:
+                pass
+
+        if injected == 0:
+            print("[LinkedIn] ⚠️  No cookies could be injected.")
+            return False
+
+        print(f"[LinkedIn] 🍪 Injected {injected} cookies. Checking session...")
+        driver.get("https://www.linkedin.com/feed/")
+        time.sleep(5)
+
+        url = driver.current_url
+        if "feed" in url or "mynetwork" in url or "jobs" in url:
+            print("[LinkedIn] ✅ Cookie login successful! Session active.")
+            return True
+
+        print(f"[LinkedIn] ℹ️  Cookies did not establish a valid session (URL: {url}). Cookies may be expired.")
+        return False
+    except Exception as e:
+        print(f"[LinkedIn] ⚠️  Cookie injection error: {e}")
+        return False
+
+
+def login(driver, email, password, cookies_json: str = None):
+    print("\n[LinkedIn] 🔐 Initializing login...")
+
+    # ── 1. Try cookie injection first (bypasses CAPTCHA/security challenges) ──
+    if not cookies_json:
+        try:
+            from config import CONFIG
+            cookies_json = CONFIG.get("linkedin_cookies", "")
+        except Exception:
+            pass
+
+    if cookies_json:
+        print("[LinkedIn] 🍪 Attempting cookie-based login...")
+        if _try_cookie_login(driver, cookies_json):
+            return True
+        print("[LinkedIn] ℹ️  Cookie login failed — falling back to password login.")
+
+    # ── 2. Password login ─────────────────────────────────────────────────────
     if not email or not password or password.startswith("YOUR_"):
         print("[LinkedIn] ❌ Credentials not set! Add them in the Credentials page.")
         return False
@@ -150,10 +226,24 @@ def login(driver, email, password):
         print("[LinkedIn] ✅ Logged in successfully!")
         return True
     elif "checkpoint" in url or "challenge" in url or "security" in url:
+        # Check if we're running headless (server context) — can't solve CAPTCHA headlessly
+        headless = False
+        try:
+            from config import CONFIG
+            headless = CONFIG.get("headless", False)
+        except Exception:
+            pass
+
+        if headless:
+            print("[LinkedIn] ❌ Security challenge detected in headless mode.")
+            print("[LinkedIn] ℹ️  Fix: Go to Credentials page → 'LinkedIn Login Boost' → export cookies from your browser and paste them.")
+            print("[LinkedIn]    The agent will use your session cookies to bypass this challenge next time.")
+            return False
+
+        # Non-headless (CLI): give the user time to solve the challenge manually
         print("[LinkedIn] ⚠️  Security challenge detected. Please solve it manually in the browser.")
         print("[LinkedIn] ⏳ Waiting 60 seconds for you to complete the challenge...")
         time.sleep(60)
-        # Re-check URL after user completes the challenge
         url = driver.current_url
         if "feed" in url or "mynetwork" in url or "jobs" in url:
             print("[LinkedIn] ✅ Challenge solved! Logged in successfully.")
@@ -488,29 +578,139 @@ def fill_modal_fields(driver, config):
     return filled_something
 
 
-def process_easy_apply_modal(driver, config):
+def _find_modal(driver):
+    """
+    Locate the LinkedIn Easy Apply modal using multiple selector strategies.
+    Returns the modal element or None.
+    LinkedIn frequently renames classes so we try many variants.
+    """
+    MODAL_SELECTORS = [
+        "div.jobs-easy-apply-modal",
+        "div.artdeco-modal--is-open",
+        "div.artdeco-modal",
+        "div[role='dialog']",
+        "[aria-modal='true']",
+        "div[data-test-modal]",
+        "div.jobs-easy-apply-content",
+        "div.jobs-apply-flow",
+    ]
+    for sel in MODAL_SELECTORS:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                if el.is_displayed():
+                    return el
+        except Exception:
+            pass
+    return None
+
+
+def _find_modal_action_button(driver):
+    """
+    Find the primary action button (Next / Review / Submit) in the Easy Apply modal.
+    Uses a multi-strategy approach resilient to LinkedIn's frequent HTML changes:
+      1. aria-label exact matches for known LinkedIn button labels
+      2. Button text matches (Next, Review, Submit application)
+      3. artdeco-button--primary class (the styled primary button)
+      4. Nuclear: last visible button in the modal footer
+    Returns (button_element, action_type) or (None, None).
+    """
+    # Strategy 1: aria-label based (most stable across LinkedIn UI changes)
+    ARIA_SUBMIT = ["submit application", "submit"]
+    ARIA_NEXT   = ["continue to next step", "next", "review your application", "review"]
+
+    # Strategy 2: button text based
+    TEXT_SUBMIT = ["submit application", "submit"]
+    TEXT_NEXT   = ["review", "next", "continue"]
+
+    def _check(btn):
+        if not btn.is_displayed():
+            return None
+        text = (btn.text or "").strip().lower()
+        aria = (btn.get_attribute("aria-label") or "").strip().lower()
+        combined = f"{text} {aria}"
+        if any(s in combined for s in ARIA_SUBMIT + TEXT_SUBMIT):
+            return "submit"
+        if any(s in combined for s in ARIA_NEXT + TEXT_NEXT):
+            return "next"
+        return None
+
+    # Collect buttons from as many modal containers as possible
+    candidates = []
+    for sel in [
+        "div.jobs-easy-apply-modal button",
+        "div.artdeco-modal button",
+        "div[role='dialog'] button",
+        "[aria-modal='true'] button",
+        "div[data-test-modal] button",
+        "div.jobs-easy-apply-content button",
+        # footer-specific (LinkedIn wraps actions in a footer)
+        "footer button",
+        "div.jobs-easy-apply-footer button",
+        "div.ph5.pb4 button",
+        # Direct primary button class (most reliable selector)
+        "button.artdeco-button--primary",
+        "button[data-easy-apply-next-button]",
+    ]:
+        try:
+            found = driver.find_elements(By.CSS_SELECTOR, sel)
+            candidates.extend(found)
+        except Exception:
+            pass
+
+    # Deduplicate by id() while preserving order
+    seen = set()
+    unique = []
+    for b in candidates:
+        bid = id(b)
+        if bid not in seen:
+            seen.add(bid)
+            unique.append(b)
+
+    # Prefer submit over next
+    submit_btn = None
+    next_btn   = None
+    for btn in unique:
+        try:
+            action = _check(btn)
+            if action == "submit" and submit_btn is None:
+                submit_btn = btn
+            elif action == "next" and next_btn is None:
+                next_btn = btn
+        except Exception:
+            pass
+
+    if submit_btn:
+        return submit_btn, "submit"
+    if next_btn:
+        return next_btn, "next"
+
+    # Nuclear fallback: last visible artdeco-button--primary anywhere on page
+    try:
+        primary_btns = driver.find_elements(By.CSS_SELECTOR, "button.artdeco-button--primary")
+        for btn in reversed(primary_btns):
+            if btn.is_displayed():
+                return btn, "next"
+    except Exception:
+        pass
+
+    return None, None
+
+
+def process_easy_apply_modal(driver, config, dry_run=False):
     """Walk through the multi-step Easy Apply modal until submitted."""
     max_steps = 15
     _stop = config.get("_stop_event")
 
     for step in range(max_steps):
         if _stop and _stop.is_set():
-            print("    [Modal] 🛑 Stop requested — closing modal.")
-            try:
-                driver.find_element(By.CSS_SELECTOR,
-                    "button[aria-label='Dismiss'], button.artdeco-modal__dismiss").click()
-            except Exception:
-                pass
+            print("    [Modal] 🛑 Stop requested — leaving modal open.")
             return "stopped"
         time.sleep(2)
 
-        # Check if modal is still open
-        modal = None
-        try:
-            modal = driver.find_element(By.CSS_SELECTOR,
-                "div.jobs-easy-apply-modal, div.artdeco-modal--is-open, "
-                "div[role='dialog']")
-        except NoSuchElementException:
+        # Check if modal is still open — use resilient multi-selector helper
+        modal = _find_modal(driver)
+        if not modal:
             print("    [Modal] Modal closed (may have been one-click apply)")
             return "closed"
 
@@ -521,7 +721,7 @@ def process_easy_apply_modal(driver, config):
                 "contains(text(),'application was sent') or "
                 "contains(text(),'You applied')]")
             if any(s.is_displayed() for s in success):
-                print("    ✅ Application submitted!")
+                print("    ✅ SUCCESS: Application submitted!")
                 # Dismiss the success dialog
                 try:
                     dismiss = driver.find_element(
@@ -552,102 +752,57 @@ def process_easy_apply_modal(driver, config):
         # Fill any empty form fields
         fill_modal_fields(driver, config)
 
-        # Try to click action buttons — search for ALL visible buttons in modal first
+        # Find and click the primary action button using the resilient helper
+        action_btn, action_type = _find_modal_action_button(driver)
         clicked = False
 
-        # Strategy: Find all buttons in the modal footer and click the right one
-        all_modal_buttons = []
-        try:
-            all_modal_buttons = driver.find_elements(By.CSS_SELECTOR,
-                "div.jobs-easy-apply-modal button, "
-                "div.artdeco-modal button, "
-                "div[role='dialog'] button, "
-                "div.jobs-easy-apply-content button")
-        except:
-            pass
+        if action_btn:
+            btn_text  = (action_btn.text or "").strip()
+            aria_label = action_btn.get_attribute("aria-label") or ""
+            print(f"    🚀 [Step {step+1}] ACTION: Clicking '{btn_text}' ({action_type})")
+            try_click(driver, action_btn)
+            time.sleep(2)
+            clicked = True
 
-        # Priority order: Submit > Review > Next > Continue
-        priority_texts = [
-            "Submit application", "Submit",
-            "Review", "Next", "Continue"
-        ]
-
-        for priority_text in priority_texts:
-            if clicked:
-                break
-            for btn in all_modal_buttons:
+            if action_type == "submit":
+                if dry_run:
+                    print("    🔍 [DRY RUN] Would submit — dismissing modal.")
+                    try:
+                        dismiss = driver.find_element(By.CSS_SELECTOR,
+                            "button[aria-label='Dismiss'], button.artdeco-modal__dismiss")
+                        try_click(driver, dismiss)
+                        time.sleep(1)
+                        discard = driver.find_elements(By.XPATH, "//button[contains(.,'Discard')]")
+                        for d in discard:
+                            try_click(driver, d)
+                    except Exception:
+                        pass
+                    return "submitted"
+                print("    ✅ SUCCESS: Application sent!")
+                time.sleep(2)
+                # Dismiss success dialog if present
                 try:
-                    if not btn.is_displayed() or not btn.is_enabled():
-                        continue
-                    btn_text = btn.text.strip()
-                    aria_label = btn.get_attribute("aria-label") or ""
-
-                    if (priority_text.lower() in btn_text.lower() or
-                        priority_text.lower() in aria_label.lower()):
-                        print(f"    [Step {step+1}] Clicking: '{btn_text}' (aria: '{aria_label}')")
-                        try_click(driver, btn)
-                        time.sleep(2)
-                        clicked = True
-
-                        if "submit" in priority_text.lower():
-                            print("    ✅ Submitted!")
-                            time.sleep(1)
-                            # Dismiss success dialog
-                            try:
-                                dismiss = driver.find_element(
-                                    By.XPATH, "//button[contains(@aria-label,'Dismiss')]")
-                                try_click(driver, dismiss)
-                            except:
-                                pass
-                            return "submitted"
-                        break
-                except (StaleElementReferenceException, Exception):
-                    continue
+                    dismiss = driver.find_element(
+                        By.XPATH, "//button[contains(@aria-label,'Dismiss')]")
+                    try_click(driver, dismiss)
+                except Exception:
+                    pass
+                return "submitted"
 
         if not clicked:
-            # Vision fallback: ask Gemini what to do
-            vision_action = agent_vision.decide_action(driver, config, 
-                f"Multi-step form step {step+1}, looking for Next/Review/Submit")
-            if vision_action:
-                print(f"    👁️ Vision says: {vision_action}")
-                if vision_action in ("SKIP", "ALREADY_APPLIED"):
-                    return "skipped"
-            # XPath fallback
-            for btn_text in priority_texts:
-                try:
-                    fallback_btns = driver.find_elements(By.XPATH,
-                        f"//button[contains(normalize-space(),'{btn_text}')]")
-                    for btn in fallback_btns:
-                        if btn.is_displayed() and btn.is_enabled():
-                            print(f"    [Step {step+1}] Fallback click: '{btn.text.strip()}'")
-                            try_click(driver, btn)
-                            time.sleep(2)
-                            clicked = True
-
-                            if "submit" in btn_text.lower():
-                                print("    ✅ Submitted!")
-                                time.sleep(1)
-                                try:
-                                    dismiss = driver.find_element(
-                                        By.XPATH, "//button[contains(@aria-label,'Dismiss')]")
-                                    try_click(driver, dismiss)
-                                except:
-                                    pass
-                                return "submitted"
-                            break
-                    if clicked:
-                        break
-                except:
-                    continue
-
-        if not clicked:
-            print(f"    [Step {step+1}] No actionable button found in modal")
-            # Debug: print all visible buttons
+            # Debug: show all visible buttons so we can diagnose
+            print(f"    [Step {step+1}] ⚠️  No action button found — visible buttons on page:")
             try:
-                for btn in all_modal_buttons:
-                    if btn.is_displayed():
-                        print(f"      [Debug] Button: '{btn.text.strip()}' aria='{btn.get_attribute('aria-label')}'")
-            except:
+                all_btns = driver.find_elements(By.TAG_NAME, "button")
+                shown = 0
+                for b in all_btns:
+                    try:
+                        if b.is_displayed() and shown < 8:
+                            print(f"      [Debug] '{b.text.strip()[:50]}' aria='{(b.get_attribute('aria-label') or '')[:50]}'")
+                            shown += 1
+                    except Exception:
+                        pass
+            except Exception:
                 pass
 
         # Check for validation errors
@@ -849,7 +1004,7 @@ def handle_external_application(driver, config, original_handles, linkedin_tab):
         return None
 
 
-def apply_from_search_page(driver, config, applied_count, max_jobs, current_keywords=None):
+def apply_from_search_page(driver, config, applied_count, max_jobs, current_keywords=None, dry_run=False):
     """
     Stay on the search results page.
     Click each job card in the left panel → find Easy Apply button in the right panel → apply.
@@ -891,7 +1046,7 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
 
     initial_cards = find_cards()
     total_count = len(initial_cards)
-    print(f"  [Search] Found {total_count} job cards on this page")
+    print(f"  🔍 Scanning page: Found {total_count} matching job cards")
 
     if not total_count:
         print("  ⚠️  No job cards found. Page might not have loaded properly.")
@@ -948,13 +1103,13 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 except:
                     pass
 
-            print(f"\n  [{processed}/{total_count}] Checking: {job_title}")
+            print(f"\n  [{processed}/{total_count}] 🔍 ANALYZING: {job_title}")
 
             # ── Title relevance filter ──
             filter_keywords = current_keywords or config.get("keywords", [])
             is_relevant, reason = _is_title_relevant(job_title, filter_keywords, config)
             if not is_relevant:
-                print(f"  ⏭️  Skipping (not relevant): {job_title} ({reason})")
+                print(f"  ⏭️  Skipped: {job_title} ({reason})")
                 continue
 
             # ── Duration filter: only for internship searches + user set explicit duration ──
@@ -977,45 +1132,75 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             # Look for Easy Apply button in the right panel / detail area
             easy_apply_btn = None
 
-            # Try multiple selectors for the Easy Apply button
-            selectors = [
-                "//button[contains(@class,'jobs-apply-button')]",
-                "//button[contains(normalize-space(),'Easy Apply')]",
-                "//button[contains(@aria-label,'Easy Apply')]",
-                "//button[contains(@class,'jobs-apply-button') and contains(normalize-space(),'Apply')]",
-                "//div[contains(@class,'jobs-details')]//button[contains(normalize-space(),'Apply')]",
-                "//div[contains(@class,'job-details')]//button[contains(normalize-space(),'Apply')]",
+            # Strategy 1 — scoped to the job detail panel, most specific first
+            DETAIL_PANELS = [
+                "div.jobs-details",
+                "div.job-details-jobs-unified-top-card",
+                "div.jobs-unified-top-card",
+                "div.jobs-s-apply",
+                "div.job-details",
             ]
-
-            for sel in selectors:
+            for panel_sel in DETAIL_PANELS:
+                if easy_apply_btn:
+                    break
                 try:
-                    btns = driver.find_elements(By.XPATH, sel)
-                    for btn in btns:
+                    panel = driver.find_element(By.CSS_SELECTOR, panel_sel)
+                    # Look for Easy Apply class button first
+                    for btn in panel.find_elements(By.CSS_SELECTOR, "button.jobs-apply-button"):
                         if btn.is_displayed() and btn.is_enabled():
-                            btn_text = btn.text.strip()
-                            # Skip if it's an "Apply" that redirects externally
-                            if "Easy" in btn_text or "Easy" in (btn.get_attribute("aria-label") or ""):
-                                easy_apply_btn = btn
-                                break
-                            elif "Apply" in btn_text:
-                                # Could be Easy Apply without the word "Easy" visible
-                                easy_apply_btn = btn
-                                break
+                            easy_apply_btn = btn
+                            break
                     if easy_apply_btn:
                         break
-                except:
+                    # Text / aria-label match within the panel
+                    for btn in panel.find_elements(By.TAG_NAME, "button"):
+                        if not btn.is_displayed() or not btn.is_enabled():
+                            continue
+                        txt = btn.text.strip()
+                        aria = btn.get_attribute("aria-label") or ""
+                        if "Easy Apply" in txt or "Easy Apply" in aria:
+                            easy_apply_btn = btn
+                            break
+                        # Regular external Apply button (opens new tab)
+                        if "Apply" in txt and "Applied" not in txt:
+                            easy_apply_btn = btn
+                            break
+                except Exception:
                     continue
 
+            # Strategy 2 — page-wide fallback (scoped XPaths)
             if not easy_apply_btn:
-                # Last resort: wait and try one more time
+                FALLBACK_XPATHS = [
+                    "//button[contains(@class,'jobs-apply-button')]",
+                    "//button[contains(normalize-space(),'Easy Apply')]",
+                    "//button[contains(@aria-label,'Easy Apply')]",
+                    "//button[contains(@aria-label,'Apply') and not(contains(@aria-label,'Applied'))]",
+                ]
+                for sel in FALLBACK_XPATHS:
+                    try:
+                        btns = driver.find_elements(By.XPATH, sel)
+                        for btn in btns:
+                            if btn.is_displayed() and btn.is_enabled():
+                                if "Applied" not in (btn.text or ""):
+                                    easy_apply_btn = btn
+                                    break
+                        if easy_apply_btn:
+                            break
+                    except Exception:
+                        continue
+
+            if not easy_apply_btn:
+                # Last resort: wait a bit longer and retry the most reliable selector
                 time.sleep(3)
                 try:
                     easy_apply_btn = WebDriverWait(driver, 5).until(
                         EC.element_to_be_clickable(
-                            (By.XPATH, "//button[contains(normalize-space(),'Easy Apply') or contains(normalize-space(),'Apply')]")
+                            (By.XPATH,
+                             "//button[contains(@class,'jobs-apply-button') or "
+                             "contains(normalize-space(),'Easy Apply')]")
                         )
                     )
-                except:
+                except Exception:
                     pass
 
             if not easy_apply_btn:
@@ -1028,7 +1213,7 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 print(f"  ⏭️  Already applied to: {job_title}")
                 continue
 
-            print(f"  🎯 Clicking Apply for: {job_title}")
+            print(f"  🚀 APPLYING: {job_title}...")
             handles_before = set(driver.window_handles)
             linkedin_tab = driver.current_window_handle
             _retry(lambda: try_click(driver, easy_apply_btn), label=f"Apply btn for '{job_title}'")
@@ -1043,7 +1228,7 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 print(f"  📊 External form {label}: {applied_count}/{max_jobs}\n")
             else:
                 # No external tab — process LinkedIn Easy Apply modal
-                result = process_easy_apply_modal(driver, config)
+                result = process_easy_apply_modal(driver, config, dry_run=dry_run)
 
                 if result == "submitted" or result == "closed":
                     applied_count += 1
@@ -1066,7 +1251,7 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
     return applied_count
 
 
-def run(driver, config, applied_count, max_jobs, applied_urls=None):
+def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=False):
     """
     Main entry point. Cycles keywords continuously until:
     - max_jobs reached, OR
@@ -1168,7 +1353,7 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None):
                     before = applied_count
                     applied_count = apply_from_search_page(
                         driver, config, applied_count, max_jobs,
-                        current_keywords=[keyword]
+                        current_keywords=[keyword], dry_run=dry_run
                     )
                     page_applied = applied_count - before
                     kw_applied += page_applied

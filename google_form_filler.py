@@ -1,9 +1,27 @@
 """
-📝 Google Form & Web Form Auto-Filler
+📝 Universal External Form Auto-Filler
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Detects Google Forms and standard web forms on opened tabs.
-Auto-fills fields using profile data and uploads resume.
-Works with: Google Forms, Typeform, JotForm, standard HTML forms.
+Detects and auto-fills ANY external application form a candidate
+encounters during their job hunt — NOT just Google Forms. Supports:
+
+  • Google Forms (docs.google.com/forms)
+  • Typeform (typeform.com)
+  • JotForm
+  • Workday / Lever / Greenhouse / Taleo career pages
+  • Standard HTML <form> elements
+  • SPA forms (React/Vue/Angular) — uses native events so values register
+  • Company-owned custom ATS portals
+
+All personal info (name, email, phone, LinkedIn, portfolio, college,
+CGPA, current role, location, etc.) is read from CONFIG["profile"],
+which is populated from the user's saved profile in the database.
+NOTHING is hardcoded to a specific candidate — any user who signs up
+and fills out their profile gets their own data auto-filled.
+
+If a user has not provided a particular field in their profile, the
+corresponding form question is left blank (or filled with "NA" for
+required text fields) rather than being filled with someone else's
+data. This makes the module safe for multi-tenant web use.
 """
 
 import time
@@ -87,103 +105,127 @@ def get_form_field_label(driver, element):
 
 
 def match_answer(label, config):
-    """Match a form field label to the right answer from config."""
-    profile = config.get("profile", {})
+    """
+    Match a form field label to the right answer from the USER'S profile.
+
+    All values are pulled from CONFIG["profile"] which the backend
+    populates from the logged-in user's saved profile + onboarding data.
+    Nothing is hardcoded to a specific candidate — if the user hasn't
+    provided a value, this function returns None and the caller decides
+    whether to skip, use a generic fallback ("NA"), or leave blank.
+    """
+    profile = config.get("profile", {}) or {}
     c = label.lower()
+
+    def _p(key, *fallback_keys):
+        """Get a profile field, checking alternate key names, return None if truly missing."""
+        v = profile.get(key)
+        if v:
+            return v
+        for fk in fallback_keys:
+            v = profile.get(fk)
+            if v:
+                return v
+        return None
 
     # Name
     if any(w in c for w in ["your name", "full name", "candidate name", "name"]):
-        return profile.get("full_name", "Harsh Raghuwanshi")
+        return _p("full_name", "name")
 
     # LinkedIn
     if any(w in c for w in ["linkedin", "linkedin id", "linkedin url"]):
-        return profile.get("linkedin", "https://www.linkedin.com/in/harsh-raghuwanshi-570868359/")
+        return _p("linkedin", "linkedin_url", "linkedin_profile")
 
     # Portfolio / Personal Website
     if any(w in c for w in ["portfolio", "website", "personal website", "link to your work"]):
-        return profile.get("personal_website", "https://harshraghuwanshi.figma.site")
+        return _p("personal_website", "portfolio", "portfolio_url", "website")
 
-    # Email
+    # GitHub
+    if any(w in c for w in ["github", "git hub"]):
+        return _p("github", "github_url")
+
+    # Email — ALWAYS the user's email from config, never a hardcoded default
     if any(w in c for w in ["email", "e-mail", "mail id", "email id"]):
-        return profile.get("email", "hraghu3110@outlook.com")
+        return config.get("email") or _p("email")
 
     # Phone
     if any(w in c for w in ["phone", "mobile", "contact", "whatsapp"]):
-        return profile.get("phone", "8109580642")
+        return _p("phone", "phone_number", "mobile")
 
-    # College
+    # College / University
     if any(w in c for w in ["university", "college", "institute", "institution"]):
-        return profile.get("college", "Manipal/T.A Pai Management Institute")
+        return _p("college", "university", "institute")
 
-    # Course
-    if any(w in c for w in ["course", "pursuing", "completed"]):
-        return profile.get("course", "MBA")
+    # Course / Degree
+    if any(w in c for w in ["course", "pursuing", "completed", "degree"]):
+        return _p("course", "degree")
 
-    # Branch
+    # Branch / Specialization
     if any(w in c for w in ["branch", "specialization", "stream", "department"]):
-        return profile.get("branch", "Technology Management")
+        return _p("branch", "specialization", "stream")
 
-    # Year of passing
+    # Year of passing / graduation
     if any(w in c for w in ["passing", "graduation", "year of"]):
-        return profile.get("graduation_year", "2027")
+        return _p("graduation_year", "year_of_passing")
 
-    # CGPA
+    # CGPA / GPA / percentage
     if any(w in c for w in ["cgpa", "gpa", "percentage", "marks"]):
-        return profile.get("cgpa", "6.97")
+        return _p("cgpa", "gpa", "percentage")
 
     # Current/Last role
-    if any(w in c for w in ["current role", "last role", "current/last", "designation"]):
-        return profile.get("current_role", "Cofounder")
+    if any(w in c for w in ["current role", "last role", "current/last", "designation", "current title"]):
+        return _p("current_role", "current_title", "designation")
 
     # Current stipend/salary
-    if any(w in c for w in ["current stipend", "current salary", "current ctc", "present"]):
-        return profile.get("current_ctc", "80000")
+    if any(w in c for w in ["current stipend", "current salary", "current ctc", "present ctc"]):
+        return _p("current_ctc", "current_salary")
 
     # Expected stipend/salary
     if any(w in c for w in ["expected stipend", "expected salary", "expected ctc"]):
-        return profile.get("expected_salary", "40000")
+        return _p("expected_salary", "expected_ctc")
 
-    # Location
+    # Location / city
     if any(w in c for w in ["location", "city", "based", "where"]):
-        return profile.get("location", "Bangalore")
+        return _p("location", "city", "current_city")
 
-    # Join date
+    # Join date / availability
     if any(w in c for w in ["earliest", "joining", "join date", "start date", "how soon", "availability"]):
-        return profile.get("join_date", "01/04/2026")
+        return _p("join_date", "earliest_start_date", "availability")
 
     # Notice period
     if any(w in c for w in ["notice period", "notice"]):
-        return profile.get("notice_period", "20") + " days"
+        np = _p("notice_period")
+        return f"{np} days" if np else None
 
-    # Laptop
-    if any(w in c for w in ["laptop"]):
+    # Laptop / workspace
+    if "laptop" in c:
         return "Yes"
 
-    # Tools
-    if any(w in c for w in ["tools", "which tools", "tools used"]):
-        return profile.get("tools_used", "Google AI Studio, Anti Gravity, Replit, Gemini, Claude")
+    # Tools / tech stack
+    if any(w in c for w in ["tools", "which tools", "tools used", "tech stack"]):
+        return _p("tools_used", "tech_stack", "skills")
 
-    # RAG
+    # RAG / AI-concept questions — answer only if user provided one
     if any(w in c for w in ["rag", "retrieval augmented", "retrieval-augmented"]):
-        return profile.get("rag_explanation",
-            "Sourcing information directly from the origin eliminates hallucinations.")
+        return _p("rag_explanation")
 
-    # Product/AI experience
+    # Product/AI/startup experience
     if any(w in c for w in ["product", "startup", "ai-related", "worked on any"]):
         return "Yes"
 
-    # Experience
+    # Experience / years
     if any(w in c for w in ["experience", "years"]):
-        return profile.get("years_experience", "4")
+        return _p("years_experience", "experience_years", "total_experience")
 
-    # Why / Motivation
-    if any(w in c for w in ["why", "motivation", "interest"]):
-        return ("I am passionate about this role. I bring 4+ years of entrepreneurial experience "
-                "in product management, GTM strategy, and AI tools from co-founding Apna Supermarket.")
+    # Why / Motivation / Cover letter — use the AI-generated or user-saved cover letter
+    if any(w in c for w in ["why", "motivation", "interest", "cover letter"]):
+        return (config.get("cover_letter")
+                or _p("cover_letter", "why_this_role", "motivation")
+                or None)
 
     # Skills
     if any(w in c for w in ["skill", "strength"]):
-        return "Product Management, Data Analysis, Python, SQL, AI Tools, Figma"
+        return _p("skills", "skill_list", "strengths")
 
     return None
 
@@ -250,9 +292,16 @@ def fill_google_form(driver, config):
 
                 if not answer:
                     if label and any(w in label for w in ["cover", "about", "yourself", "intro"]):
-                        answer = config.get("cover_letter", "")[:500] if config.get("cover_letter") else (
-                            "I am Harsh Raghuwanshi, pursuing MBA at T.A Pai Management Institute. "
-                            "I bring 4+ years of entrepreneurial experience as Cofounder of Apna Supermarket.")
+                        profile = config.get("profile", {}) or {}
+                        cand_name = profile.get("full_name") or config.get("name") or "the candidate"
+                        cand_role = (profile.get("current_role")
+                                     or profile.get("current_title")
+                                     or "my field")
+                        answer = (config.get("cover_letter", "") or "").strip()[:500] or (
+                            f"Hi, I'm {cand_name}. I'm excited about this role and believe my "
+                            f"background in {cand_role} aligns well with what you're looking for. "
+                            "Looking forward to contributing to your team!"
+                        )
                     else:
                         answer = "NA"
 
@@ -265,6 +314,20 @@ def fill_google_form(driver, config):
                 continue
             except Exception:
                 continue
+
+        # ── Handle 'Next' buttons for multi-page forms ──
+        try:
+            next_btns = driver.find_elements(By.XPATH, "//span[text()='Next'] | //span[text()='Continue'] | //div[contains(@aria-label, 'Next')]")
+            for btn in next_btns:
+                if btn.is_displayed():
+                    print("      ⏭️  Found 'Next' button, clicking to proceed...")
+                    btn.click()
+                    time.sleep(2)
+                    # Recursively fill next page
+                    filled_count += fill_google_form(driver, config)
+                    break
+        except:
+            pass
 
         # ── Handle radio buttons (Google Forms use div[role='radio']) ──
         try:
@@ -511,81 +574,100 @@ def fill_web_form(driver, config):
     resume_path = config.get("resume_path", "")
 
     # ── ATS-specific direct field mapping by name/id attribute ──
-    # Common ATS platforms use predictable name/id values
-    ats_field_map = {
+    # Values come STRICTLY from the logged-in user's profile. No hardcoded
+    # fallbacks — if a field is missing, we simply leave it out of the map
+    # so the caller will skip it (or fall back to "NA" for required fields).
+    # This makes the form-filler multi-tenant safe.
+    _first_name = profile.get("first_name") or (
+        (profile.get("full_name") or "").split(" ", 1)[0] if profile.get("full_name") else None
+    )
+    _last_name = profile.get("last_name") or (
+        " ".join((profile.get("full_name") or "").split(" ")[1:]) or None
+        if profile.get("full_name") else None
+    )
+    _email = config.get("email") or profile.get("email")
+    _phone = profile.get("phone") or profile.get("phone_number") or profile.get("mobile")
+    _linkedin = profile.get("linkedin") or profile.get("linkedin_url")
+    _portfolio = (profile.get("personal_website") or profile.get("portfolio")
+                  or profile.get("portfolio_url") or profile.get("website"))
+    _city = profile.get("city") or profile.get("location")
+    _full_name = profile.get("full_name") or config.get("name")
+    _cover = (config.get("cover_letter") or profile.get("cover_letter") or "")
+
+    _raw_map = {
         # Name variants
-        "first_name": profile.get("first_name", "Harsh"),
-        "firstname":  profile.get("first_name", "Harsh"),
-        "first-name": profile.get("first_name", "Harsh"),
-        "fname":      profile.get("first_name", "Harsh"),
-        "last_name":  profile.get("last_name", "Raghuwanshi"),
-        "lastname":   profile.get("last_name", "Raghuwanshi"),
-        "last-name":  profile.get("last_name", "Raghuwanshi"),
-        "lname":      profile.get("last_name", "Raghuwanshi"),
-        "full_name":  profile.get("full_name", "Harsh Raghuwanshi"),
-        "fullname":   profile.get("full_name", "Harsh Raghuwanshi"),
-        "name":       profile.get("full_name", "Harsh Raghuwanshi"),
-        "candidate_name": profile.get("full_name", "Harsh Raghuwanshi"),
+        "first_name": _first_name,
+        "firstname":  _first_name,
+        "first-name": _first_name,
+        "fname":      _first_name,
+        "last_name":  _last_name,
+        "lastname":   _last_name,
+        "last-name":  _last_name,
+        "lname":      _last_name,
+        "full_name":  _full_name,
+        "fullname":   _full_name,
+        "name":       _full_name,
+        "candidate_name": _full_name,
         # Contact
-        "email":      profile.get("email", "hraghu3110@outlook.com"),
-        "email_address": profile.get("email", "hraghu3110@outlook.com"),
-        "phone":      profile.get("phone", "8109580642"),
-        "phone_number": profile.get("phone", "8109580642"),
-        "mobile":     profile.get("phone", "8109580642"),
-        "mobile_number": profile.get("phone", "8109580642"),
-        "contact":    profile.get("phone", "8109580642"),
+        "email":      _email,
+        "email_address": _email,
+        "phone":      _phone,
+        "phone_number": _phone,
+        "mobile":     _phone,
+        "mobile_number": _phone,
+        "contact":    _phone,
         # Location
-        "city":       profile.get("city", "Bangalore"),
-        "location":   profile.get("location", "Bangalore"),
-        "address":    "Bangalore, Karnataka, India",
-        "pincode":    "560001",
-        "zip":        "560001",
+        "city":       _city,
+        "location":   _city,
+        "address":    profile.get("address"),
+        "pincode":    profile.get("pincode") or profile.get("postal_code"),
+        "zip":        profile.get("pincode") or profile.get("postal_code"),
         # Social
-        "linkedin":   profile.get("linkedin", "https://www.linkedin.com/in/harsh-raghuwanshi-570868359/"),
-        "linkedin_url": profile.get("linkedin", "https://www.linkedin.com/in/harsh-raghuwanshi-570868359/"),
-        "portfolio":  "https://harshraghuwanshi.figma.site",
-        "website":    "https://harshraghuwanshi.figma.site",
+        "linkedin":   _linkedin,
+        "linkedin_url": _linkedin,
+        "portfolio":  _portfolio,
+        "website":    _portfolio,
+        "github":     profile.get("github") or profile.get("github_url"),
         # Education
-        "college":    profile.get("college", "TAPMI Bengaluru"),
-        "university": profile.get("university", "Manipal/T.A Pai Management Institute"),
-        "institution": profile.get("college", "TAPMI Bengaluru"),
-        "degree":     profile.get("degree", "MBA"),
-        "course":     profile.get("course", "MBA"),
-        "branch":     profile.get("branch", "Technology Management"),
-        "specialization": profile.get("branch", "Technology Management"),
-        "cgpa":       profile.get("cgpa", "7.80"),
-        "gpa":        profile.get("cgpa", "7.80"),
-        "percentage": profile.get("twelfth_marks", "78"),
-        "graduation_year": profile.get("graduation_year", "2027"),
-        "passing_year": profile.get("graduation_year", "2027"),
-        "year_of_passing": profile.get("graduation_year", "2027"),
+        "college":    profile.get("college") or profile.get("university"),
+        "university": profile.get("university") or profile.get("college"),
+        "institution": profile.get("college") or profile.get("university"),
+        "degree":     profile.get("degree") or profile.get("course"),
+        "course":     profile.get("course") or profile.get("degree"),
+        "branch":     profile.get("branch") or profile.get("specialization"),
+        "specialization": profile.get("branch") or profile.get("specialization"),
+        "cgpa":       profile.get("cgpa") or profile.get("gpa"),
+        "gpa":        profile.get("cgpa") or profile.get("gpa"),
+        "percentage": profile.get("percentage") or profile.get("twelfth_marks"),
+        "graduation_year": profile.get("graduation_year") or profile.get("year_of_passing"),
+        "passing_year": profile.get("graduation_year") or profile.get("year_of_passing"),
+        "year_of_passing": profile.get("graduation_year") or profile.get("year_of_passing"),
         # Experience
-        "experience": profile.get("years_experience", "4"),
-        "years_of_experience": profile.get("years_experience", "4"),
-        "total_experience": profile.get("years_experience", "4"),
-        "current_company": profile.get("current_company", "Apna Supermarket"),
-        "company":    profile.get("current_company", "Apna Supermarket"),
-        "designation": profile.get("current_role", "Cofounder"),
-        "current_role": profile.get("current_role", "Cofounder"),
-        "notice_period": profile.get("notice_period", "20"),
-        "notice":     profile.get("notice_period", "20"),
+        "experience": profile.get("years_experience") or profile.get("total_experience"),
+        "years_of_experience": profile.get("years_experience") or profile.get("total_experience"),
+        "total_experience": profile.get("years_experience") or profile.get("total_experience"),
+        "current_company": profile.get("current_company"),
+        "company":    profile.get("current_company"),
+        "designation": profile.get("current_role") or profile.get("current_title"),
+        "current_role": profile.get("current_role") or profile.get("current_title"),
+        "notice_period": profile.get("notice_period"),
+        "notice":     profile.get("notice_period"),
         # Salary
-        "current_ctc": profile.get("current_ctc", "80000"),
-        "current_salary": profile.get("current_ctc", "80000"),
-        "expected_ctc": profile.get("expected_salary", "40000"),
-        "expected_salary": profile.get("expected_salary", "40000"),
-        "salary":     profile.get("expected_salary", "40000"),
-        "stipend":    profile.get("expected_salary", "40000"),
-        # Duration
-        "duration":   "3",
-        "internship_duration": "3",
-        "months":     "3",
+        "current_ctc": profile.get("current_ctc") or profile.get("current_salary"),
+        "current_salary": profile.get("current_ctc") or profile.get("current_salary"),
+        "expected_ctc": profile.get("expected_salary") or profile.get("expected_ctc"),
+        "expected_salary": profile.get("expected_salary") or profile.get("expected_ctc"),
+        "salary":     profile.get("expected_salary") or profile.get("expected_ctc"),
+        "stipend":    profile.get("expected_salary") or profile.get("expected_ctc"),
         # Skills
-        "skills":     profile.get("skills", "Product Management, Python, SQL, Power BI, Figma"),
-        "cover_letter": config.get("cover_letter", "")[:500],
-        "message":    config.get("cover_letter", "")[:300],
-        "about":      config.get("cover_letter", "")[:300],
+        "skills":     profile.get("skills") or profile.get("skill_list"),
+        "cover_letter": (_cover[:500] if _cover else None),
+        "message":    (_cover[:300] if _cover else None),
+        "about":      (_cover[:300] if _cover else None),
     }
+    # Drop keys whose value is None/empty — the form-fill loop will skip them
+    # rather than writing placeholder data belonging to someone else.
+    ats_field_map = {k: v for k, v in _raw_map.items() if v not in (None, "", [])}
 
     try:
         time.sleep(2)
@@ -647,9 +729,19 @@ def fill_web_form(driver, config):
                 combined = _combined_label(driver, ta)
                 answer = match_answer(combined, config) if combined else None
                 if not answer:
-                    answer = config.get("cover_letter", "")[:500] or (
-                        "I am Harsh Raghuwanshi, MBA student at TAPMI Bengaluru with 4+ years of "
-                        "entrepreneurial experience in product management and AI tools.")
+                    cover = (config.get("cover_letter") or "").strip()[:500]
+                    if cover:
+                        answer = cover
+                    else:
+                        cand_name = profile.get("full_name") or config.get("name") or "the candidate"
+                        cand_role = (profile.get("current_role")
+                                     or profile.get("current_title")
+                                     or "my field")
+                        answer = (
+                            f"Hi, I'm {cand_name}. I'm excited about this role and believe my "
+                            f"background in {cand_role} is a strong fit. Looking forward to "
+                            "contributing to your team!"
+                        )
 
                 _send_value(driver, ta, answer)
                 filled_count += 1
@@ -751,8 +843,16 @@ def fill_web_form(driver, config):
         print(f"    ✅ [WebForm] Filled {filled_count} fields")
 
     except Exception as e:
-        print(f"    ❌ [WebForm] Error: {e}")
+        print(f"    ❌ [WebForm] Failed: {e}")
         traceback.print_exc()
+
+    # Post-fill: Try to find a 'Submit' or 'Apply' button but don't click it (user review)
+    try:
+        submit_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Submit')] | //button[contains(text(), 'Apply')] | //input[@type='submit']")
+        if submit_btn.is_displayed():
+            print("      💡 Found submit button! Ready for your review.")
+    except:
+        pass
 
     return filled_count
 

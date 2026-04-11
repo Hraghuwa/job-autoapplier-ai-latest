@@ -12,6 +12,12 @@ if [ -d "$SCRIPT_DIR/.venv" ]; then
 fi
 BACKEND_DIR="$SCRIPT_DIR"
 FRONTEND_SRC="$SCRIPT_DIR/frontend"
+
+# ── Load NVM if present ──────────────────────────────────
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+
 FRONTEND_RUN="/tmp/jafrontend"
 DB_DIR="/tmp/jadb"
 BACKEND_LOG="/tmp/backend.log"
@@ -20,6 +26,20 @@ FRONTEND_LOG="/tmp/frontend.log"
 echo "╔══════════════════════════════════════════╗"
 echo "║      JobAgent  —  Starting servers       ║"
 echo "╚══════════════════════════════════════════╝"
+
+# ── Ensure .env exists ──────────────────────────────────
+if [ ! -f "$BACKEND_DIR/backend/.env" ]; then
+  echo "→ Generating backend/.env with keys..."
+  S_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+  F_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+  cat << EOF > "$BACKEND_DIR/backend/.env"
+SECRET_KEY=$S_KEY
+ALGORITHM=HS256
+FERNET_KEY=$F_KEY
+DATABASE_URL=sqlite+aiosqlite:///$DB_DIR/jobagent.db
+REDIS_URL=redis://localhost:6379/0
+EOF
+fi
 
 # ── Kill any existing processes ─────────────────────────
 echo "→ Cleaning up old processes..."
@@ -46,7 +66,8 @@ CREATE TABLE IF NOT EXISTS users (
   id CHAR(32) PRIMARY KEY, email VARCHAR(255) UNIQUE NOT NULL,
   hashed_password VARCHAR(255) NOT NULL, name VARCHAR(255) NOT NULL,
   plan VARCHAR(4) NOT NULL DEFAULT 'free', is_admin BOOLEAN NOT NULL DEFAULT 0,
-  gemini_key_encrypted VARCHAR(512), tokens_used_today INTEGER DEFAULT 0,
+  gemini_key_encrypted VARCHAR(512), groq_key_encrypted VARCHAR(512),
+  tokens_used_today INTEGER DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS user_profiles (
@@ -95,7 +116,13 @@ CREATE TABLE IF NOT EXISTS referrals (
   id CHAR(32) PRIMARY KEY, referrer_id CHAR(32), referred_id CHAR(32),
   code TEXT UNIQUE, status TEXT DEFAULT 'pending', rewarded_at DATETIME);
 """)
-conn.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
+# ── Idempotent migrations (SQLite has no ADD COLUMN IF NOT EXISTS) ──
+def _add_col_if_missing(c, table, col, ddl):
+    cur = c.execute(f"PRAGMA table_info({table})")
+    if not any(row[1] == col for row in cur.fetchall()):
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+_add_col_if_missing(conn, 'users', 'groq_key_encrypted', 'VARCHAR(512)')
+conn.execute("INSERT OR IGNORE INTO users(id,email,hashed_password,name,plan,is_admin,gemini_key_encrypted,tokens_used_today,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
   (uid,'hraghuwanshi3110@gmail.com',pwd,'Harsh Raghuwanshi','pro',1,None,0))
 pid = str(uuid.uuid4()).replace('-','')
 conn.execute("INSERT OR IGNORE INTO user_profiles VALUES (?,?,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,datetime('now'))",
@@ -108,23 +135,43 @@ conn.close()
 PYEOF
 fi
 
-# ── Sync frontend to fast /tmp filesystem ─────────────────
-echo "→ Syncing frontend to /tmp for faster I/O..."
-mkdir -p "$FRONTEND_RUN"
-# Using rsync -a to preserve symlinks and be efficient
-rsync -a --exclude='.next' --exclude='.git' "$FRONTEND_SRC/" "$FRONTEND_RUN/"
+# ── Start servers directly from source (faster local dev) ─────────────────
+echo "→ Preparing startup from source..."
+
+# ── Ensure Redis is running ──────────────────────────────
+echo "→ Checking Redis..."
+if ! redis-cli ping > /dev/null 2>&1; then
+  echo "  ⚠️  Redis is NOT running. Attempting to start..."
+  if command -v redis-server > /dev/null 2>&1; then
+    redis-server --daemonize yes
+    sleep 2
+    if redis-cli ping > /dev/null 2>&1; then
+      echo "  ✅ Redis started successfully."
+    else
+      echo "  ❌ Failed to start Redis. Agent tasks will fail."
+    fi
+  else
+    echo "  ❌ redis-server not found. Please install redis."
+  fi
+else
+  echo "  ✅ Redis is already running."
+fi
 
 # ── Start Backend ────────────────────────────────────────
-echo "→ Starting Backend (FastAPI on :8000)..."
+echo "→ Starting Backend (FastAPI on :3002)..."
 cd "$BACKEND_DIR"
 export PYTHONPATH="$BACKEND_DIR"
-python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 > "$BACKEND_LOG" 2>&1 &
+python3 -m uvicorn backend.main:app --host 127.0.0.1 --port 3002 > "$BACKEND_LOG" 2>&1 &
+
+echo "→ Starting Celery Worker..."
+python3 -m celery -A backend.workers.celery_app worker --loglevel=info -Q agents,default > /tmp/worker.log 2>&1 &
+
 BPID=$!
 
 # Wait for backend health
 echo -n "  Waiting for backend"
 for i in $(seq 1 20); do
-  if curl -sm 1 http://localhost:8000/health > /dev/null 2>&1; then
+  if curl -sm 1 http://localhost:3002/health > /dev/null 2>&1; then
     echo " ✅"
     break
   fi
@@ -134,7 +181,7 @@ done
 
 # ── Start Frontend ───────────────────────────────────────
 echo "→ Starting Frontend (Next.js on :3000)..."
-cd "$FRONTEND_RUN"
+cd "$FRONTEND_SRC"
 # Using npx next dev for reliable binary execution
 npx next dev --port 3000 > "$FRONTEND_LOG" 2>&1 &
 FPID=$!
@@ -155,8 +202,8 @@ echo "╔═══════════════════════�
 echo "║         ✅  JobAgent is LIVE             ║"
 echo "╠══════════════════════════════════════════╣"
 echo "║  Frontend:  http://localhost:3000        ║"
-echo "║  Backend:   http://localhost:8000        ║"
-echo "║  API Docs:  http://localhost:8000/docs   ║"
+echo "║  Backend:   http://localhost:3002        ║"
+echo "║  API Docs:  http://localhost:3002/docs   ║"
 echo "╠══════════════════════════════════════════╣"
 echo "║  Login:  hraghuwanshi3110@gmail.com      ║"
 echo "║  Pass:   JobAgent@2024                   ║"

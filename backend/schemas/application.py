@@ -16,6 +16,7 @@ class ApplicationOut(BaseModel):
     status: str
     applied_at: datetime
     cover_letter_used: Optional[str]
+    history: Optional[List[Any]] = []
 
     model_config = {"from_attributes": True}
 
@@ -35,6 +36,7 @@ class ApplicationOut(BaseModel):
                 status=obj.status.value if hasattr(obj.status, "value") else str(obj.status),
                 applied_at=obj.applied_at,
                 cover_letter_used=obj.cover_letter_used,
+                history=obj.history or [],
             )
         return super().model_validate(obj, **kwargs)
 

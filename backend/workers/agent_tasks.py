@@ -57,32 +57,59 @@ def _get_redis():
 
 
 def _normalize_event(event: dict) -> dict:
-    """Convert internal event shape to frontend WSEvent shape."""
+    """Convert internal event shape to frontend WSEvent shape.
+    Preserves `error_reasons`, `run_id`, and `phase` so the UI can route
+    events to the correct run card and render a "why this failed" panel.
+    """
     t = event.get("type", "")
+    run_id = event.get("run_id")
+    phase = event.get("phase")
     if t == "phase_started":
-        return {"event": "ping", "message": f"Starting {event.get('platform', 'agent')}…"}
+        return {
+            "event": "ping",
+            "message": f"Starting {event.get('platform', 'agent')}…",
+            "run_id": run_id,
+            "phase": phase,
+        }
     if t == "run_complete":
         return {
             "event": "complete",
             "message": event.get("summary", "Run complete"),
             "applied_count": event.get("total_applied", 0),
             "skipped_count": event.get("total_skipped", 0),
+            "error_reasons": event.get("error_reasons", []),
+            "run_id": run_id,
+            "phase": phase,
         }
     if t == "agent_error":
-        return {"event": "error", "message": event.get("message", "Error")}
+        return {
+            "event": "error",
+            "message": event.get("message", "Error"),
+            "error_reasons": event.get("error_reasons", []),
+            "run_id": run_id,
+            "phase": phase,
+        }
     if t == "applied":
         return {
             "event": "applied",
             "job_title": event.get("job_title", ""),
             "company": event.get("company", ""),
             "message": event.get("message", ""),
+            "run_id": run_id,
         }
     if t == "skipped":
-        return {"event": "skipped", "job_title": event.get("job_title", ""), "company": event.get("company", "")}
-    # Already in frontend format
+        return {
+            "event": "skipped",
+            "job_title": event.get("job_title", ""),
+            "company": event.get("company", ""),
+            "run_id": run_id,
+        }
+    # Already in frontend format — still make sure run_id is present if caller gave one
     if "event" in event:
+        if run_id and "run_id" not in event:
+            event["run_id"] = run_id
         return event
-    return {"event": "ping", "message": str(event)}
+    return {"event": "ping", "message": str(event), "run_id": run_id}
 
 
 def publish(user_id: str, event: dict):
@@ -256,10 +283,53 @@ DEFAULT_ROLE_AGENTS = [
 ]
 
 
+def _ensure_dict(val) -> dict:
+    """SQLAlchemy on SQLite sometimes returns JSON columns as raw strings.
+    Also: the parsed JSON might not actually be a dict (legacy data, manual
+    inserts, or a column that was seeded with a list/string/null). Callers
+    do `.get(...)` on the result and will crash with `'str' object has no
+    attribute 'get'` / `'list' object has no attribute 'get'` unless we
+    coerce non-dict shapes to an empty dict here.
+    """
+    if not val:
+        return {}
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def is_stopping(run_id: str) -> bool:
+    """Non-blocking check used by CLI agents to honour Pause requests.
+    Returns True if a stop event exists and has been set for this run_id.
+    Also consults Redis `pause:{run_id}` so Celery workers are covered.
+    """
+    ev = _STOP_EVENTS.get(run_id)
+    if ev is not None and ev.is_set():
+        return True
+    # Redis fallback — cheap and non-blocking
+    try:
+        import redis as _redis_sync
+        from backend.config import settings as _s
+        r = _redis_sync.from_url(_s.redis_url, decode_responses=True,
+                                 socket_connect_timeout=0.2)
+        if r.get(f"pause:{run_id}") == "1":
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _build_config(user, profile) -> dict:
-    prefs = profile.job_preferences or {}
-    autofill = profile.autofill_bank or {}
-    creds = profile.platform_passwords or {}
+    prefs = _ensure_dict(profile.job_preferences)
+    autofill = _ensure_dict(profile.autofill_bank)
+    creds = _ensure_dict(profile.platform_passwords)
+    extracted = _ensure_dict(profile.extracted_data)
 
     def cred(platform, field):
         """Support both nested {platform: {email, password}} and flat {platform_email} formats."""
@@ -272,7 +342,6 @@ def _build_config(user, profile) -> dict:
         return _decrypt(creds.get(f"{platform}_{field}", ""))
 
     # ── Parse structured resume fields ──────────────────────────────────────────
-    extracted = profile.extracted_data or {}
 
     # Education: extract individual degree/institution/cgpa/year fields
     edu_list = extracted.get("education", [])
@@ -381,6 +450,7 @@ def _build_config(user, profile) -> dict:
     # ──────────────────────────────────────────────────────────────────────────
     config = {
         "gemini_api_key": str(_decrypt(user.gemini_key_encrypted or "")) if user.gemini_key_encrypted else "",
+        "groq_api_key": str(_decrypt(user.groq_key_encrypted or "")) if user.groq_key_encrypted else "",
         "name": str(rich_profile.get("full_name") or ""),
         "phone": str(rich_profile.get("phone") or ""),
         "email": str(autofill.get("email") or extracted.get("email") or user.email or ""),
@@ -398,7 +468,7 @@ def _build_config(user, profile) -> dict:
         "work_mode": str(prefs.get("work_mode", "Remote")),
         "min_stipend": int(prefs.get("min_stipend", 0)),
         "match_threshold": int(prefs.get("match_threshold", 60)),
-        "role_agents": list(prefs.get("job_titles") or []),
+        "role_agents": role_agents,
 
         "profile": dict(rich_profile),
         "cover_letter": str(profile.cover_letter or ""),
@@ -410,7 +480,24 @@ def _build_config(user, profile) -> dict:
         "dry_run": False,
         "continuous_mode": True,
         "recently_posted": True,
-        "web_search": bool(prefs.get("disable_web_search", False) is False),
+        # web_search is a DICT (not a bool) — web_search_applier.py:489 calls
+        # .get("enabled") on it. A bool here would AttributeError and be silently
+        # swallowed by a bare-except in the applier, leaving the phase to return
+        # (0, []) with no tabs ever opened. Keep nested options here so the
+        # applier can read max_results_per_query/target_companies/ats_domains.
+        "web_search": {
+            "enabled": bool(prefs.get("disable_web_search", False) is False),
+            "max_results_per_query": int(prefs.get("max_results_per_query", 10)),
+            "target_companies": list(prefs.get("target_companies") or []),
+            "ats_domains": list(prefs.get("ats_domains") or []),
+            # User-configurable tab cap (preset options in the UI: 20/50/70/100)
+            # and extra sites the user wants searched on top of the defaults.
+            # Both are clamped to sane bounds inside web_search_applier.
+            "tab_limit": int(prefs.get("web_search_tab_limit", 50)),
+            "max_queries": int(prefs.get("web_search_max_queries", 30)),
+            "google_login_wait_sec": int(prefs.get("google_login_wait_sec", 120)),
+            "extra_sites": list(prefs.get("web_search_extra_sites") or []),
+        },
         "custom_instructions": str(prefs.get("agent_custom_instructions", "")),
     }
     return config
@@ -454,16 +541,38 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
         celery_task_id = task_self.request.id if task_self else None
         _update_run(session, run_id, status="running", started_at=datetime.now(),
                     celery_task_id=celery_task_id)
-        publish(user_id, {"type": "phase_started", "phase": phase, "platform": platform})
+        publish(user_id, {"type": "phase_started", "phase": phase, "platform": platform,
+                          "run_id": run_id})
 
         # Intercept stdout to stream agent output as WS events
         import sys
         import re
 
+        # Markers that mean "the agent is stuck at a human-solvable login/captcha step",
+        # NOT a crash. When any of these appear with a ❌, we emit `login_challenge`
+        # (actionable) instead of `error` (toast spam).
+        CHALLENGE_MARKERS = (
+            "security challenge",
+            "captcha",
+            "checkpoint",
+            "2fa",
+            "two-factor",
+            "two factor",
+            "verify it's you",
+            "verify its you",
+            "🚨",  # other_platforms.py uses 🚨 as the CAPTCHA prefix
+            "challenge detected",
+            "challenge not resolved",
+            "solve it manually",
+        )
+        PLATFORM_HINTS = ("linkedin", "internshala", "unstop", "naukri",
+                          "wellfound", "google")
+
         class AgentStdout:
-            def __init__(self, original, uid):
+            def __init__(self, original, uid, run_id):
                 self._orig = original
                 self._uid = uid
+                self._run_id = run_id
                 self._buf = ""
 
             def write(self, text):
@@ -482,19 +591,70 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
                 line = line.strip()
                 if not line:
                     return
+                line_lower = line.lower()
+
+                # Classifier: order matters. Applied/skipped take precedence, then
+                # login_challenge (which must short-circuit before the generic
+                # "❌ means error" rule), then generic error, then ping.
+                is_login_msg = (
+                    "login" in line_lower
+                    or any(m in line_lower for m in CHALLENGE_MARKERS)
+                )
+                has_failure_marker = (
+                    "❌" in line
+                    or "failed" in line_lower
+                    or "error" in line_lower
+                )
+                is_login_blocked = has_failure_marker and is_login_msg
+                is_error = has_failure_marker and not is_login_msg
+
                 # Applied externally or via Easy Apply
                 if "External form filled" in line or "✅ Applied" in line:
-                    publish(self._uid, {"event": "applied", "message": line})
+                    publish(self._uid, {
+                        "event": "applied",
+                        "message": line,
+                        "run_id": self._run_id,
+                    })
                 elif "⏭" in line or "Already applied" in line or "Skipping" in line:
-                    publish(self._uid, {"event": "skipped", "message": line})
-                elif "❌" in line or "failed" in line.lower() and "login" not in line.lower():
-                    publish(self._uid, {"event": "error", "message": line})
+                    publish(self._uid, {
+                        "event": "skipped",
+                        "message": line,
+                        "run_id": self._run_id,
+                    })
+                elif is_login_blocked:
+                    platform_hint = "unknown"
+                    for p in PLATFORM_HINTS:
+                        if p in line_lower:
+                            platform_hint = p
+                            break
+                    publish(self._uid, {
+                        "event": "login_challenge",
+                        "platform": platform_hint,
+                        "message": line,
+                        "action_required": (
+                            f"Open the Chrome window and solve the "
+                            f"{platform_hint} security challenge manually, "
+                            f"then click Run again."
+                        ),
+                        "run_id": self._run_id,
+                    })
+                    error_reasons.append(f"LOGIN CHALLENGE [{platform_hint}]: {line[:200]}")
+                elif is_error:
+                    publish(self._uid, {
+                        "event": "error",
+                        "message": line,
+                        "run_id": self._run_id,
+                    })
                     error_reasons.append(line[:200])
                 elif "🎯 KEYWORD" in line or "LINKEDIN AGENT" in line or "Phase" in line:
-                    publish(self._uid, {"event": "ping", "message": line})
+                    publish(self._uid, {
+                        "event": "ping",
+                        "message": line,
+                        "run_id": self._run_id,
+                    })
 
         _orig_stdout = sys.stdout
-        sys.stdout = AgentStdout(_orig_stdout, user_id)
+        sys.stdout = AgentStdout(_orig_stdout, user_id, run_id)
 
         # Build config and patch agents module
         config = _build_config(user, profile)
@@ -522,6 +682,11 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
         import importlib
         config_snapshot = config.copy()
         config_snapshot["_stop_event"] = stop_event  # agents check this to honour Stop requests
+        config_snapshot["current_run_id"] = run_id   # CLI agents use _should_stop() to look up stop state
+        # Per-user chrome profile avoids SingletonLock collisions across concurrent users.
+        # Sanitise user_id to a filesystem-safe suffix.
+        _safe_suffix = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(user_id))
+        config_snapshot["chrome_profile_suffix"] = _safe_suffix
         agent_config_mod = importlib.import_module("config")
         
         for k, v in config_snapshot.items():
@@ -584,6 +749,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
         publish(user_id, {
             "type": "run_complete",
             "phase": phase,
+            "run_id": run_id,
             "total_applied": applied,
             "total_skipped": skipped,
             "error_reasons": error_reasons[-10:],  # last 10 errors max
@@ -597,12 +763,13 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
             pass
         tb = traceback.format_exc()
         logger.error(f"Phase {phase} failed for user {user_id}: {e}\n{tb}")
-        _log_event(session, run_id, "error", str(e)[:2000])
+        _log_event(session, run_id, "error", f"{e}\n{tb}"[:2000])
         _update_run(session, run_id, status="failed", completed_at=datetime.now(),
                     error_count=1)
         publish(user_id, {
             "type": "agent_error",
             "phase": phase,
+            "run_id": run_id,
             "message": str(e),
             "error_reasons": (error_reasons[-5:] if error_reasons else []) + [str(e)[:200]],
         })

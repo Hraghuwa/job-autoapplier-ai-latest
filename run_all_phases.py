@@ -2,17 +2,21 @@
 🤖 Run ALL Phases — 15 minutes each, Phase to Phase
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Phase 1: LinkedIn Auto-Apply (AI-powered)     — 15 min
-Phase 2: Job Finder + Web Search Applier      — 15 min
-Phase 3: Auto-Fill Forms + Resume Upload      — 15 min
-Phase 4: LinkedIn Outreach (GenAI messages)   — 15 min
+Phase 2: Internshala Auto-Apply               — 15 min
+Phase 3: Wellfound Auto-Apply                 — 15 min
+Phase 4: Naukri Auto-Apply                    — 15 min
+Phase 5: Unstop Auto-Apply                    — 15 min
+Phase 6: Unified Web Discovery & Auto-Apply   — 15 min
+Phase 7: Smart Form Fill (Remaining Tabs)     — 15 min
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total runtime: ~60 minutes
+Total runtime: ~105 minutes
 """
 
 import time
 import traceback
 import threading
 import sys
+import os
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -24,6 +28,7 @@ import google_form_filler
 import web_search_applier
 import wellfound_applier
 import internshala_applier
+import other_platforms
 
 PHASE_TIMEOUT = 15 * 60  # 15 minutes per phase
 
@@ -37,7 +42,6 @@ def create_driver():
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--disable-notifications")
     
-    import os
     username = CONFIG.get("username", "default")
     profile_path = os.path.abspath(f"chrome_profile_{username}")
     for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
@@ -83,7 +87,6 @@ def run_with_timeout(func, args, timeout_sec, phase_name):
 
     if thread.is_alive():
         print(f"\n  ⏰ {phase_name}: 15 minutes reached — moving to next phase")
-        # Thread is daemon so it'll be abandoned when next phase starts
         return result[0]
 
     if error[0]:
@@ -94,426 +97,128 @@ def run_with_timeout(func, args, timeout_sec, phase_name):
 
 
 # ─────────────────────────────────────────────
-#  PHASE 1: LinkedIn Auto-Apply
+#  PHASE HANDLERS (Aligned 1-7)
 # ─────────────────────────────────────────────
+
 def phase1_linkedin(driver):
-    """Run all LinkedIn agents. Stops when main thread timeout kills it."""
     agents = CONFIG.get("role_agents", [])
     total = 0
     start = time.time()
-
     for i, agent in enumerate(agents, 1):
-        elapsed = time.time() - start
-        if elapsed >= PHASE_TIMEOUT - 30:
-            break
-
-        remaining = int(PHASE_TIMEOUT - elapsed)
-        print(f"\n  {'▓' * 55}")
-        print(f"  {agent.get('emoji', '🔹')} AGENT {i}/{len(agents)}: {agent['name']}")
-        print(f"  📋 {', '.join(agent['keywords'])}")
-        print(f"  ⏰ {remaining // 60}m {remaining % 60}s left")
-        print(f"  {'▓' * 55}")
-
-        cfg = dict(CONFIG)
-        cfg["keywords"] = agent["keywords"]
-
+        if time.time() - start >= PHASE_TIMEOUT - 30: break
+        cfg = dict(CONFIG); cfg["keywords"] = agent["keywords"]
         try:
-            count = linkedin_applier.run(
-                driver, cfg, 0, CONFIG["max_jobs_per_day"], applied_urls=set()
-            )
+            count = linkedin_applier.run(driver, cfg, 0, CONFIG["max_jobs_per_day"], applied_urls=set())
             total += count
-            print(f"  ✅ {agent['name']}: {count} jobs applied")
-        except Exception as e:
-            print(f"  ❌ {agent['name']} error: {str(e)[:50]}")
-
+        except: pass
     return total
 
-
-# ─────────────────────────────────────────────
-#  PHASE 2: Job Finder + Web Search Applier
-# ─────────────────────────────────────────────
-def phase2_jobs(driver):
-    """Search for jobs and auto-apply via web search."""
-    start = time.time()
-
-    # 2A: Job Finder — open tabs (first 7 min)
-    print("\\n  📑 Phase 2A: Job Finder — opening tabs...")
-    found_urls = []
-    try:
-        found_urls = job_finder.find_all_jobs(driver, CONFIG, set(), max_tabs=30)
-    except Exception as e:
-        print(f"  ⚠️  Job finder error: {str(e)[:50]}")
-
-    tabs = len(driver.window_handles)
-    print(f"  📊 Phase 2A done: {tabs} tabs, {len(found_urls)} jobs found")
-
-    # 2B: Web Search Auto-Applier (remaining time)
-    elapsed = time.time() - start
-    if elapsed < PHASE_TIMEOUT - 60:
-        print(f"\n  🌐 Phase 2B: Web Search Auto-Applier...")
-        try:
-            web_count, web_urls = web_search_applier.search_and_apply(
-                driver, CONFIG, set()
-            )
-            print(f"  📊 Phase 2B done: {web_count} auto-applied")
-            return len(found_urls), web_count
-        except Exception as e:
-            print(f"  ⚠️  Web search error: {str(e)[:50]}")
-
-    return len(found_urls), 0
-
-
-# ─────────────────────────────────────────────
-#  PHASE 3: Auto-Fill Forms
-# ─────────────────────────────────────────────
-def phase3_fill(driver):
-    """Fill all open form tabs."""
-    try:
-        filled, fields = google_form_filler.auto_fill_open_tabs(driver, CONFIG)
-        return filled
-    except Exception as e:
-        print(f"  ❌ Auto-fill error: {str(e)[:50]}")
-        return 0
-
-
-# ─────────────────────────────────────────────
-#  PHASE 4: Wellfound
-# ─────────────────────────────────────────────
-def phase4_wellfound(driver):
-    agents = CONFIG.get("role_agents", [])
-    total = 0
-    start = time.time()
-    
-    wf_config = CONFIG.get("wellfound", {})
-    if not wf_config.get("email") or not wf_config.get("password"):
-        print("  ⏭️  Skipping Wellfound: Credentials missng")
-        return 0
-
-    try:
-        wellfound_applier.login(driver, wf_config["email"], wf_config["password"])
-    except Exception as e:
-        print(f"  ⏭️  Wellfound login failed: {e}")
-        return 0
-
-    for i, agent in enumerate(agents, 1):
-        elapsed = time.time() - start
-        if elapsed >= PHASE_TIMEOUT - 30:
-            break
-
-        cfg = dict(CONFIG)
-        cfg["keywords"] = agent["keywords"]
-
-        try:
-            count = wellfound_applier.run(driver, cfg, 0, 10, set())
-            total += count
-            print(f"  ✅ Wellfound {agent['name']}: {count} jobs applied")
-        except Exception as e:
-            print(f"  ❌ Wellfound error: {e}")
-
-    return total
-
-
-# ─────────────────────────────────────────────
-#  PHASE 5: Internshala
-# ─────────────────────────────────────────────
-def phase5_internshala(driver):
-    agents = CONFIG.get("role_agents", [])
-    total = 0
-    start = time.time()
-    
+def phase2_internshala(driver):
     ish_config = CONFIG.get("internshala", {})
-    if not ish_config.get("email") or not ish_config.get("password"):
-        print("  ⏭️  Skipping Internshala: Credentials missing")
-        return 0
-
+    if not ish_config.get("email"): return 0
     try:
         internshala_applier.login(driver, ish_config["email"], ish_config["password"])
-    except Exception as e:
-        print(f"  ⏭️  Internshala login failed: {e}")
-        return 0
+        return internshala_applier.run(driver, CONFIG, 0, 10, set())
+    except: return 0
 
-    for i, agent in enumerate(agents, 1):
-        elapsed = time.time() - start
-        if elapsed >= PHASE_TIMEOUT - 30:
-            break
-
-        cfg = dict(CONFIG)
-        cfg["keywords"] = agent["keywords"]
-
-        try:
-            count = internshala_applier.run(driver, cfg, 0, 10, set())
-            total += count
-            print(f"  ✅ Internshala {agent['name']}: {count} jobs applied")
-        except Exception as e:
-            print(f"  ❌ Internshala error: {e}")
-
-    return total
-
-
-# ─────────────────────────────────────────────
-#  PHASE 6: Unstop
-# ─────────────────────────────────────────────
-def phase6_unstop(driver):
-    agents = CONFIG.get("role_agents", [])
-    total = 0
-    start = time.time()
-    
-    unstop_config = CONFIG.get("unstop", {})
-    if not unstop_config.get("email"):
-        print("  ⏭️  Skipping Unstop: Email missing")
-        return 0
-
+def phase3_wellfound(driver):
+    wf_config = CONFIG.get("wellfound", {})
+    if not wf_config.get("email"): return 0
     try:
-        # Use Google login if password isn't set, or email/pass if it is
-        other_platforms.unstop_login(driver, unstop_config["email"], unstop_config.get("password", ""))
-    except Exception as e:
-        print(f"  ⏭️  Unstop login failed: {e}")
-        return 0
+        wellfound_applier.login(driver, wf_config["email"], wf_config["password"])
+        return wellfound_applier.run(driver, CONFIG, 0, 10, set())
+    except: return 0
 
-    for i, agent in enumerate(agents, 1):
-        elapsed = time.time() - start
-        if elapsed >= PHASE_TIMEOUT - 30:
-            break
-
-        try:
-            count, _ = other_platforms.unstop_apply(
-                driver, agent["keywords"], CONFIG["locations"], 10, total, 
-                config=CONFIG, dry_run=CONFIG.get("dry_run", False)
-            )
-            total = count
-            print(f"  ✅ Unstop {agent['name']}: {count} jobs applied")
-        except Exception as e:
-            print(f"  ❌ Unstop error: {e}")
-
-    return total
-
-
-# ─────────────────────────────────────────────
-#  PHASE 7: Naukri
-# ─────────────────────────────────────────────
-def phase7_naukri(driver):
-    agents = CONFIG.get("role_agents", [])
-    total = 0
-    start = time.time()
-    
+def phase4_naukri(driver):
     naukri_config = CONFIG.get("naukri", {})
-    if not naukri_config.get("email"):
-        print("  ⏭️  Skipping Naukri: Email missing")
-        return 0
-
+    if not naukri_config.get("email"): return 0
     try:
         other_platforms.naukri_login(driver, naukri_config["email"], naukri_config.get("password", ""))
+        count, _ = other_platforms.naukri_apply(driver, CONFIG.get("keywords", []), CONFIG["locations"], 10, 0, config=CONFIG)
+        return count
+    except: return 0
+
+def phase5_unstop(driver):
+    unstop_config = CONFIG.get("unstop", {})
+    if not unstop_config.get("email"): return 0
+    try:
+        other_platforms.unstop_login(driver, unstop_config["email"], unstop_config.get("password", ""))
+        count, _ = other_platforms.unstop_apply(driver, CONFIG.get("keywords", []), CONFIG["locations"], 10, 0, config=CONFIG)
+        return count
+    except: return 0
+
+def phase6_web(driver):
+    """INTEGRATED DISCOVERY ENGINE: Search + Auto-Apply."""
+    print("\n  🚀 Running Unified Web Discovery & Auto-Apply...")
+    try:
+        # Superior query engine from job_finder + vision-based applier
+        applied_count, urls = web_search_applier.search_and_apply(driver, CONFIG, set())
+        return len(urls), applied_count
     except Exception as e:
-        print(f"  ⏭️  Naukri login failed: {e}")
-        return 0
+        print(f"  ⚠️ Web search error: {e}")
+        return 0, 0
 
-    for i, agent in enumerate(agents, 1):
-        elapsed = time.time() - start
-        if elapsed >= PHASE_TIMEOUT - 30:
-            break
-
-        try:
-            count, _ = other_platforms.naukri_apply(
-                driver, agent["keywords"], CONFIG["locations"], 10, total, 
-                config=CONFIG, dry_run=CONFIG.get("dry_run", False)
-            )
-            total = count
-            print(f"  ✅ Naukri {agent['name']}: {count} jobs applied")
-        except Exception as e:
-            print(f"  ❌ Naukri error: {e}")
-
-    return total
+def phase7_fill(driver):
+    """Fill all remaining open tabs from discovery."""
+    try:
+        filled, _ = google_form_filler.auto_fill_open_tabs(driver, CONFIG)
+        return filled
+    except: return 0
 
 
 # ─────────────────────────────────────────────
-#  MAIN
+#  MAIN EXECUTION LOOP
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     CYCLE_DELAY_MINUTES = CONFIG.get("cycle_delay_minutes", 30)
 
     while True:
         total_start = time.time()
+        print("\n" + "="*60)
+        print("🤖 JOB AUTO-APPLIER v6 — INTEGRATED DISCOVERY")
+        print("="*60)
+        
+        results = {"li":0, "ish":0, "wf":0, "nk":0, "us":0, "found":0, "web":0, "fill":0}
+        
+        # Phase 1: LinkedIn
+        d1 = create_driver()
+        results["li"] = run_with_timeout(phase1_linkedin, (d1,), PHASE_TIMEOUT, "LinkedIn") or 0
+        d1.quit()
 
-        print("=" * 60)
-        print("🤖 JOB AUTO-APPLIER v5 — ALL PHASES (15 min each)")
-        print("=" * 60)
-        print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-        print(f"⏰ Total duration for cycle: ~105 minutes (7 phases)")
-        print(f"📍 Location: {', '.join(CONFIG['locations'])}")
+        # Phase 2: Internshala
+        d2 = create_driver()
+        results["ish"] = run_with_timeout(phase2_internshala, (d2,), PHASE_TIMEOUT, "Internshala") or 0
+        d2.quit()
 
-        agents = CONFIG.get("role_agents", [])
-        for a in agents:
-            print(f"  {a.get('emoji', '🔹')} {a['name']}: {len(a['keywords'])} keywords")
-        print("=" * 60)
+        # Phase 3: Wellfound
+        d3 = create_driver()
+        results["wf"] = run_with_timeout(phase3_wellfound, (d3,), PHASE_TIMEOUT, "Wellfound") or 0
+        d3.quit()
 
-        results = {
-            "linkedin_applied": 0,
-            "jobs_found": 0,
-            "web_applied": 0,
-            "forms_filled": 0,
-            "wellfound_applied": 0,
-            "internshala_applied": 0,
-            "unstop_applied": 0,
-            "naukri_applied": 0,
-            "outreach_connects": 0,
-            "outreach_messages": 0,
-        }
+        # Phase 4: Naukri
+        d4 = create_driver()
+        results["nk"] = run_with_timeout(phase4_naukri, (d4,), PHASE_TIMEOUT, "Naukri") or 0
+        d4.quit()
 
-        phases_config = CONFIG.get("phases", {
-            "linkedin": {"enabled": True},
-            "web_search": {"enabled": True},
-            "google_form": {"enabled": True},
-            "wellfound": {"enabled": True},
-            "internshala": {"enabled": True},
-            "unstop": {"enabled": True},
-            "naukri": {"enabled": True},
-        })
+        # Phase 5: Unstop
+        d5 = create_driver()
+        results["us"] = run_with_timeout(phase5_unstop, (d5,), PHASE_TIMEOUT, "Unstop") or 0
+        d5.quit()
 
-        # ══════════════════════════════════════════
-        # PHASE 1: LinkedIn Auto-Apply
-        # ══════════════════════════════════════════
-        if phases_config.get("linkedin", {}).get("enabled", True):
-            print(f"\n{'═' * 60}")
-            print(f"  📌 PHASE 1: LINKEDIN AUTO-APPLY (15 min)")
-            print(f"  🧠 AI-powered form filling active")
-            print(f"{'═' * 60}")
-
-            try:
-                driver1 = create_driver()
-                li = CONFIG["linkedin"]
-                linkedin_applier.login(driver1, li["email"], li["password"])
-                time.sleep(3)
-                count = run_with_timeout(phase1_linkedin, (driver1,), PHASE_TIMEOUT, "Phase 1")
-                results["linkedin_applied"] = count or 0
-                print(f"\n  ✅ Phase 1 done: {results['linkedin_applied']} applications")
-            except Exception as e:
-                print(f"  ❌ Phase 1 failed: {e}")
-        else:
-            print(f"\n  ⏭️  Phase 1 skipped (Disabled in config)")
-
-        # ══════════════════════════════════════════
-        # PHASE 2: Job Finder + Web Search
-        # ══════════════════════════════════════════
-        if phases_config.get("web_search", {}).get("enabled", True):
-            print(f"\n{'═' * 60}")
-            print(f"  📌 PHASE 2: JOB FINDER + WEB SEARCH (15 min)")
-            print(f"{'═' * 60}")
-
-            try:
-                driver2 = create_driver()
-                result2 = run_with_timeout(phase2_jobs, (driver2,), PHASE_TIMEOUT, "Phase 2")
-                if result2:
-                    results["jobs_found"], results["web_applied"] = result2
-                print(f"\n  ✅ Phase 2 done: {results['jobs_found']} found, {results['web_applied']} auto-applied")
-
-                # ══════════════════════════════════════════
-                # PHASE 3: Auto-Fill Forms (Conditional within Phase 2)
-                # ══════════════════════════════════════════
-                if phases_config.get("google_form", {}).get("enabled", True):
-                    tabs = len(driver2.window_handles)
-                    if tabs > 1:
-                        print(f"\n{'═' * 60}")
-                        print(f"  📌 PHASE 3: AUTO-FILL FORMS — {tabs} tabs")
-                        print(f"{'═' * 60}")
-                        filled = run_with_timeout(phase3_fill, (driver2,), PHASE_TIMEOUT, "Phase 3")
-                        results["forms_filled"] = filled or 0
-                        print(f"\n  ✅ Phase 3 done: {results['forms_filled']} forms filled")
-                    else:
-                        print(f"\n  ⏭️  Phase 3 skipped — no open tabs to fill")
-                else:
-                    print(f"\n  ⏭️  Phase 3 skipped (Disabled in config)")
-            except Exception as e:
-                print(f"  ❌ Phase 2/3 failed: {e}")
-        else:
-            print(f"\n  ⏭️  Phase 2/3 skipped (Disabled in config)")
-
-        # ══════════════════════════════════════════
-        # PHASE 4: WELLFOUND
-        # ══════════════════════════════════════════
-        if phases_config.get("wellfound", {}).get("enabled", True):
-            print(f"\n{'═' * 60}")
-            print(f"  📌 PHASE 4: WELLFOUND APP (15 min)")
-            print(f"{'═' * 60}")
-            try:
-                driver3 = create_driver()
-                results["wellfound_applied"] = run_with_timeout(phase4_wellfound, (driver3,), PHASE_TIMEOUT, "Phase 4") or 0
-                print(f"\n  ✅ Phase 4 done: {results['wellfound_applied']} applications")
-            except Exception as e:
-                print(f"  ❌ Phase 4 failed: {e}")
-        else:
-            print(f"\n  ⏭️  Phase 4 skipped (Disabled in config)")
-
-        # ══════════════════════════════════════════
-        # PHASE 5: INTERNSHALA
-        # ══════════════════════════════════════════
-        if phases_config.get("internshala", {}).get("enabled", True):
-            print(f"\n{'═' * 60}")
-            print(f"  📌 PHASE 5: INTERNSHALA APP (15 min)")
-            print(f"{'═' * 60}")
-            try:
-                driver4 = create_driver()
-                results["internshala_applied"] = run_with_timeout(phase5_internshala, (driver4,), PHASE_TIMEOUT, "Phase 5") or 0
-                print(f"\n  ✅ Phase 5 done: {results['internshala_applied']} applications")
-            except Exception as e:
-                print(f"  ❌ Phase 5 failed: {e}")
-        else:
-            print(f"\n  ⏭️  Phase 5 skipped (Disabled in config)")
-
-        # ══════════════════════════════════════════
-        # PHASE 6: UNSTOP
-        # ══════════════════════════════════════════
-        if phases_config.get("unstop", {}).get("enabled", True):
-            print(f"\n{'═' * 60}")
-            print(f"  📌 PHASE 6: UNSTOP APP (15 min)")
-            print(f"{'═' * 60}")
-            try:
-                driver5 = create_driver()
-                results["unstop_applied"] = run_with_timeout(phase6_unstop, (driver5,), PHASE_TIMEOUT, "Phase 6") or 0
-                print(f"\n  ✅ Phase 6 done: {results['unstop_applied']} applications")
-            except Exception as e:
-                print(f"  ❌ Phase 6 failed: {e}")
-        else:
-            print(f"\n  ⏭️  Phase 6 skipped (Disabled in config)")
-
-        # ══════════════════════════════════════════
-        # PHASE 7: NAUKRI
-        # ══════════════════════════════════════════
-        if phases_config.get("naukri", {}).get("enabled", True):
-            print(f"\n{'═' * 60}")
-            print(f"  📌 PHASE 7: NAUKRI APP (15 min)")
-            print(f"{'═' * 60}")
-            try:
-                driver6 = create_driver()
-                results["naukri_applied"] = run_with_timeout(phase7_naukri, (driver6,), PHASE_TIMEOUT, "Phase 7") or 0
-                print(f"\n  ✅ Phase 7 done: {results['naukri_applied']} applications")
-            except Exception as e:
-                print(f"  ❌ Phase 7 failed: {e}")
-        else:
-            print(f"\n  ⏭️  Phase 7 skipped (Disabled in config)")
-
+        # Phase 6 & 7: Web Discovery & Fill (Keep browser open)
+        d6 = create_driver()
+        res6 = run_with_timeout(phase6_web, (d6,), PHASE_TIMEOUT, "Web Discovery")
+        if res6: results["found"], results["web"] = res6
+        
+        results["fill"] = run_with_timeout(phase7_fill, (d6,), PHASE_TIMEOUT, "Form Fill") or 0
+        
         # FINAL SUMMARY
-        # ══════════════════════════════════════════
-        total_elapsed = int(time.time() - total_start)
-        print(f"\n{'=' * 60}")
-        print(f"🎉 ALL PHASES COMPLETE!")
-        print(f"{'=' * 60}")
-        print(f"📊 LinkedIn auto-applied:   {results['linkedin_applied']}")
-        print(f"📑 Jobs found (tabs):       {results['jobs_found']}")
-        print(f"🌐 Web search applied:      {results['web_applied']}")
-        print(f"📝 Forms auto-filled:       {results['forms_filled']}")
-        print(f"🚀 Wellfound applied:       {results['wellfound_applied']}")
-        print(f"🎓 Internshala applied:     {results['internshala_applied']}")
-        print(f"🎯 Unstop applied:          {results['unstop_applied']}")
-        print(f"💼 Naukri applied:          {results['naukri_applied']}")
-        print(f"🤝 Outreach connects:       {results['outreach_connects']}")
-        print(f"💬 Direct messages:         {results['outreach_messages']}")
-        print(f"⏱️  Total time:              {total_elapsed // 60}m {total_elapsed % 60}s")
-        print(f"👉 All browsers stay open — review and submit!")
-        print(f"{'=' * 60}")
-
-        print(f"\n⏳ Waiting {CYCLE_DELAY_MINUTES} minutes before next cycle...")
-        try:
-            time.sleep(CYCLE_DELAY_MINUTES * 60)
-        except KeyboardInterrupt:
-            print("\n🛑 Execution stopped by user.")
-            sys.exit(0)
+        print("\n" + "="*60)
+        print(f"🎉 CYCLE COMPLETE! Duration: {(time.time()-total_start)//60}m")
+        print("="*60)
+        print(f"🔗 LinkedIn: {results['li']} | 🎓 Internshala: {results['ish']} | 🚀 Wellfound: {results['wf']}")
+        print(f"💼 Naukri: {results['nk']} | 🎯 Unstop: {results['us']}")
+        print(f"🌐 Web Found: {results['found']} | ✅ Auto-Applied: {results['web']} | 📝 Form Filled: {results['fill']}")
+        print("="*60)
+        print(f"\n⏳ Waiting {CYCLE_DELAY_MINUTES}m...")
+        time.sleep(CYCLE_DELAY_MINUTES * 60)
