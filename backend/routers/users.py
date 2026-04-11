@@ -153,6 +153,25 @@ async def usage(user: User = Depends(get_current_user), db: AsyncSession = Depen
     )
 
 
+@router.get("/quota")
+async def get_quota(user: User = Depends(get_current_user)):
+    """Return current AI token balance, apply credit balance, and plan limits."""
+    plan_str = user.plan.value if hasattr(user.plan, "value") else str(user.plan or "free")
+    limits = PLAN_LIMITS.get(plan_str, PLAN_LIMITS["free"])
+    return {
+        "plan": plan_str,
+        "ai_tokens_balance": user.ai_tokens_balance or 0,
+        "ai_tokens_monthly_limit": limits["ai_tokens_monthly"],
+        "apply_credits_balance": user.apply_credits_balance or 0,
+        "apply_credits_daily_limit": limits["apply_credits_daily"],
+        "tab_limit": limits.get("tab_limit", 20),
+        "web_search_enabled": limits.get("web_search", False),
+        "cover_letter_enabled": limits.get("cover_letter", False),
+        "scheduling_enabled": limits.get("scheduling", False),
+        "tokens_reset_at": user.tokens_reset_at.isoformat() if user.tokens_reset_at else None,
+    }
+
+
 @router.get("/referral")
 async def referral_info(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     r = await db.execute(select(Referral).where(Referral.referrer_id == user.id))
