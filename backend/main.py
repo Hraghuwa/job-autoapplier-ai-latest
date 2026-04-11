@@ -66,6 +66,8 @@ _cors_origins = [
     "https://frontend-2oec020pb-harshs-projects-68f6e57b.vercel.app",
     # Vercel aliased domain (shorter URL)
     "https://frontend-lac-mu-2eggctjwqm.vercel.app",
+    # Latest Vercel production deployment
+    "https://frontend-f0n34xezv-harshs-projects-68f6e57b.vercel.app",
 ]
 # FRONTEND_URL may be a single URL or comma-separated list
 for _u in (settings.frontend_url or "").split(","):
