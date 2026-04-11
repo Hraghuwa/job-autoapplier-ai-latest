@@ -57,13 +57,25 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="JobAgent API", version="1.0.0", lifespan=lifespan)
 
+# Build CORS origin list from FRONTEND_URL env var (supports comma-separated list)
+# plus hardcoded Vercel deployment URL and local dev origins.
+_cors_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    # Vercel production deployment
+    "https://frontend-2oec020pb-harshs-projects-68f6e57b.vercel.app",
+    # Vercel aliased domain (shorter URL)
+    "https://frontend-lac-mu-2eggctjwqm.vercel.app",
+]
+# FRONTEND_URL may be a single URL or comma-separated list
+for _u in (settings.frontend_url or "").split(","):
+    _u = _u.strip()
+    if _u and _u not in _cors_origins:
+        _cors_origins.append(_u)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        settings.frontend_url,
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
