@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from enum import Enum as PyEnum
 
-from sqlalchemy import Boolean, DateTime, Enum, Integer, String
+from sqlalchemy import Boolean, DateTime, Enum, Integer, String, Date
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -27,6 +27,10 @@ class User(Base):
     gemini_key_encrypted: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     groq_key_encrypted: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     tokens_used_today: Mapped[int] = mapped_column(Integer, default=0)
+    # Credit / token balances
+    ai_tokens_balance: Mapped[int] = mapped_column(Integer, default=50)    # monthly AI tokens
+    apply_credits_balance: Mapped[int] = mapped_column(Integer, default=20) # apply credits
+    tokens_reset_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
