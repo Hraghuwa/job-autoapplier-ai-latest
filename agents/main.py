@@ -26,10 +26,8 @@ import json
 import os
 import traceback
 from datetime import datetime, timedelta
+# selenium kept for fallback only — undetected_chromedriver is the primary driver
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 
 from config import CONFIG
 import linkedin_applier
@@ -41,7 +39,7 @@ import web_search_applier
 # ─────────────────────────────────────────────
 #  TRACKER
 # ─────────────────────────────────────────────
-TRACKER_FILE = "applied_jobs.json"
+TRACKER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "applied_jobs.json")
 
 def load_tracker():
     if os.path.exists(TRACKER_FILE):
@@ -80,46 +78,95 @@ def add_applied_urls(tracker, new_urls):
 #  BROWSER SETUP
 # ─────────────────────────────────────────────
 def create_driver(headless=False):
-    options = Options()
-    if headless:
-        options.add_argument("--headless=new")
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--disable-popup-blocking")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    # Use incognito so no cached session bypasses login —
-    # the agent always logs in fresh using the credentials from the DB.
-    options.add_argument("--incognito")
+    """
+    Create a Chrome driver using undetected-chromedriver to bypass bot detection.
+    headless=False by default — runs as a visible window on the user's machine,
+    which is the only reliable way to pass LinkedIn / Naukri / Internshala security checks.
+    """
+    try:
+        import undetected_chromedriver as uc
+        print("  🌐 Launching undetected-chromedriver...")
+        options = uc.ChromeOptions()
+        # Never run headless — visible browser on user's machine bypasses all security checks
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--disable-notifications")
+        options.add_argument("--disable-popup-blocking")
+        options.add_argument("--start-maximized")   # Use maximized to ensure visibility
+        
+        # Bypass some common blocks
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--no-sandbox")
 
-    # webdriver-manager returns wrong path on newer Chrome; find the binary directly
-    import glob as _glob
-    wdm_path = ChromeDriverManager().install()
-    driver_dir = os.path.dirname(wdm_path)
-    candidates = _glob.glob(os.path.join(driver_dir, "chromedriver*"))
-    binary = next((p for p in candidates if os.path.isfile(p) and "NOTICES" not in p), wdm_path)
-    os.chmod(binary, 0o755)
-    driver = webdriver.Chrome(service=Service(binary), options=options)
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    
-    # Wait a moment for profile to initialize
-    time.sleep(2)
-    return driver
+        # Detect Chrome version to avoid UC mismatch
+        import subprocess
+        chrome_version = None
+        try:
+            proc = subprocess.Popen(['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '--version'], stdout=subprocess.PIPE)
+            out, _ = proc.communicate()
+            chrome_version = int(out.decode('utf-8').split()[-1].split('.')[0])
+        except:
+            pass
+
+        kwargs = {"options": options, "use_subprocess": True}
+        if chrome_version:
+            kwargs["version_main"] = chrome_version
+
+        driver = uc.Chrome(**kwargs)
+        print("  ✅ Browser launched successfully.")
+        time.sleep(2)
+        return driver
+    except Exception as _uc_err:
+        # Fallback to regular selenium if undetected-chromedriver not installed or fails
+        print(f"  ⚠️  undetected-chromedriver failed: {_uc_err}")
+        print("  🔄 Falling back to standard Selenium driver...")
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        import glob as _glob
+
+        options = Options()
+        _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/124.0.0.0 Safari/537.36")
+        options.add_argument(f"--user-agent={_UA}")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-notifications")
+        options.add_argument("--start-maximized")
+        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+        options.add_experimental_option("useAutomationExtension", False)
+
+        try:
+            wdm_path = ChromeDriverManager().install()
+            driver_dir = os.path.dirname(wdm_path)
+            candidates = _glob.glob(os.path.join(driver_dir, "chromedriver*"))
+            binary = next((p for p in candidates if os.path.isfile(p) and "NOTICES" not in p), wdm_path)
+            os.chmod(binary, 0o755)
+            driver = webdriver.Chrome(service=Service(binary), options=options)
+            
+            print("  ✅ Standard Selenium driver launched.")
+            try:
+                driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source":
+                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+                })
+            except Exception:
+                pass
+            time.sleep(2)
+            return driver
+        except Exception as _e2:
+            print(f"  ❌ Critical error: All driver launch attempts failed: {_e2}")
+            raise _e2
+
 
 
 def safe_quit(driver):
-    _stop = CONFIG.get("_stop_event")
-    if _stop and getattr(_stop, 'is_set', lambda: False)():
-        print("  🛑 Stop requested: Leaving browser open for review.")
-        return
-    try:
-        driver.quit()
-        print("  🌐 Browser closed.")
-    except Exception:
-        pass
+    """
+    Never forcefully close the browser.
+    The user wants to see where the agent stopped or what it applied to.
+    The Chrome window stays open until the user manually closes it.
+    """
+    print("  🌐 Browser session preserved — window left open for review.")
 
 
 # ─────────────────────────────────────────────

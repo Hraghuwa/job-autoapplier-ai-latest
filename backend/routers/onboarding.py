@@ -97,6 +97,13 @@ class PreferencesRequest(BaseModel):
     min_stipend: Optional[int] = None
     start_date: Optional[str] = None
     match_threshold: Optional[int] = 60
+    # Web-search tab budget — one of 20/50/70/100 from the UI preset selector.
+    # Clamped server-side in the applier so a malformed value can't over-open.
+    web_search_tab_limit: Optional[int] = None
+    web_search_max_queries: Optional[int] = None
+    web_search_extra_sites: Optional[List[str]] = None
+    google_login_wait_sec: Optional[int] = None
+    disable_web_search: Optional[bool] = None
 
 
 @router.post("/preferences")
@@ -194,6 +201,64 @@ async def save_autofill(
         profile.cover_letter = body.cover_letter
     await db.commit()
     return {"message": "Autofill bank saved"}
+
+
+# ── LinkedIn Session Cookies (bypass CAPTCHA) ────────────────────────────────
+
+class LinkedInCookiesRequest(BaseModel):
+    cookies_json: str   # raw JSON exported from browser cookie extension
+
+
+@router.post("/linkedin-cookies")
+async def save_linkedin_cookies(
+    body: LinkedInCookiesRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Store encrypted LinkedIn session cookies to bypass security challenges."""
+    import json as _json
+    # Validate that it's a parseable JSON array
+    try:
+        parsed = _json.loads(body.cookies_json)
+        if not isinstance(parsed, list):
+            raise ValueError("Must be a JSON array")
+        if len(parsed) == 0:
+            raise HTTPException(400, "Cookie list is empty")
+    except (_json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(400, f"Invalid cookies JSON: {exc}")
+
+    from backend.services.crypto_service import encrypt
+    profile = await _get_profile(user, db)
+    creds = dict(profile.platform_passwords or {})
+    creds["linkedin_cookies"] = encrypt(body.cookies_json)
+    profile.platform_passwords = creds
+    flag_modified(profile, "platform_passwords")
+    await db.commit()
+    return {"message": f"Saved {len(parsed)} LinkedIn cookies (encrypted).", "count": len(parsed)}
+
+
+@router.get("/linkedin-cookies-status")
+async def linkedin_cookies_status(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    profile = await _get_profile(user, db)
+    creds = profile.platform_passwords or {}
+    return {"stored": bool(creds.get("linkedin_cookies"))}
+
+
+@router.delete("/linkedin-cookies")
+async def delete_linkedin_cookies(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    profile = await _get_profile(user, db)
+    creds = dict(profile.platform_passwords or {})
+    creds.pop("linkedin_cookies", None)
+    profile.platform_passwords = creds
+    flag_modified(profile, "platform_passwords")
+    await db.commit()
+    return {"message": "LinkedIn cookies removed."}
 
 
 # ── Credentials Status (which platforms have creds stored) ───────────────────

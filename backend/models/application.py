@@ -48,6 +48,7 @@ class Application(Base):
     cover_letter_used: Mapped[Optional[str]] = mapped_column(Text)
     interview_prep: Mapped[Optional[Dict]] = mapped_column(JSONB)
 
+    history: Mapped[Optional[List[Dict]]] = mapped_column(JSONB, default=list) # Activity log
     applied_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     user: Mapped["User"] = relationship(back_populates="applications")  # noqa: F821

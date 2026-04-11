@@ -87,29 +87,33 @@ def phase1_linkedin(driver):
     total = 0
     start = time.time()
 
-    for i, agent in enumerate(agents, 1):
-        elapsed = time.time() - start
-        if elapsed >= PHASE_TIMEOUT - 30:
-            break
-
-        remaining = int(PHASE_TIMEOUT - elapsed)
-        print(f"\n  {'▓' * 55}")
-        print(f"  {agent.get('emoji', '🔹')} AGENT {i}/{len(agents)}: {agent['name']}")
-        print(f"  📋 {', '.join(agent['keywords'])}")
-        print(f"  ⏰ {remaining // 60}m {remaining % 60}s left")
-        print(f"  {'▓' * 55}")
+        if isinstance(agent, str):
+            print(f"\n  {'▓' * 55}")
+            print(f"  🔹 AGENT {i}/{len(agents)}: {agent}")
+            print(f"  ⏰ {remaining // 60}m {remaining % 60}s left")
+            print(f"  {'▓' * 55}")
+            keywords = [agent]
+            agent_name = agent
+        else:
+            print(f"\n  {'▓' * 55}")
+            print(f"  {agent.get('emoji', '🔹')} AGENT {i}/{len(agents)}: {agent['name']}")
+            print(f"  📋 {', '.join(agent['keywords'])}")
+            print(f"  ⏰ {remaining // 60}m {remaining % 60}s left")
+            print(f"  {'▓' * 55}")
+            keywords = agent["keywords"]
+            agent_name = agent["name"]
 
         cfg = dict(CONFIG)
-        cfg["keywords"] = agent["keywords"]
+        cfg["keywords"] = keywords
 
         try:
             count = linkedin_applier.run(
                 driver, cfg, 0, CONFIG["max_jobs_per_day"], applied_urls=set()
             )
             total += count
-            print(f"  ✅ {agent['name']}: {count} jobs applied")
+            print(f"  ✅ {agent_name}: {count} jobs applied")
         except Exception as e:
-            print(f"  ❌ {agent['name']} error: {str(e)[:50]}")
+            print(f"  ❌ {agent_name} error: {str(e)[:50]}")
 
     return total
 
@@ -182,7 +186,10 @@ if __name__ == "__main__":
 
         agents = CONFIG.get("role_agents", [])
         for a in agents:
-            print(f"  {a.get('emoji', '🔹')} {a['name']}: {len(a['keywords'])} keywords")
+            if isinstance(a, str):
+                print(f"  🔹 {a}")
+            else:
+                print(f"  {a.get('emoji', '🔹')} {a['name']}: {len(a['keywords'])} keywords")
         print("=" * 60)
 
         results = {

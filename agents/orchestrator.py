@@ -63,6 +63,10 @@ def create_driver(profile_suffix=""):
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
+    # CRITICAL: detach=True keeps Chrome alive after the Python driver object
+    # is garbage collected. Without this, every phase exit (normal OR stop)
+    # would close all found-job tabs the user wants to review later.
+    opts.add_experimental_option("detach", True)
     # Incognito: ensures no cached login session bypasses credential-based login
     opts.add_argument("--incognito")
 
@@ -136,8 +140,18 @@ def run_linkedin_phase():
         applied_urls = get_applied_urls(tracker)
 
         for agent in CONFIG.get("role_agents", []):
+            if isinstance(agent, str):
+                name = agent
+                keywords = [agent]
+                emoji = "🔹"
+            else:
+                name = agent.get("name", "Unknown")
+                keywords = agent.get("keywords", [])
+                emoji = agent.get("emoji", "🔹")
+
+            print(f"  [Phase 1] {emoji} Agent: {name}")
             cfg = dict(CONFIG)
-            cfg["keywords"] = agent["keywords"]
+            cfg["keywords"] = keywords
             count = linkedin_applier.run(
                 driver, cfg, 0, CONFIG["max_jobs_per_day"],
                 applied_urls=applied_urls
@@ -154,15 +168,11 @@ def run_linkedin_phase():
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
         traceback.print_exc()
     finally:
+        # Tabs ALWAYS stay open (both on stop AND on normal completion) so the
+        # user can review/apply to jobs manually. detach=True + no driver.quit()
+        # is the contract enforced at every phase boundary.
         if driver:
-            _stop = CONFIG.get("_stop_event")
-            if _stop and getattr(_stop, 'is_set', lambda: False)():
-                print("  [Phase 1] ⏸️  Stopped by user — browser tab preserved for inspection.")
-            else:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+            print("  [Phase 1] 🌐 Browser session preserved — tabs left open for review.")
 
     return applied
 
@@ -216,15 +226,10 @@ def run_web_search_phase():
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
         traceback.print_exc()
     finally:
+        # Tabs ALWAYS stay open so the user can review the web-search results
+        # and apply manually later — this is the explicit Phase 2 contract.
         if driver:
-            _stop = CONFIG.get("_stop_event")
-            if _stop and getattr(_stop, 'is_set', lambda: False)():
-                print("  [Phase 2] ⏸️  Stopped by user — browser tab preserved for inspection.")
-            else:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+            print("  [Phase 2] 🌐 Browser session preserved — job tabs left open for review.")
 
     return applied
 
@@ -262,15 +267,10 @@ def run_form_fill_phase():
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=filled, error=str(e))
         traceback.print_exc()
     finally:
+        # Tabs ALWAYS stay open so the user can inspect what got filled and
+        # hit submit manually if needed. No driver.quit().
         if driver:
-            _stop = CONFIG.get("_stop_event")
-            if _stop and _stop.is_set():
-                print("  [Phase 3] ⏸️  Stopped by user — browser tab preserved for inspection.")
-            else:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+            print("  [Phase 3] 🌐 Browser session preserved — filled tabs left open for review.")
 
     return filled
 
@@ -332,15 +332,9 @@ def run_wellfound_phase():
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
         traceback.print_exc()
     finally:
+        # Tabs ALWAYS stay open — same contract as every other phase.
         if driver:
-            _stop = CONFIG.get("_stop_event")
-            if _stop and _stop.is_set():
-                print("  [Phase 4] ⏸️  Stopped by user — browser tab preserved for inspection.")
-            else:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+            print("  [Phase 4] 🌐 Browser session preserved — tabs left open for review.")
 
     return applied
 

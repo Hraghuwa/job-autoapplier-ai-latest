@@ -172,7 +172,7 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
             if page > 1:
                 search_url += f"/page-{page}"
 
-            print(f"\n[Internshala] 🔍 Searching: {keyword} (page {page})")
+            print(f"\n[Internshala] 🔍 ANALYZING: {keyword} (page {page})")
             print(f"  URL: {search_url}")
             driver.get(search_url)
             time.sleep(4)
@@ -232,7 +232,7 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                         except NoSuchElementException:
                             continue
 
-                    print(f"\n  📋 [{keyword_applied+1}] {title}")
+                    print(f"\n  🚀 APPLYING: {title}...")
 
                     # Step 3: Find Apply button
                     apply_btn = None
@@ -303,7 +303,7 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                     result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=8)
 
                     if result == "submitted":
-                        print(f"  ✅ Applied successfully!")
+                        print(f"  ✅ SUCCESS: Applied successfully!")
                         applied_count += 1
                         keyword_applied += 1
                         new_urls.append(url)

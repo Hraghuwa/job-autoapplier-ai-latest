@@ -10,7 +10,7 @@ from jose import JWTError, jwt
 from backend.config import settings
 from backend.database import engine
 import backend.models  # noqa: F401 — imports all models, registers with database.Base
-from backend.routers import auth, onboarding, agents, jobs, users, payments, admin, resumes, ai
+from backend.routers import auth, onboarding, agents, jobs, users, payments, admin, resumes, ai, graph, bugs
 
 # ── In-memory WebSocket connection manager (Redis fallback) ───────────────────
 class ConnectionManager:
@@ -57,13 +57,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="JobAgent API", version="1.0.0", lifespan=lifespan)
 
-_allowed_origins = [settings.frontend_url]
-if settings.frontend_url not in ("http://localhost:3000", "http://localhost:3001"):
-    _allowed_origins += ["http://localhost:3000", "http://localhost:3001"]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,
+    allow_origins=[
+        settings.frontend_url,
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -79,6 +79,8 @@ app.include_router(payments.router,   prefix="/payments",   tags=["payments"])
 app.include_router(admin.router,      prefix="/admin",      tags=["admin"])
 app.include_router(resumes.router,    prefix="/resumes",    tags=["resumes"])
 app.include_router(ai.router,         prefix="/ai",         tags=["ai"])
+app.include_router(graph.router,      prefix="/graph",      tags=["graph"])
+app.include_router(bugs.router,       prefix="/bugs",       tags=["bugs"])
 
 
 # ── WebSocket — live agent feed ───────────────────────────────────────────────

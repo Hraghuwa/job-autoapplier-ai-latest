@@ -42,10 +42,7 @@ async def save_and_parse_resume(
         )
     )
     if result.scalar_one_or_none():
-        raise HTTPException(409, detail={
-            "error": "resume_duplicate",
-            "message": "This resume is already registered to another account.",
-        })
+        raise HTTPException(409, detail="This resume is already registered to another account.")
 
     # Save file
     user_dir = os.path.join(UPLOAD_DIR, str(user_id))

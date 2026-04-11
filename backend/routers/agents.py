@@ -12,6 +12,7 @@ from backend.models.agent_run import AgentRun, RunStatus
 from backend.models.profile import UserProfile
 from backend.schemas.agent import RunRequest, RunResponse, RunStatusResponse, ScheduleRequest
 from backend.config import settings
+from backend.workers.agent_tasks import _ensure_dict
 
 router = APIRouter()
 
@@ -68,22 +69,28 @@ async def run_agents(
     if not profile or not profile.resume_url:
         raise HTTPException(400, detail="Upload your resume before starting an agent run.")
 
-    creds = profile.platform_passwords or {}
+    # SQLite/SQLAlchemy can return `platform_passwords` as a raw JSON string,
+    # list, or None depending on how the row was seeded. `_ensure_dict` guarantees
+    # we get a dict so the `.get(platform, {}).get("email")` chain below does not
+    # crash with `'str' object has no attribute 'get'`.
+    creds = _ensure_dict(profile.platform_passwords)
     needs_creds = {
-        1: "linkedin", 
-        2: "internshala", 
-        3: "wellfound", 
-        4: "naukri", 
+        1: "linkedin",
+        2: "internshala",
+        3: "wellfound",
+        4: "naukri",
         5: "unstop"
     }
 
     for phase in body.phases:
         platform = needs_creds.get(phase)
-        if platform and not creds.get(platform, {}).get("email"):
-            raise HTTPException(
-                400,
-                detail=f"Set your {platform.capitalize()} credentials before running Phase {phase}."
-            )
+        if platform:
+            nested = creds.get(platform)
+            if not isinstance(nested, dict) or not nested.get("email"):
+                raise HTTPException(
+                    400,
+                    detail=f"Set your {platform.capitalize()} credentials before running Phase {phase}."
+                )
 
     phases = _allowed_phases(user, body.phases)
     if not phases:
@@ -136,6 +143,62 @@ async def run_agents(
         t.start()
 
     return RunResponse(run_ids=run_ids, message=f"Queued phases: {phases}")
+
+
+@router.get("/preflight")
+async def preflight(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pre-run validation that the frontend can call on-mount to decide
+    whether to enable the Run button. Returns `{ok, errors, warnings, ...}`.
+
+    `errors` are hard blockers (Run button disabled until fixed).
+    `warnings` are soft (phase will be skipped but other phases can run).
+    """
+    from backend.workers.agent_tasks import _build_config
+    result = await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))
+    profile = result.scalar_one_or_none()
+    if not profile:
+        return {
+            "ok": False,
+            "errors": ["Profile not found — complete onboarding first."],
+            "warnings": [],
+        }
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not profile.resume_url:
+        errors.append("Resume not uploaded.")
+
+    try:
+        config = _build_config(user, profile)
+    except Exception as e:
+        return {
+            "ok": False,
+            "errors": [f"Config build failed: {type(e).__name__}: {str(e)[:200]}"],
+            "warnings": [],
+        }
+
+    prefs = _ensure_dict(profile.job_preferences)
+    if not prefs.get("keywords") and not prefs.get("job_titles"):
+        errors.append("No job titles or keywords set in your preferences.")
+
+    creds = _ensure_dict(profile.platform_passwords)
+    for platform in ["linkedin", "internshala", "wellfound", "naukri", "unstop"]:
+        nested = creds.get(platform)
+        if isinstance(nested, dict) and nested.get("email") and nested.get("password"):
+            continue
+        warnings.append(f"{platform}: no credentials (that phase will be skipped).")
+
+    return {
+        "ok": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "role_agents_count": len(config.get("role_agents", [])),
+        "keywords_count": len(config.get("keywords", [])),
+        "resume_uploaded": bool(profile.resume_url),
+    }
 
 
 @router.get("/status/{run_id}", response_model=RunStatusResponse)
@@ -236,8 +299,9 @@ async def get_schedule(
     
     schedule = {"cron": "0 9 * * *", "phases": [], "enabled": False}
     if profile and profile.job_preferences:
-        schedule = profile.job_preferences.get("schedule", schedule)
-        
+        prefs_dict = _ensure_dict(profile.job_preferences)
+        schedule = prefs_dict.get("schedule", schedule)
+
     return schedule
 
 @router.get("/runs/{run_id}/logs")
@@ -276,19 +340,31 @@ async def analyze_run_logs(
     if not error_logs:
         return {"message": "No errors to analyze in this run.", "advice": None}
         
-    errors_text = "\n".join([f"- {log.message}" for log in error_logs])
-    
+    errors_text = "\n".join([f"- {log.message}" for log in error_logs[:30]])
+
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.system_gemini_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        prompt = f"""
-You are an expert AI agent coach. An automated job application agent failed with the following errors. 
-Provide a concise, 1-2 sentence advice rule that the agent should follow to avoid these errors in the future. 
-Do not include conversational flavor, just the directive.
-ERRORS:
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        prompt = f"""You are an AI agent coach for a job auto-applier.
+
+The agent ran and produced these error log lines:
 {errors_text}
-"""
+
+Produce 1-3 **actionable rules** the agent's form-filling / navigation LLM should follow in future runs to avoid repeating these failures.
+
+FORMAT each rule as a single imperative sentence. Examples of good rules:
+- "When a dropdown has no exact match, pick the closest option instead of leaving it blank."
+- "Skip jobs that require > 5 years experience when the candidate has < 2."
+- "If the 'Next' button is not visible, scroll down before retrying."
+- "Answer 'Are you authorized to work in India?' with 'Yes' for Indian candidates."
+- "When cover letter is required but the text box is pre-filled, do NOT overwrite it."
+
+BAD rules (too vague — do NOT produce these):
+- "Be more careful with form fields."
+- "Handle errors better."
+
+Output ONLY the rules, one per line, no numbering, no extra commentary."""
         response = model.generate_content(prompt)
         advice = response.text.strip()
         
@@ -296,7 +372,7 @@ ERRORS:
         prof_result = await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))
         profile = prof_result.scalar_one_or_none()
         if profile:
-            prefs = dict(profile.job_preferences or {})
+            prefs = _ensure_dict(profile.job_preferences)
             existing = prefs.get("agent_custom_instructions", "")
             if advice not in existing:
                 prefs["agent_custom_instructions"] = f"{existing}\n{advice}".strip()

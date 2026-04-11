@@ -14,7 +14,99 @@ WORKFLOW per job:
   5. Close tab → switch back → next job
 """
 
+import time
+import random
+import re
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException,
+    StaleElementReferenceException, ElementNotInteractableException
+)
+
 from utils.auth import google_login_flow
+import smart_form_filler
+
+
+def ensure_single_tab(driver):
+    """Close all tabs except the first one and switch to it."""
+    try:
+        while len(driver.window_handles) > 1:
+            driver.switch_to.window(driver.window_handles[-1])
+            driver.close()
+        driver.switch_to.window(driver.window_handles[0])
+    except Exception:
+        pass
+
+
+def is_driver_alive(driver):
+    """Check if the browser session is still usable."""
+    try:
+        _ = driver.current_url
+        return True
+    except Exception:
+        return False
+
+
+def check_for_captcha(driver):
+    """
+    Check for common CAPTCHA / Security challenge elements.
+    If found, alert the user and wait.
+    """
+    captcha_selectors = [
+        "iframe[src*='recaptcha']",
+        "iframe[src*='hcaptcha']",
+        "div#turnstile-wrapper",
+        "div.g-recaptcha",
+        "section#challenge-error-title",
+        "div#cf-challenge-running",
+        "iframe[title*='challenge']",
+        "//*[contains(text(),'Access Denied')]",
+        "//*[contains(text(),'verify you are a human')]",
+        "//*[contains(text(),'Security Check')]"
+    ]
+    
+    found = False
+    for sel in captcha_selectors:
+        try:
+            if sel.startswith("//"):
+                elems = driver.find_elements(By.XPATH, sel)
+            else:
+                elems = driver.find_elements(By.CSS_SELECTOR, sel)
+            
+            if any(e.is_displayed() for e in elems):
+                found = True
+                break
+        except:
+            continue
+
+    if found:
+        print("\n" + "!" * 60)
+        print("🚨 SECURITY CHALLENGE / CAPTCHA DETECTED!")
+        print("Please solve it manually in the browser window.")
+        print("The script will wait for you to proceed.")
+        print("!" * 60 + "\n")
+        
+        # Wait until the challenge elements are gone
+        while True:
+            time.sleep(5)
+            still_there = False
+            for sel in captcha_selectors:
+                try:
+                    if sel.startswith("//"):
+                        elems = driver.find_elements(By.XPATH, sel)
+                    else:
+                        elems = driver.find_elements(By.CSS_SELECTOR, sel)
+                    if any(e.is_displayed() for e in elems):
+                        still_there = True
+                        break
+                except: continue
+            if not still_there:
+                print("✅ Challenge seems resolved. Continuing...")
+                break
+    return found
 
 
 def google_login_flow_wrapper(driver, platform_name, login_url, email):
@@ -86,7 +178,7 @@ def unstop_apply(driver, keywords, locations, max_jobs, applied_count,
                 f"search={keyword.replace(' ', '%20')}"
                 f"&oppstatus=open&page={page}"
             )
-            print(f"\n[Unstop] 🔍 Searching: {keyword} (page {page})")
+            print(f"\n[Unstop] 🔍 ANALYZING: {keyword} (page {page})")
             driver.get(search_url)
             time.sleep(3)
 
@@ -131,6 +223,9 @@ def unstop_apply(driver, keywords, locations, max_jobs, applied_count,
                         pass
 
                     print(f"\n  📋 [{keyword_applied+1}] {title}")
+                    
+                    # ── CAPTCHA CHECK ──
+                    check_for_captcha(driver)
 
                     # Step 2: Find apply/register button
                     try:
@@ -337,6 +432,9 @@ def naukri_apply(driver, keywords, locations, max_jobs, applied_count,
                         pass
 
                     print(f"\n  📋 [{keyword_applied+1}] {title}")
+                    
+                    # ── CAPTCHA CHECK ──
+                    check_for_captcha(driver)
 
                     # Step 2: Find apply button
                     try:

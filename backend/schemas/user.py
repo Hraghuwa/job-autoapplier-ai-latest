@@ -40,6 +40,10 @@ class GeminiKeyRequest(BaseModel):
     api_key: str
 
 
+class GroqKeyRequest(BaseModel):
+    api_key: str
+
+
 class UsageOut(BaseModel):
     tokens_used_today: int
     plan: str

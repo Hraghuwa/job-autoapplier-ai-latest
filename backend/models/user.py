@@ -25,6 +25,7 @@ class User(Base):
     plan: Mapped[PlanEnum] = mapped_column(Enum(PlanEnum), default=PlanEnum.free)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     gemini_key_encrypted: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    groq_key_encrypted: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     tokens_used_today: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(

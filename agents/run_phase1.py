@@ -15,7 +15,10 @@ def main():
     print(f"\n📌 PHASE 1: LinkedIn Auto-Apply (AI form filling)")
     print(f"   {len(agents)} role agents with Gemini AI")
     for a in agents:
-        print(f"     {a.get('emoji', '🔹')} {a['name']}")
+        if isinstance(a, str):
+            print(f"     🔹 {a}")
+        else:
+            print(f"     {a.get('emoji', '🔹')} {a['name']}")
 
     tracker = load_tracker()
     print(f"\n📊 Previously applied: {len(get_applied_urls(tracker))} unique URLs\n")

@@ -92,180 +92,221 @@ def _get_field_label(driver, element):
 
 
 def _build_field_rules(config):
-    """Build matching rules from config profile data."""
-    profile = config.get("profile", {})
+    """
+    Build matching rules from the user's profile data.
 
-    return [
+    Values come STRICTLY from CONFIG["profile"]. When a field is not
+    provided by the user, the rule is DROPPED from the returned list
+    rather than being filled with placeholder data belonging to
+    another candidate. This keeps the module multi-tenant safe.
+    """
+    profile = config.get("profile", {}) or {}
+
+    # Derive first/last name from full_name if explicit fields missing.
+    _full = profile.get("full_name") or config.get("name")
+    _first = profile.get("first_name") or ((_full.split(" ", 1)[0]) if _full else None)
+    _last = profile.get("last_name") or ((" ".join(_full.split(" ")[1:]) or None) if _full else None)
+
+    _email = config.get("email") or profile.get("email")
+    _phone = profile.get("phone") or profile.get("phone_number") or profile.get("mobile")
+    _linkedin = profile.get("linkedin") or profile.get("linkedin_url")
+    _portfolio = (profile.get("personal_website") or profile.get("portfolio")
+                  or profile.get("portfolio_url") or profile.get("website"))
+    _city = profile.get("city") or profile.get("location")
+    _cgpa = profile.get("cgpa") or profile.get("gpa") or profile.get("percentage")
+    _grad_year = profile.get("graduation_year") or profile.get("year_of_passing")
+    _years_exp = (profile.get("years_experience")
+                  or profile.get("total_experience")
+                  or profile.get("experience_years"))
+    _cur_company = profile.get("current_company") or profile.get("company")
+    _cur_role = profile.get("current_role") or profile.get("current_title") or profile.get("designation")
+    _exp_salary = profile.get("expected_salary") or profile.get("expected_ctc")
+    _cur_ctc = profile.get("current_ctc") or profile.get("current_salary")
+    _notice_period = profile.get("notice_period")
+    _join_date = profile.get("join_date") or profile.get("availability")
+    _skills = profile.get("skills") or profile.get("skill_list")
+    _college = profile.get("college") or profile.get("university")
+    _course = profile.get("course") or profile.get("degree")
+    _branch = profile.get("branch") or profile.get("specialization")
+    _degree = profile.get("degree") or profile.get("course")
+
+    raw_rules = [
         # Name fields
-        (["first name", "given name", "fname", "first_name"], profile.get("first_name", "Harsh")),
-        (["last name", "surname", "family name", "lname", "last_name"], profile.get("last_name", "Raghuwanshi")),
-        (["full name", "your name", "candidate name", "applicant name", "fullname"], profile.get("full_name", "Harsh Raghuwanshi")),
-        (["name"], profile.get("full_name", "Harsh Raghuwanshi")),
+        (["first name", "given name", "fname", "first_name"], _first),
+        (["last name", "surname", "family name", "lname", "last_name"], _last),
+        (["full name", "your name", "candidate name", "applicant name", "fullname"], _full),
+        (["name"], _full),
 
         # Contact
-        (["phone", "mobile", "contact number", "contact no", "tel", "whatsapp"], profile.get("phone", "8109580642")),
-        (["email", "e-mail", "mail id", "mail", "email id"], profile.get("email", "hraghu3110@outlook.com")),
-        (["linkedin", "linkedin id", "linkedin url", "profile url"], profile.get("linkedin", "https://www.linkedin.com/in/harsh-raghuwanshi-570868359/")),
-        (["portfolio", "website", "personal website", "github", "link to your work"], profile.get("personal_website", "https://harshraghuwanshi.figma.site")),
+        (["phone", "mobile", "contact number", "contact no", "tel", "whatsapp"], _phone),
+        (["email", "e-mail", "mail id", "mail", "email id"], _email),
+        (["linkedin", "linkedin id", "linkedin url", "profile url"], _linkedin),
+        (["portfolio", "website", "personal website", "link to your work"], _portfolio),
+        (["github"], profile.get("github") or profile.get("github_url")),
 
         # Location
-        (["city", "current city", "hometown", "town", "current location"], profile.get("city", "Bangalore")),
-        (["location", "address", "place", "based", "currently based"], profile.get("location", "Bangalore")),
-        (["street", "address line"], "Bengaluru, Karnataka, India"),
-        (["country", "nationality"], profile.get("country", "India")),
-        (["state", "province"], "Karnataka"),
-        (["pin", "zip", "postal"], "560001"),
+        (["city", "current city", "hometown", "town", "current location"], _city),
+        (["location", "address", "place", "based", "currently based"], _city),
+        (["street", "address line"], profile.get("address")),
+        (["country", "nationality"], profile.get("country")),
+        (["state", "province"], profile.get("state")),
+        (["pin", "zip", "postal"], profile.get("pincode") or profile.get("postal_code")),
 
         # Education
-        (["university", "college", "school", "institution", "institute", "name of your college", "college name"], profile.get("college", "Manipal/T.A Pai Management Institute")),
-        (["course", "what course", "pursuing", "completed"], profile.get("course", "MBA")),
-        (["degree", "qualification", "program"], profile.get("degree", "MBA")),
-        (["branch", "department", "stream", "specialization", "mention your branch"], profile.get("branch", "Technology Management")),
-        (["major", "field of study"], "Technology Management"),
-        (["gpa", "cgpa", "percentage", "grade", "score", "marks"], profile.get("cgpa", "6.97")),
-        (["graduation", "passing year", "year of passing", "end year", "year of completion", "completion year", "batch"], profile.get("graduation_year", "2027")),
-        (["start year", "joining year", "admission year"], "2025"),
+        (["university", "college", "school", "institution", "institute", "name of your college", "college name"], _college),
+        (["course", "what course", "pursuing", "completed"], _course),
+        (["degree", "qualification", "program"], _degree),
+        (["branch", "department", "stream", "specialization", "mention your branch"], _branch),
+        (["major", "field of study"], _branch),
+        (["gpa", "cgpa", "percentage", "grade", "score", "marks"], _cgpa),
+        (["graduation", "passing year", "year of passing", "end year", "year of completion", "completion year", "batch"], _grad_year),
 
         # Experience & Work
-        (["years of experience", "total experience", "work experience", "exp", "years of professional", "years of relevant"], profile.get("years_experience", "4")),
-        (["duration", "internship period", "how long", "tenure"], profile.get("internship_duration", "3 months")),
-        (["notice period", "notice"], profile.get("notice_period", "20") + " days"),
-        (["how soon", "when can you join", "join date", "start date", "joining date", "date of joining", "available from", "availability", "earliest date"], profile.get("join_date", "01/04/2026")),
-        (["current company", "current organization", "employer", "company name", "organisation"], profile.get("current_company", "Apna Supermarket")),
-        (["current role", "current title", "last role", "current/last role", "designation", "job title"], profile.get("current_role", "Cofounder")),
+        (["years of experience", "total experience", "work experience", "exp", "years of professional", "years of relevant"], _years_exp),
+        (["duration", "internship period", "how long", "tenure"], profile.get("internship_duration")),
+        (["notice period", "notice"], (f"{_notice_period} days" if _notice_period else None)),
+        (["how soon", "when can you join", "join date", "start date", "joining date", "date of joining", "available from", "availability", "earliest date"], _join_date),
+        (["current company", "current organization", "employer", "company name", "organisation"], _cur_company),
+        (["current role", "current title", "last role", "current/last role", "designation", "job title"], _cur_role),
 
         # Salary / Stipend
-        (["expected salary", "expected compensation", "expected ctc", "salary expectation", "expected stipend"], profile.get("expected_salary", "40000")),
-        (["current salary", "current ctc", "current compensation", "previous salary", "last drawn", "present salary", "present ctc", "current stipend"], profile.get("current_ctc", "80000")),
-        (["salary", "ctc", "compensation", "stipend"], profile.get("expected_salary", "40000")),
+        (["expected salary", "expected compensation", "expected ctc", "salary expectation", "expected stipend"], _exp_salary),
+        (["current salary", "current ctc", "current compensation", "previous salary", "last drawn", "present salary", "present ctc", "current stipend"], _cur_ctc),
+        (["salary", "ctc", "compensation", "stipend"], _exp_salary),
 
         # Laptop
-        (["laptop", "do you have a laptop"], profile.get("has_laptop", "Yes")),
+        (["laptop", "do you have a laptop"], profile.get("has_laptop")),
 
-        # AI / Product experience
-        (["tools have you used", "which tools", "tools used"], profile.get("tools_used", "Google AI Studio, Anti Gravity, Replit, Gemini, Claude")),
-        (["rag", "retrieval augmented", "retrieval-augmented"], profile.get("rag_explanation", "Sourcing information directly from the origin eliminates hallucinations.")),
-        (["product", "startup", "ai-related project", "ai related", "worked on any product"], profile.get("has_product_ai_experience", "Yes")),
+        # AI / Product experience — only filled if the user provided something
+        (["tools have you used", "which tools", "tools used"], profile.get("tools_used")),
+        (["rag", "retrieval augmented", "retrieval-augmented"], profile.get("rag_explanation")),
+        (["product", "startup", "ai-related project", "ai related", "worked on any product"], profile.get("has_product_ai_experience")),
 
         # Authorization / eligibility
-        (["authorized", "authorization", "legally", "eligible", "visa", "permit", "right to work"], profile.get("legally_authorized", "Yes")),
-        (["sponsorship", "sponsor", "work permit"], profile.get("require_sponsorship", "No")),
-        (["relocat", "willing to relocate", "relocation"], profile.get("willing_to_relocate", "Yes")),
-        (["how did you hear", "source", "referral", "where did you find"], profile.get("heard_about_us", "LinkedIn")),
+        (["authorized", "authorization", "legally", "eligible", "visa", "permit", "right to work"], profile.get("legally_authorized")),
+        (["sponsorship", "sponsor", "work permit"], profile.get("require_sponsorship")),
+        (["relocat", "willing to relocate", "relocation"], profile.get("willing_to_relocate")),
+        (["how did you hear", "source", "referral", "where did you find"], profile.get("heard_about_us")),
 
         # Skills
-        (["skill", "expertise", "competenc", "technologies", "tech stack"], profile.get("skills", "")),
-        (["tools", "software", "platforms"], profile.get("tools", "")),
-        (["certif", "certificate"], profile.get("certifications", "")),
+        (["skill", "expertise", "competenc", "technologies", "tech stack"], _skills),
+        (["tools", "software", "platforms"], profile.get("tools") or _skills),
+        (["certif", "certificate"], profile.get("certifications")),
 
         # Gender / DOB
-        (["gender", "sex"], profile.get("gender", "Male")),
-        (["age", "date of birth", "dob", "birth"], profile.get("age", "24")),
+        (["gender", "sex"], profile.get("gender")),
+        (["age", "date of birth", "dob", "birth"], profile.get("age") or profile.get("date_of_birth")),
     ]
+    # Drop rules whose value is empty so the caller doesn't write placeholder data.
+    return [(keys, val) for (keys, val) in raw_rules if val not in (None, "", [])]
 
 
 def _smart_text_answer(combined, config):
     """
-    Analyze what a text field is asking and return a logical answer.
-    Uses context from the field label instead of blindly returning 'Yes'.
+    Analyze what a text field is asking and return a logical answer from the
+    user's profile. Returns None if the user has no data for the field —
+    the caller then decides whether to skip or use a generic placeholder.
     """
-    profile = config.get("profile", {})
-    c = combined.lower()
+    profile = config.get("profile", {}) or {}
+    c = (combined or "").lower()
+
+    def _p(*keys):
+        for k in keys:
+            v = profile.get(k)
+            if v:
+                return v
+        return None
 
     # ── LinkedIn ──
     if any(w in c for w in ["linkedin", "linkedin id", "linkedin url"]):
-        return profile.get("linkedin", "https://www.linkedin.com/in/harsh-raghuwanshi-570868359/")
+        return _p("linkedin", "linkedin_url")
 
-    # ── Email ──
+    # ── Email ── (config.email is the logged-in user's email)
     if any(w in c for w in ["email", "e-mail", "mail id", "email id"]):
-        return profile.get("email", "hraghu3110@outlook.com")
+        return config.get("email") or _p("email")
 
     # ── Phone ──
     if any(w in c for w in ["phone", "mobile", "contact no", "contact number", "whatsapp"]):
-        return profile.get("phone", "8109580642")
+        return _p("phone", "phone_number", "mobile")
 
     # ── CGPA ──
     if any(w in c for w in ["cgpa", "gpa", "percentage", "marks", "score"]):
-        return profile.get("cgpa", "6.97")
+        return _p("cgpa", "gpa", "percentage")
 
-    # ── Motivation / Why questions ──
+    # ── Motivation / Why questions — use saved cover letter or skip ──
     if any(w in c for w in ["why do you want", "why are you", "motivation", "interest in",
                              "why this", "why should we", "what excites"]):
-        return ("I am passionate about this role and believe my experience in product management, "
-                "data analysis, and AI tools will add value. As a co-founder of a retail business, "
-                "I have hands-on experience in growth strategy, product roadmapping, and market research.")
+        return (config.get("cover_letter") or _p("cover_letter", "motivation", "why_this_role"))
 
     # ── Where did you hear about us ──
     if any(w in c for w in ["how did you hear", "where did you find", "source", "referral",
                              "how did you learn", "how did you know"]):
-        return profile.get("heard_about_us", "LinkedIn")
+        return _p("heard_about_us")
 
     # ── Join date / Availability / Start date ──
     if any(w in c for w in ["how soon", "when can you join", "start date", "join date",
                              "joining date", "date of joining", "available from",
                              "earliest", "availability", "earliest date"]):
-        return profile.get("join_date", "01/04/2026")
+        return _p("join_date", "availability", "earliest_start_date")
 
     # ── Notice period ──
     if any(w in c for w in ["notice period", "notice"]):
-        return profile.get("notice_period", "20") + " days"
+        np = _p("notice_period")
+        return f"{np} days" if np else None
 
     # ── Duration / How long ──
     if any(w in c for w in ["duration", "how long", "tenure"]):
-        return profile.get("internship_duration", "3 months")
+        return _p("internship_duration")
 
     # ── Current / Previous Salary / Stipend ──
     if any(w in c for w in ["current salary", "current ctc", "current compensation",
                              "previous salary", "last drawn", "present salary",
                              "present ctc", "current stipend"]):
-        return profile.get("current_ctc", "80000")
+        return _p("current_ctc", "current_salary")
 
     # ── Expected Salary / Stipend ──
     if any(w in c for w in ["expected salary", "expected ctc", "salary expectation",
                              "expected compensation", "expected stipend"]):
-        return profile.get("expected_salary", "40000")
+        return _p("expected_salary", "expected_ctc")
 
     # ── Generic salary fallback ──
     if any(w in c for w in ["salary", "ctc", "compensation", "stipend"]):
-        return profile.get("expected_salary", "40000")
+        return _p("expected_salary", "expected_ctc")
 
     # ── Experience ──
     if any(w in c for w in ["years of experience", "total experience", "work experience",
                              "years of professional", "years of relevant"]):
-        return profile.get("years_experience", "4")
+        return _p("years_experience", "total_experience", "experience_years")
 
     # ── Current/Last role ──
     if any(w in c for w in ["current role", "current title", "last role",
                              "current/last role", "designation"]):
-        return profile.get("current_role", "Cofounder")
+        return _p("current_role", "current_title", "designation")
 
     # ── Laptop ──
     if any(w in c for w in ["laptop", "do you have a laptop"]):
-        return profile.get("has_laptop", "Yes")
+        return _p("has_laptop") or "Yes"
 
     # ── RAG explanation ──
     if any(w in c for w in ["rag", "retrieval augmented", "retrieval-augmented"]):
-        return profile.get("rag_explanation", "Sourcing information directly from the origin eliminates hallucinations.")
+        return _p("rag_explanation")
 
     # ── Tools used ──
     if any(w in c for w in ["tools have you used", "which tools", "tools used"]):
-        return profile.get("tools_used", "Google AI Studio, Anti Gravity, Replit, Gemini, Claude")
+        return _p("tools_used", "tech_stack", "skills")
 
     # ── Product/AI experience ──
     if any(w in c for w in ["product", "startup", "ai-related project", "worked on any"]):
-        return profile.get("has_product_ai_experience", "Yes")
+        return _p("has_product_ai_experience") or "Yes"
 
     # ── Strengths / Skills ──
     if any(w in c for w in ["strength", "skill", "expertise", "competenc"]):
-        return profile.get("skills", "Product Management, Data Analysis, Python, SQL, AI Tools")[:100]
+        skills = _p("skills", "skill_list")
+        return (skills[:100] if skills else None)
 
     # ── Current company / organization ──
     if any(w in c for w in ["current company", "current org", "employer", "company name"]):
-        return profile.get("current_company", "Apna Supermarket")
-
-    # ── Current role / designation ──
-    if any(w in c for w in ["current role", "current title", "designation"]):
-        return profile.get("current_role", "Co-founder / Manager")
+        return _p("current_company", "company")
 
     # ── Yes/No type questions ──
     if any(w in c for w in ["authorized", "eligible", "legally", "willing", "relocat",
@@ -278,91 +319,96 @@ def _smart_text_answer(combined, config):
 
     # ── Location ──
     if any(w in c for w in ["current city", "city", "location", "based", "where are you"]):
-        return profile.get("location", "Bangalore")
+        return _p("location", "city", "current_city")
 
     # ── College / University ──
     if any(w in c for w in ["university", "college", "institution", "institute"]):
-        return profile.get("college", "Manipal/T.A Pai Management Institute")
+        return _p("college", "university")
 
     # ── Course ──
     if any(w in c for w in ["what course", "course", "pursuing"]):
-        return profile.get("course", "MBA")
+        return _p("course", "degree")
 
     # ── Branch ──
     if any(w in c for w in ["branch", "department", "stream", "specialization"]):
-        return profile.get("branch", "Technology Management")
+        return _p("branch", "specialization")
 
     # ── Degree / Education ──
     if any(w in c for w in ["degree", "qualification"]):
-        return profile.get("degree", "MBA")
+        return _p("degree", "course")
 
     # ── Year of passing ──
     if any(w in c for w in ["passing year", "year of passing", "graduation year", "batch"]):
-        return profile.get("graduation_year", "2027")
+        return _p("graduation_year", "year_of_passing")
 
-    # ── Generic fallback — use name instead of 'Yes' ──
-    return profile.get("full_name", "Harsh Raghuwanshi")
+    # ── Generic fallback — use the user's full name if available, else None ──
+    return _p("full_name", "name") or config.get("name")
 
 
 def _smart_textarea_answer(combined, config):
     """
-    Analyze what a textarea is asking and return a relevant answer.
-    Don't dump the entire cover letter for every textarea.
+    Analyze what a textarea is asking and return a relevant answer from the
+    user's saved data (cover letter, profile bio, etc.). If the user has
+    nothing suitable on file, we synthesize a generic one-liner from their
+    profile name + current role rather than making up a fake bio.
     """
-    profile = config.get("profile", {})
-    cover_letter = config.get("cover_letter", "")
-    c = combined.lower() if combined else ""
+    profile = config.get("profile", {}) or {}
+    cover_letter = (config.get("cover_letter") or "").strip()
+    bio = (profile.get("bio") or profile.get("about_me") or "").strip()
+    c = (combined or "").lower()
+
+    cand_name = profile.get("full_name") or config.get("name") or "the candidate"
+    cand_role = (profile.get("current_role")
+                 or profile.get("current_title")
+                 or profile.get("target_role")
+                 or "my field")
+
+    def _generic_intro():
+        """A neutral, content-free intro derived from whatever the user provided."""
+        return (
+            f"Hi, I'm {cand_name}. I'm excited about this role and believe my "
+            f"background in {cand_role} aligns with what you're looking for. "
+            "I'd love to discuss how I can contribute to the team."
+        )
 
     # ── Cover letter / about yourself ──
     if any(w in c for w in ["cover letter", "about yourself", "tell us about",
                              "introduce yourself", "about you", "summary"]):
-        return cover_letter or ("I am Harsh Raghuwanshi, pursuing MBA TECH at TAPMI Bengaluru. "
-               "I have 4+ years of entrepreneurial experience as Co-founder of Apna Supermarket, "
-               "with skills in product management, AI tools, and data analysis.")
+        return cover_letter or bio or _generic_intro()
 
     # ── Why do you want to join / motivation ──
     if any(w in c for w in ["why do you want", "why are you interested", "motivation",
                              "why this role", "why should we hire", "what excites",
                              "why are you applying"]):
-        return ("I am drawn to this opportunity because it aligns with my experience in product management "
-                "and growth strategy. At Apna Supermarket, I led product roadmapping, GTM strategy, and "
-                "scaled revenue by 25%. I am eager to apply these skills in a dynamic environment and "
-                "contribute meaningfully to the team's goals.")
+        return (profile.get("why_this_role")
+                or profile.get("motivation")
+                or cover_letter
+                or _generic_intro())
 
     # ── Strengths / What do you bring ──
     if any(w in c for w in ["strength", "what do you bring", "what makes you",
                              "unique", "value add", "differentiate"]):
-        return ("My key strengths include: 1) Hands-on product management experience from building a retail business, "
-                "2) Technical skills in Python, SQL, Power BI for data-driven decisions, "
-                "3) Experience with AI tools (Gemini, Claude) and automation, "
-                "4) Strong cross-functional collaboration and leadership.")
+        return profile.get("strengths") or profile.get("skills") or None
 
     # ── Projects / Experience ──
     if any(w in c for w in ["project", "experience", "achievement", "accomplish",
                              "describe a time", "example", "past work"]):
-        return ("As Co-founder of Apna Supermarket, I led product lifecycle management and growth initiatives. "
-                "Key achievements include: 25% annual revenue growth, scaling turnover to ~₹2.5 Cr, "
-                "implementing ERP/CRM systems, and building an AI-powered WhatsApp chatbot for customer orders. "
-                "I also hold an IBM AI Product Manager certification.")
+        return (profile.get("achievements")
+                or profile.get("notable_projects")
+                or profile.get("experience_summary")
+                or None)
 
     # ── Skills / Technical ──
     if any(w in c for w in ["skill", "tool", "technical", "technology", "tech stack"]):
-        return profile.get("skills", "Product Management, Python, SQL, Power BI, Figma, AI Tools")
+        return profile.get("skills") or profile.get("tech_stack") or profile.get("tools_used")
 
     # ── Additional info / anything else ──
     if any(w in c for w in ["additional", "anything else", "other information", "comments",
                              "notes", "remarks", "supplementary"]):
-        return ("I am available immediately for a 3-month internship and willing to relocate. "
-                "I bring a unique combination of entrepreneurial experience and technical skills "
-                "that would allow me to contribute from day one.")
+        return profile.get("additional_info") or None
 
-    # ── Default: use cover letter for truly generic textareas ──
-    if cover_letter:
-        return cover_letter
-    return ("I am Harsh Raghuwanshi, currently pursuing MBA TECH at TAPMI Bengaluru. "
-            "I bring 4+ years of entrepreneurial experience with strong skills in "
-            "product management, data analysis, and AI tools. I am eager to contribute "
-            "meaningfully to this role.")
+    # ── Default: prefer the user's saved cover letter, then bio, then skip ──
+    return cover_letter or bio or None
 
 
 
@@ -822,7 +868,7 @@ def walk_multi_step_form(driver, config, max_steps=10):
             ]
             page_text = driver.find_element(By.TAG_NAME, "body").text.lower()
             if any(t in page_text for t in success_texts):
-                print("    ✅ Application submitted successfully!")
+                print("    ✅ SUCCESS: Application submitted successfully!")
                 return "submitted"
         except:
             pass
@@ -846,29 +892,24 @@ def walk_multi_step_form(driver, config, max_steps=10):
                 for btn in buttons:
                     try:
                         if btn.is_displayed() and btn.is_enabled():
-                            # print(f"    [Step {step+1}] Clicking: '{btn.text.strip() or btn_text}'")
-                            # try_click(driver, btn)
-                            # clicked = True
-                            # time.sleep(2)
-                            
-                            if "submit" in btn_text.lower() or "apply" in btn_text.lower():
-                                print("    ✅ Check point reached. Skipping submit step as requested.")
-                                return "stuck" # prevent further navigation
-                                
-                            print(f"    [Step {step+1}] Clicking: '{btn.text.strip() or btn_text}'")
+                            btn_label = btn.text.strip() or btn.get_attribute("value") or btn_text
+                            print(f"    🚀 [Step {step+1}] ACTION: Clicking '{btn_label}'")
                             try_click(driver, btn)
                             clicked = True
-                            time.sleep(2)
+                            time.sleep(3) # Give it more time
 
-                            #         # Verify submission
-                            #         try:
-                            #             body = driver.find_element(By.TAG_NAME, "body").text.lower()
-                            #             if any(t in body for t in ["success", "applied", "submitted", "thank"]):
-                            #                 print("    ✅ Submitted!")
-                            #                 return "submitted"
-                            #         except:
-                            #             pass
-                            #         return "submitted"
+                            if "submit" in btn_text.lower() or "apply" in btn_text.lower():
+                                # Verify submission
+                                print("    ⏳ Verifying submission...")
+                                time.sleep(2)
+                                try:
+                                    body = driver.find_element(By.TAG_NAME, "body").text.lower()
+                                    if any(t in body for t in ["success", "applied", "submitted", "thank", "congratulations"]):
+                                        print("    ✅ SUCCESS: Confirmed submission!")
+                                        return "submitted"
+                                except:
+                                    pass
+                                return "submitted"
                             break
                     except:
                         continue

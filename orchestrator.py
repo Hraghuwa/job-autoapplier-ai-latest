@@ -63,21 +63,12 @@ def create_driver(profile_suffix=""):
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
+    # CRITICAL: detach=True keeps Chrome alive after the Python driver object
+    # is garbage collected. Without this, every phase exit (normal OR stop)
+    # would close all found-job tabs the user wants to review later.
     opts.add_experimental_option("detach", True)
-
-    # Persistent profile — each phase gets its own subfolder to avoid lock conflicts
-    profile_path = os.path.abspath(f"chrome_profile{profile_suffix}")
-
-    # Clear stale lock files
-    for lock in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
-        lp = os.path.join(profile_path, lock)
-        try:
-            if os.path.exists(lp) or os.path.islink(lp):
-                os.remove(lp)
-        except Exception:
-            pass
-
-    opts.add_argument(f"--user-data-dir={profile_path}")
+    # Incognito: ensures no cached login session bypasses credential-based login
+    opts.add_argument("--incognito")
 
     import glob as _glob
     wdm_path = ChromeDriverManager().install()
@@ -149,8 +140,18 @@ def run_linkedin_phase():
         applied_urls = get_applied_urls(tracker)
 
         for agent in CONFIG.get("role_agents", []):
+            if isinstance(agent, str):
+                name = agent
+                keywords = [agent]
+                emoji = "🔹"
+            else:
+                name = agent.get("name", "Unknown")
+                keywords = agent.get("keywords", [])
+                emoji = agent.get("emoji", "🔹")
+
+            print(f"  [Phase 1] {emoji} Agent: {name}")
             cfg = dict(CONFIG)
-            cfg["keywords"] = agent["keywords"]
+            cfg["keywords"] = keywords
             count = linkedin_applier.run(
                 driver, cfg, 0, CONFIG["max_jobs_per_day"],
                 applied_urls=applied_urls
@@ -167,11 +168,11 @@ def run_linkedin_phase():
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
         traceback.print_exc()
     finally:
+        # Tabs ALWAYS stay open (both on stop AND on normal completion) so the
+        # user can review/apply to jobs manually. detach=True + no driver.quit()
+        # is the contract enforced at every phase boundary.
         if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            print("  [Phase 1] 🌐 Browser session preserved — tabs left open for review.")
 
     return applied
 
@@ -225,11 +226,10 @@ def run_web_search_phase():
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
         traceback.print_exc()
     finally:
+        # Tabs ALWAYS stay open so the user can review the web-search results
+        # and apply manually later — this is the explicit Phase 2 contract.
         if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            print("  [Phase 2] 🌐 Browser session preserved — job tabs left open for review.")
 
     return applied
 
@@ -267,11 +267,10 @@ def run_form_fill_phase():
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=filled, error=str(e))
         traceback.print_exc()
     finally:
+        # Tabs ALWAYS stay open so the user can inspect what got filled and
+        # hit submit manually if needed. No driver.quit().
         if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            print("  [Phase 3] 🌐 Browser session preserved — filled tabs left open for review.")
 
     return filled
 
@@ -333,11 +332,9 @@ def run_wellfound_phase():
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
         traceback.print_exc()
     finally:
+        # Tabs ALWAYS stay open — same contract as every other phase.
         if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            print("  [Phase 4] 🌐 Browser session preserved — tabs left open for review.")
 
     return applied
 
@@ -378,13 +375,17 @@ def main():
 
     print("=" * 60)
 
+    import concurrent.futures
     with ThreadPoolExecutor(max_workers=len(phases)) as executor:
         futures = {executor.submit(fn): fn.__name__ for fn in phases}
-        for future in as_completed(futures):
-            name = futures[future]
+        # The user instructed to wrap future.result() with a 600s timeout.
+        # Doing this directly on the futures items ensures the timeout applies to the task runtime.
+        for future, name in futures.items():
             try:
-                result = future.result()
+                result = future.result(timeout=600)
                 print(f"\n[{name}] ✅ Completed — result: {result}")
+            except concurrent.futures.TimeoutError:
+                print(f"\n[{name}] 🛑 Failed: 10-minute timeout exceeded.")
             except Exception as e:
                 print(f"\n[{name}] ❌ Failed: {e}")
                 traceback.print_exc()

@@ -12,7 +12,7 @@ from backend.models.user import User
 from backend.models.profile import UserProfile
 from backend.models.quota import UsageQuota
 from backend.models.referral import Referral, ReferralStatus
-from backend.schemas.user import ProfileOut, ProfileUpdate, GeminiKeyRequest, UsageOut
+from backend.schemas.user import ProfileOut, ProfileUpdate, GeminiKeyRequest, GroqKeyRequest, UsageOut
 from backend.services.plan_gate import PLAN_LIMITS
 from backend.services.crypto_service import encrypt
 
@@ -67,6 +67,65 @@ async def set_gemini_key(
     user.gemini_key_encrypted = encrypt(body.api_key)
     await db.commit()
     return {"message": "Gemini API key saved and validated"}
+
+
+@router.post("/groq-key")
+async def set_groq_key(
+    body: GroqKeyRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save a Groq API key. Used by form-fill LLM fallback (Groq-first path) in
+    linkedin_applier, wellfound_applier, google_form_filler, web_search_applier.
+    Falls back to Gemini if Groq key absent/invalid."""
+    try:
+        from groq import Groq
+        client = Groq(api_key=body.api_key)
+        # Cheap validation: list models. Raises on auth failure.
+        client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": "ok"}],
+            max_tokens=2,
+        )
+    except ImportError:
+        raise HTTPException(500, "Groq SDK not installed on server (pip install groq)")
+    except Exception as e:
+        raise HTTPException(400, f"Invalid Groq API key: {type(e).__name__}: {str(e)[:160]}")
+
+    user.groq_key_encrypted = encrypt(body.api_key)
+    await db.commit()
+    return {"message": "Groq API key saved and validated"}
+
+
+@router.get("/api-keys")
+async def get_api_keys_status(
+    user: User = Depends(get_current_user),
+):
+    """Return which API keys are configured (NOT the actual values)."""
+    return {
+        "gemini": bool(user.gemini_key_encrypted),
+        "groq": bool(user.groq_key_encrypted),
+    }
+
+
+@router.delete("/gemini-key")
+async def delete_gemini_key(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    user.gemini_key_encrypted = None
+    await db.commit()
+    return {"message": "Gemini API key removed"}
+
+
+@router.delete("/groq-key")
+async def delete_groq_key(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    user.groq_key_encrypted = None
+    await db.commit()
+    return {"message": "Groq API key removed"}
 
 
 @router.get("/usage", response_model=UsageOut)

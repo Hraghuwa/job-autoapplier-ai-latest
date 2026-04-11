@@ -29,7 +29,7 @@ def main():
     linkedin_pwd = CONFIG["linkedin"]["password"]
     if not linkedin_pwd or linkedin_pwd.startswith("YOUR_"):
         print("  [LinkedIn] ❌ Password not set. Update config.py.")
-        return
+        return 0
 
     # Create ONE browser session and login ONCE — shared across all agents
     driver = create_driver(headless=CONFIG.get("headless", False))
@@ -39,7 +39,7 @@ def main():
     if not login_ok:
         print("  [LinkedIn] ❌ Login failed. Exiting.")
         safe_quit(driver)
-        return
+        return 0
 
     print("  [LinkedIn] ✅ Logged in. Starting agents...\n")
 
@@ -65,6 +65,8 @@ def main():
     print(f"📊 LinkedIn auto-applied: {total_applied}")
     print(f"📊 Total tracked URLs: {len(get_applied_urls(tracker))}")
     print(f"{'=' * 60}")
+
+    return total_applied
 
 
 if __name__ == "__main__":

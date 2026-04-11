@@ -11,6 +11,7 @@ from backend.dependencies import get_current_user
 from backend.models.user import User
 from backend.models.application import Application, ApplicationStatus
 from backend.schemas.application import ApplicationOut, ApplicationDetail, StatusUpdate, AnalyticsOut
+from backend.services.tracking_service import tracking_service
 
 router = APIRouter()
 
@@ -156,7 +157,7 @@ async def update_status(
         raise HTTPException(404, "Job not found")
 
     try:
-        app.status = ApplicationStatus(body.status)
+        await tracking_service.update_status(db, app, ApplicationStatus(body.status))
     except ValueError:
         raise HTTPException(400, f"Invalid status: {body.status}")
 

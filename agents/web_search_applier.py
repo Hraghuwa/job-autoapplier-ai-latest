@@ -4,15 +4,22 @@
 the shared smart_form_filler module.
 
 WORKFLOW:
-  1. Google Search for job listings matching keywords
-  2. Collect career page / ATS URLs
-  3. For each URL:
-     a. Navigate to the job page
+  1. Google Search for job listings matching the USER'S target roles
+     (role_agents from config, not a hardcoded role list)
+  2. Multiple roles are orchestrated IN PARALLEL by interleaving queries
+     so every role advances at the same time
+  3. Collect career page / ATS URLs for every role simultaneously
+  4. For each URL:
+     a. Open the job page in a NEW tab (search tab stays intact)
      b. Find and click "Apply" button
      c. Fill all form fields (name, email, phone, etc.)
      d. Upload resume
-     e. Submit / walk multi-step form
-     f. Close tab, move to next
+     e. Walk multi-step form
+     f. LEAVE the tab OPEN so the user can review / submit later
+  5. If Google demands a login mid-search: pause and wait up to 2 minutes
+     for the user to log in manually, then resume automatically
+  6. Stop signal (user clicks Pause) is honoured at every loop boundary —
+     tabs are NEVER closed on stop so the user can apply to found jobs later
 """
 
 import time
@@ -33,6 +40,7 @@ from selenium.common.exceptions import (
 import smart_form_filler
 import google_form_filler
 import agent_vision
+from agent_stop import should_stop
 
 
 # ─────────────────────────────────────────────
@@ -64,14 +72,75 @@ def is_driver_alive(driver):
 
 
 def ensure_single_tab(driver):
-    """Close all tabs except the first one and switch to it."""
+    """⚠️  DEPRECATED — do NOT use. Kept only for legacy imports.
+
+    The web-app contract is: tabs stay OPEN so the user can review any
+    jobs the agent found after a pause/stop. Callers MUST NOT close tabs.
+    """
+    return  # intentionally a no-op
+
+
+def _is_google_login_page(driver) -> bool:
+    """True if the current Google tab is asking the user to sign in.
+
+    Google throws a sign-in wall at any IP doing many automated searches in a
+    short window. Without this check the agent thinks the page is a normal
+    search results page and keeps scraping zero links, wasting minutes per
+    query and confusing the user.
+    """
     try:
-        while len(driver.window_handles) > 1:
-            driver.switch_to.window(driver.window_handles[-1])
-            driver.close()
-        driver.switch_to.window(driver.window_handles[0])
+        url = (driver.current_url or "").lower()
+        if "accounts.google.com" in url or "servicelogin" in url:
+            return True
+        if "google.com/signin" in url:
+            return True
+        # Interstitial "unusual traffic" page is ALSO a login/challenge signal —
+        # Google shows a checkbox that looks like a CAPTCHA.
+        page_src = (driver.page_source or "").lower()[:5000]
+        if "unusual traffic" in page_src and "sign in" in page_src:
+            return True
     except Exception:
         pass
+    return False
+
+
+def _wait_for_google_login(driver, max_wait_sec: int = 120):
+    """Pause the agent and let the USER log into Google manually.
+
+    Polls every 3 seconds for up to `max_wait_sec`. If the login completes,
+    returns True. If the timeout expires, returns False and the caller
+    should continue its search loop anyway (the user can still search the
+    visible tabs manually).
+
+    Respects the global stop signal so Pause still works while waiting.
+    """
+    print(
+        "\n  [Web Search] 🔐 Google is asking for a sign-in.\n"
+        "  👉  Please log into Google in the Chrome window within the next "
+        f"{max_wait_sec} seconds — the agent will resume automatically.\n"
+        "     (If you don't log in, the agent will continue anyway and\n"
+        "      open job tabs without using Google search.)"
+    )
+    waited = 0
+    poll = 3
+    while waited < max_wait_sec:
+        if should_stop():
+            print("  [Web Search] ⏹  Stop requested while waiting for Google login.")
+            return False
+        time.sleep(poll)
+        waited += poll
+        try:
+            if not _is_google_login_page(driver):
+                print("  [Web Search] ✅ Google login detected — resuming search.")
+                return True
+        except Exception:
+            # Driver may have crashed — bail out of the wait loop
+            return False
+    print(
+        f"  [Web Search] ⏱  Google login not detected within {max_wait_sec}s — "
+        "continuing anyway. Found-job tabs remain open for manual review."
+    )
+    return False
 
 
 def random_delay(config):
@@ -101,154 +170,50 @@ SKIP_DOMAINS = [
 ]
 
 
+import job_finder
+
 def _build_search_queries(config):
-    """
-    Build Google search queries from role_agents keywords + target companies.
-    Only searches for the specific intern roles defined in config.
-    Returns a list of (query_string, source_label) tuples.
-    """
-    # Pull ALL keywords from role_agents (not generic keywords list)
+    """Bridge to job_finder's superior query engine."""
     role_agents = config.get("role_agents", [])
     keywords = []
     for agent in role_agents:
         for kw in agent.get("keywords", []):
             if kw not in keywords:
                 keywords.append(kw)
-
-    # Fallback to config keywords if no role_agents
     if not keywords:
         keywords = config.get("keywords", [])
-
-    locations = config.get("locations", [])
-    web_cfg = config.get("web_search", {})
-    target_companies = web_cfg.get("target_companies", [])
-    ats_domains = web_cfg.get("ats_domains", ATS_PATTERNS[:6])
-
-    queries = []
-
-    # 1. ATS platform searches (config keywords only)
-    ats_site_filter = " OR ".join(f"site:{d}" for d in ats_domains[:4])
-    for kw in keywords[:10]:
-        q = f'{kw} "apply" ({ats_site_filter})'
-        queries.append((q, f"ATS: {kw}"))
-
-    # 2. Career page searches (config keywords only)
-    for kw in keywords:
-        q = f'{kw} apply careers India intern 2025 2026'
-        queries.append((q, f"Careers: {kw}"))
-
-    # 3. Target company specific searches
-    # Randomize to cover different companies and keywords in each loop cycle
-    # Take up to 10 companies and 5 keywords per run to avoid 2000+ searches
-    selected_companies = random.sample(target_companies, min(10, len(target_companies)))
-    selected_keywords = random.sample(keywords, min(5, len(keywords)))
-
-    for company in selected_companies:
-        for kw in selected_keywords:
-            q = f'{kw} intitle:careers OR inurl:careers site:{company}.com OR site:{company}.in apply'
-            queries.append((q, f"Company: {company} — {kw}"))
-
-    return queries
+    
+    return job_finder.build_search_queries(keywords, config)
 
 
-def google_search_jobs(driver, query, max_results=10):
+def google_search_jobs(driver, query, max_results=10, applied_urls=None):
     """
-    Search Google for job listings and return a list of URLs.
-    Uses the actual Google search page via Selenium.
+    Search Google for job listings and return a list of URL objects.
+    Delegates link extraction to job_finder.
     """
-    urls = []
-
+    if applied_urls is None: applied_urls = set()
+    
     try:
         search_url = f"https://www.google.com/search?q={quote_plus(query)}&num={max_results}"
         driver.get(search_url)
         time.sleep(random.uniform(3, 5))
 
-        # Handle consent/cookie screen if present
+        # Handle consent
         try:
-            consent_btns = driver.find_elements(By.XPATH,
-                "//button[contains(text(),'Accept') or contains(text(),'I agree') "
-                "or contains(text(),'Accept all')]")
+            consent_btns = driver.find_elements(By.XPATH, "//button[contains(text(),'Accept') or contains(text(),'I agree')]")
             for btn in consent_btns:
                 if btn.is_displayed():
                     try_click(driver, btn)
                     time.sleep(1)
                     break
-        except Exception:
-            pass
+        except Exception: pass
 
-        # ── Extract links from Google results ──
-        # Strategy: grab ALL <a> links on the page, then filter
-        # This is more robust than relying on specific Google CSS classes
-        # which change frequently.
-        all_links = driver.find_elements(By.CSS_SELECTOR, "a[href]")
-
-        for link in all_links:
-            try:
-                href = link.get_attribute("href") or ""
-                if not href or len(href) < 15:
-                    continue
-                if href.startswith("javascript:"):
-                    continue
-
-                parsed = urlparse(href)
-                domain = parsed.netloc.lower()
-                path = parsed.path.lower()
-                scheme = parsed.scheme.lower()
-
-                # Must be http/https
-                if scheme not in ("http", "https"):
-                    continue
-
-                # Skip Google's own links and navigation
-                if "google." in domain:
-                    continue
-
-                # Skip known non-job aggregator domains
-                if any(skip in domain for skip in SKIP_DOMAINS):
-                    continue
-
-                # Skip image/video/pdf links
-                if any(path.endswith(ext) for ext in [".png", ".jpg", ".gif", ".mp4", ".pdf"]):
-                    continue
-
-                # Accept: ATS platforms always
-                is_ats = any(ats in domain for ats in ATS_PATTERNS)
-
-                # Accept: URLs with career/job-related paths
-                is_career = any(w in domain + path for w in [
-                    "career", "jobs", "apply", "hiring", "openings",
-                    "positions", "opportunities", "recruit", "talent",
-                    "vacancy", "vacancies", "work-with-us", "join-us",
-                ])
-
-                # Accept: link text mentions jobs
-                is_job_text = False
-                if not is_ats and not is_career:
-                    try:
-                        link_text = link.text.strip().lower()
-                        if len(link_text) > 5 and any(w in link_text for w in [
-                            "apply", "career", "hiring", "job", "intern",
-                            "opening", "position", "opportunity",
-                        ]):
-                            is_job_text = True
-                    except Exception:
-                        pass
-
-                if is_ats or is_career or is_job_text:
-                    # Normalize URL (remove fragments/tracking params)
-                    clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-                    if parsed.query:
-                        clean += f"?{parsed.query}"
-                    if clean not in urls:
-                        urls.append(clean)
-
-            except Exception:
-                continue
+        # Delegate extraction to job_finder for consistency
+        return job_finder.extract_google_links(driver, [], applied_urls)
 
     except Exception as e:
         print(f"    ⚠️  Google search error: {e}")
-
-    return urls[:max_results]
+        return []
 
 
 # ─────────────────────────────────────────────
@@ -314,21 +279,25 @@ def detect_and_click_apply(driver):
     return False
 
 
-def detect_ats_type(url):
-    """Detect the ATS platform from the URL."""
+def detect_ats_type(driver, url):
+    """Detect the ATS platform from the URL or page content (Vision)."""
     domain = urlparse(url).netloc.lower()
-    if "lever.co" in domain:
-        return "lever"
-    elif "greenhouse.io" in domain:
-        return "greenhouse"
-    elif "workday" in domain or "myworkdayjobs" in domain:
-        return "workday"
-    elif "smartrecruiters" in domain:
-        return "smartrecruiters"
-    elif "ashbyhq" in domain:
-        return "ashby"
-    elif "icims" in domain:
-        return "icims"
+    
+    # URL based detection
+    if "lever.co" in domain: return "lever"
+    if "greenhouse.io" in domain: return "greenhouse"
+    if "workday" in domain or "myworkdayjobs" in domain: return "workday"
+    if "smartrecruiters" in domain: return "smartrecruiters"
+    if "ashbyhq" in domain: return "ashby"
+    if "icims" in domain: return "icims"
+    
+    # Content based detection (Vision fallback)
+    from config import CONFIG
+    ats_vision = agent_vision.detect_ats_type(driver, CONFIG)
+    if ats_vision and ats_vision != "generic":
+        print(f"    👁️ Vision detected ATS: {ats_vision}")
+        return ats_vision
+        
     return "generic"
 
 
@@ -481,22 +450,23 @@ def _submit_application(driver, config):
             btns = driver.find_elements(By.XPATH, xpath)
             for btn in btns:
                 if btn.is_displayed() and btn.is_enabled():
-                    btn_text = btn.text.strip() or btn.get_attribute("value") or "Submit"
-                    print(f"    ✅ Clicking submit: '{btn_text[:30]}'")
-                    try_click(driver, btn)
+                    # btn_text = btn.text.strip() or btn.get_attribute("value") or "Submit"
+                    # print(f"    ✅ Clicking submit: '{btn_text[:30]}'")
+                    # try_click(driver, btn)
+                    print("    ✅ Check point reached. Skipping submit step as requested.")
                     time.sleep(1)
 
                     # Verify submission
-                    try:
-                        body = driver.find_element(By.TAG_NAME, "body").text.lower()
-                        if any(t in body for t in [
-                            "success", "submitted", "thank you", "applied",
-                            "received", "congratulations", "confirmation"
-                        ]):
-                            print("    ✅ Application submitted successfully!")
-                            return True
-                    except Exception:
-                        pass
+                    # try:
+                    #     body = driver.find_element(By.TAG_NAME, "body").text.lower()
+                    #     if any(t in body for t in [
+                    #         "success", "submitted", "thank you", "applied",
+                    #         "received", "congratulations", "confirmation"
+                    #     ]):
+                    #         print("    ✅ Application submitted successfully!")
+                    #         return True
+                    # except Exception:
+                    #     pass
                     # Assume submitted if button was clicked
                     return True
         except Exception:
@@ -516,11 +486,6 @@ def apply_to_job_url(driver, url, config, dry_run=False):
     Navigate to a job URL, detect ATS type, fill form, and apply.
     Returns True if application was submitted (or attempted).
     """
-    # Check stop event at entry — avoids starting a 30s fill if already stopped
-    _stop = config.get("_stop_event")
-    if _stop and _stop.is_set():
-        return False
-
     print(f"\n    🌐 Opening: {url[:80]}...")
 
     try:
@@ -540,27 +505,22 @@ def apply_to_job_url(driver, url, config, dry_run=False):
             print("    ⚠️  Vision says: not a relevant job, skipping")
             return False
 
+        # Detect ATS and use appropriate handler
+        ats_type = detect_ats_type(driver, url)
+
         if dry_run:
-            print("    🔍 [DRY RUN] Would apply here")
-            # Still detect form for logging
-            ats = detect_ats_type(url)
-            print(f"    📋 ATS type: {ats}")
+            print(f"    🔍 [DRY RUN] Would apply via {ats_type}")
             detect_and_click_apply(driver)
             return False
-
-        # Detect ATS and use appropriate handler
-        ats_type = detect_ats_type(url)
 
         handlers = {
             "lever": handle_lever_apply,
             "greenhouse": handle_greenhouse_apply,
             "workday": handle_workday_apply,
+            "ashby": handle_generic_apply,
         }
 
         handler = handlers.get(ats_type, handle_generic_apply)
-        # Check stop again right before the potentially long form-fill step
-        if _stop and _stop.is_set():
-            return False
         success = handler(driver, config)
 
         if success:
@@ -571,8 +531,12 @@ def apply_to_job_url(driver, url, config, dry_run=False):
         return success
 
     except Exception as e:
-        print(f"    ❌ Error applying: {e}")
-        traceback.print_exc()
+        # Log with the URL + exception type so backend AgentStdout classifier
+        # can forward it as an error_reason to the frontend instead of silently
+        # returning False. NOTE: we deliberately do NOT close the tab here —
+        # the user wants failed tabs left open for manual review/retry.
+        url_preview = (url or "?")[:120]
+        print(f"    ❌ apply-error [web_search {url_preview}]: {type(e).__name__}: {str(e)[:200]}")
         return False
 
 
@@ -580,9 +544,62 @@ def apply_to_job_url(driver, url, config, dry_run=False):
 #  MAIN: SEARCH & APPLY
 # ─────────────────────────────────────────────
 
+def _interleave_role_queries(config):
+    """Build search queries for EVERY role agent, then round-robin them.
+
+    Why interleave? The user explicitly asked: "orchestration of role must be
+    there at single point of time. currently only one is being targeted".
+    Sequential processing (role 1 → role 2 → ...) means role 2 never runs
+    if role 1 hits a Google CAPTCHA. Interleaving guarantees every role
+    makes progress in every cycle of the loop.
+
+    Returns a flat list of (role_label, query) tuples in round-robin order.
+    """
+    role_agents = config.get("role_agents", [])
+    fallback_keywords = config.get("keywords", [])
+
+    # Build a per-role query list
+    per_role_queries = []  # list of (role_label, [query, query, ...])
+    if role_agents:
+        for agent in role_agents:
+            role_label = agent.get("name") or ",".join(agent.get("keywords", []))[:40] or "role"
+            kws = agent.get("keywords", [])
+            if not kws:
+                continue
+            queries = job_finder.build_search_queries(kws, config)
+            per_role_queries.append((role_label, queries))
+    # Fallback: flat keyword list → single synthetic role
+    if not per_role_queries and fallback_keywords:
+        per_role_queries.append((
+            "default",
+            job_finder.build_search_queries(fallback_keywords, config),
+        ))
+
+    # Round-robin interleave so every role advances each cycle
+    interleaved: list = []
+    if per_role_queries:
+        max_len = max(len(q) for _, q in per_role_queries)
+        for i in range(max_len):
+            for role_label, qs in per_role_queries:
+                if i < len(qs):
+                    interleaved.append((role_label, qs[i]))
+    return interleaved
+
+
 def search_and_apply(driver, config, applied_urls=None):
     """
     Main entry point — search Google for jobs and auto-apply.
+
+    Key guarantees honoured by this function (ship-critical):
+    - Honours the global Stop signal at every loop boundary.
+    - NEVER closes any tab and NEVER calls driver.quit() even on stop —
+      the user wants all found-job tabs left open so they can apply later.
+    - Detects Google sign-in walls and waits up to 2 minutes for manual login.
+    - Interleaves queries from every role agent so ALL target roles advance
+      in parallel rather than processing one role to completion first.
+    - Switches BACK to the search tab after each apply so the next query
+      does not clobber the last-applied job tab.
+
     Returns: (applied_count, list_of_new_urls)
     """
     if applied_urls is None:
@@ -590,7 +607,14 @@ def search_and_apply(driver, config, applied_urls=None):
     else:
         applied_urls = set(applied_urls)
 
+    # Defensive: agent_tasks._build_config() used to send a boolean here, which
+    # then AttributeError'd on .get() and killed the whole phase silently.
+    # Accept both shapes so legacy configs still work.
     web_cfg = config.get("web_search", {})
+    if isinstance(web_cfg, bool):
+        web_cfg = {"enabled": web_cfg}
+    elif not isinstance(web_cfg, dict):
+        web_cfg = {}
     if not web_cfg.get("enabled", True):
         print("[Web Search] ⏭️  Disabled in config")
         return 0, []
@@ -598,93 +622,211 @@ def search_and_apply(driver, config, applied_urls=None):
     max_results = web_cfg.get("max_results_per_query", 10)
     dry_run = config.get("dry_run", False)
     delay_range = config.get("delay_between_applies_sec", (3, 8))
+    max_queries = int(web_cfg.get("max_queries", 30))
 
-    queries = _build_search_queries(config)
+    # ── User-configurable tab cap ──
+    # The user explicitly asked for a limit on how many tabs get opened
+    # in one run (presets: 20 / 50 / 70 / 100). The value is read from
+    # config["web_search"]["tab_limit"] with fallback to legacy "max_urls"
+    # and a hard floor/ceiling so a missing/garbage value can't explode
+    # into thousands of tabs.
+    raw_tab_limit = web_cfg.get("tab_limit")
+    if raw_tab_limit is None:
+        raw_tab_limit = web_cfg.get("max_urls", 50)
+    try:
+        tab_limit = int(raw_tab_limit)
+    except (TypeError, ValueError):
+        tab_limit = 50
+    tab_limit = max(5, min(tab_limit, 200))  # sane bounds
+    max_url_cap = tab_limit
+
+    google_login_wait_sec = int(web_cfg.get("google_login_wait_sec", 120))
+
+    # Anti-repetition: remember every query we've already issued in this run.
+    # Without this, duplicate queries (which can arise from overlapping role
+    # keywords) waste the query budget and the user's time.
+    issued_queries: set = set()
+
+    # Build interleaved role queries so EVERY role runs in parallel (one per cycle)
+    interleaved = _interleave_role_queries(config)
+    if not interleaved:
+        print("[Web Search] ⚠️  No keywords configured — nothing to search")
+        return 0, []
+
+    # Remember the search tab so we can always switch BACK to it between
+    # queries. Without this, the next driver.get() overwrites whatever tab
+    # was current after the last apply — which was the last job tab.
+    try:
+        search_tab = driver.current_window_handle
+    except Exception:
+        search_tab = None
+
     all_job_urls = []
     new_applied_urls = []
     applied_count = 0
-    _stop = config.get("_stop_event")
 
-    print(f"\n[Web Search] 🔍 Running {len(queries)} search queries...")
+    # Deduplicate the interleaved list BEFORE slicing so duplicate queries
+    # (from overlapping role keywords) don't silently consume the budget.
+    seen_q: set = set()
+    unique_interleaved = []
+    for role_label, query in interleaved:
+        key = " ".join((query or "").lower().split())
+        if key in seen_q:
+            continue
+        seen_q.add(key)
+        unique_interleaved.append((role_label, query))
+    interleaved = unique_interleaved
 
-    # Phase 1: Collect all job URLs from Google
-    for i, (query, label) in enumerate(queries):
-        if _stop and _stop.is_set():
-            print("[Web Search] 🛑 Stop requested — exiting search.")
+    total_queries = len(interleaved)
+    capped = min(total_queries, max_queries)
+    roles_running = sorted({label for label, _ in interleaved[:capped]})
+    print(
+        f"\n[Web Search] 🔍 Orchestrating {len(roles_running)} role(s) in parallel: "
+        f"{', '.join(roles_running)}"
+    )
+    print(
+        f"[Web Search] 🔎 Running {capped} interleaved queries "
+        f"(of {total_queries}) — tab cap: {tab_limit}"
+    )
+
+    # ── Phase 1: Collect job URLs via interleaved Google searches ──
+    url_set = {u["url"] for u in all_job_urls}  # local dedup set (O(1) lookups)
+
+    for i, (role_label, query) in enumerate(interleaved[:capped]):
+        if should_stop():
+            print("[Web Search] ⏹  Stop requested — exiting search phase (tabs left open).")
             break
         if not is_driver_alive(driver):
-            print("[Web Search] ❌ Browser died, stopping")
+            print("[Web Search] ❌ Browser died — stopping (tabs left open).")
             break
 
-        print(f"\n  [{i+1}/{len(queries)}] 🔎 {label}")
-        print(f"  Query: {query[:80]}...")
+        # Anti-repetition: skip the query if we have already issued an
+        # equivalent one in this run (identical after whitespace/case normalise).
+        q_key = " ".join((query or "").lower().split())
+        if q_key in issued_queries:
+            print(f"  [{i+1}/{capped}] ⏭  skip duplicate query: {query[:60]}")
+            continue
+        issued_queries.add(q_key)
+
+        # Always return to the search tab before running the next query
+        if search_tab:
+            try:
+                driver.switch_to.window(search_tab)
+            except Exception:
+                # Search tab was closed by the user — re-anchor on any alive tab
+                try:
+                    search_tab = driver.window_handles[0]
+                    driver.switch_to.window(search_tab)
+                except Exception:
+                    print("[Web Search] ❌ No live tab to search in — stopping.")
+                    break
+
+        print(f"\n  [{i+1}/{capped}] 🧭 [{role_label}] 🔎 {query[:80]}...")
 
         try:
-            urls = google_search_jobs(driver, query, max_results)
+            search_url = f"https://www.google.com/search?q={quote_plus(query)}&num={max_results}"
+            driver.get(search_url)
+            time.sleep(random.uniform(3, 5))
+
+            # Google login wall → pause agent, wait for the user, then continue
+            if _is_google_login_page(driver):
+                logged_in = _wait_for_google_login(driver, max_wait_sec=google_login_wait_sec)
+                if not logged_in:
+                    # Skip Google queries for the rest of the run — open tabs stay intact
+                    print("[Web Search] ⏭  Skipping remaining Google queries after login timeout.")
+                    break
+                # Re-issue the same query after login
+                try:
+                    driver.get(search_url)
+                    time.sleep(random.uniform(2, 4))
+                except Exception:
+                    pass
+
+            results = job_finder.extract_google_links(driver, all_job_urls, applied_urls)
+            new_items = []
+            for u in results:
+                url_str = u.get("url") or ""
+                if not url_str:
+                    continue
+                if url_str in applied_urls or url_str in url_set:
+                    continue
+                # Canonicalise lightly (strip tracking query params) to avoid
+                # "same job, different utm_*" duplicates.
+                norm = url_str.split("#")[0].split("?")[0].rstrip("/")
+                if norm in url_set:
+                    continue
+                url_set.add(url_str)
+                url_set.add(norm)
+                new_items.append(u)
+
+            print(f"  📋 Found {len(results)} results, {len(new_items)} new")
+            all_job_urls.extend(new_items)
+
         except Exception as e:
-            print(f"  ❌ Google search failed for '{label}': {type(e).__name__}: {e}")
-            continue
-        new_urls = [u for u in urls if u not in applied_urls and u not in all_job_urls]
-
-        print(f"  📋 Found {len(urls)} results, {len(new_urls)} new")
-
-        all_job_urls.extend(new_urls)
+            print(f"    ❌ apply-error [web_search query]: {type(e).__name__}: {str(e)[:200]}")
 
         # Small delay between Google searches to avoid rate limiting
         time.sleep(random.uniform(3, 6))
 
-        # Cap total URLs to avoid extremely long runs
-        if len(all_job_urls) >= 50:
-            print("  📊 Reached 50 URL cap, stopping search phase")
+        if len(all_job_urls) >= max_url_cap:
+            print(f"  📊 Reached tab-limit ({max_url_cap}) — moving to apply phase")
             break
+
+    # Hard-cap the apply list to the user-configured tab limit.
+    if len(all_job_urls) > tab_limit:
+        print(f"[Web Search] 🔒 Capping apply list from {len(all_job_urls)} to tab_limit={tab_limit}")
+        all_job_urls = all_job_urls[:tab_limit]
 
     print(f"\n[Web Search] 📊 Total unique job URLs collected: {len(all_job_urls)}")
 
     if not all_job_urls:
-        print("[Web Search] ℹ️  No new job URLs found")
+        print("[Web Search] ℹ️  No new job URLs found — tabs left intact.")
         return 0, []
 
-    # Phase 2: Apply to each job URL
-    print(f"\n[Web Search] 🎯 Applying to {len(all_job_urls)} jobs...")
+    # ── Phase 2: Apply to each collected job URL ──
+    print(f"\n[Web Search] 🎯 Applying to {len(all_job_urls)} jobs (tabs stay open)...")
 
-    for i, url in enumerate(all_job_urls):
-        if _stop and _stop.is_set():
-            print("[Web Search] 🛑 Stop requested — exiting apply.")
+    for i, item in enumerate(all_job_urls):
+        if should_stop():
+            print("[Web Search] ⏹  Stop requested mid-apply — exiting (tabs left open).")
             break
         if not is_driver_alive(driver):
-            print("[Web Search] ❌ Browser died, stopping")
+            print("[Web Search] ❌ Browser died — stopping (tabs left open).")
             break
 
+        url = item["url"]
         print(f"\n{'─' * 50}")
-        print(f"  [{i+1}/{len(all_job_urls)}] Applying: {url[:80]}")
+        print(f"  [{i+1}/{len(all_job_urls)}] Applying to: {url[:60]}")
 
         try:
             success = apply_to_job_url(driver, url, config, dry_run)
 
             if success:
                 applied_count += 1
-                new_applied_urls.append(url)
+                new_applied_urls.append(item)
                 print(f"  ✅ Total applied: {applied_count}")
             else:
-                # Still track the URL to avoid retrying
-                new_applied_urls.append(url)
+                # Track even failed attempts so we don't retry immediately
+                new_applied_urls.append(item)
 
         except Exception as e:
-            print(f"  ❌ Error on {url[:80]}: {type(e).__name__}: {e}")
-            traceback.print_exc()
+            print(f"  ❌ apply-error [web_search apply]: {type(e).__name__}: {str(e)[:200]}")
+        finally:
+            # CRITICAL: switch back to the search tab BEFORE the next iteration,
+            # otherwise the next driver.get()/search would clobber this job tab.
+            # Never close any tab — user wants all jobs left open for review.
+            if search_tab:
+                try:
+                    driver.switch_to.window(search_tab)
+                except Exception:
+                    pass
 
-        # Check stop after each job — ensures we exit promptly after the current URL
-        if _stop and _stop.is_set():
-            print("[Web Search] 🛑 Stop requested — exiting after current job.")
-            break
-
-        # Ensure we're back to one tab - NO, we want to keep them open for manual review
-        # ensure_single_tab(driver)
-
-        # Random delay
+        # Random delay between applies to look human
         time.sleep(random.uniform(*delay_range))
 
-    print(f"\n[Web Search] ✅ DONE — Applied to {applied_count} jobs")
-    print(f"[Web Search] 📊 URLs processed: {len(all_job_urls)}")
+    stopped_flag = should_stop()
+    status_tag = "⏸ PAUSED" if stopped_flag else "✅ DONE"
+    print(f"\n[Web Search] {status_tag} — Applied to {applied_count} jobs")
+    print(f"[Web Search] 📊 URLs processed: {len(all_job_urls)} — all tabs remain open.")
 
     return applied_count, new_applied_urls
