@@ -22,12 +22,22 @@ class Payment(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
+
+    # Gateway — "razorpay" or "stripe"
+    gateway: Mapped[str] = mapped_column(String(20), default="razorpay")
+
+    # Razorpay fields
     razorpay_order_id: Mapped[Optional[str]] = mapped_column(String(255))
     razorpay_payment_id: Mapped[Optional[str]] = mapped_column(String(255))
-    amount: Mapped[int] = mapped_column(Integer)            # in paise (₹1 = 100 paise)
+
+    # Stripe fields
+    stripe_session_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+    stripe_payment_intent_id: Mapped[Optional[str]] = mapped_column(String(255))
+
+    amount: Mapped[int] = mapped_column(Integer)        # smallest unit: paise (INR) or cents (USD)
     currency: Mapped[str] = mapped_column(String(10), default="INR")
-    plan: Mapped[str] = mapped_column(String(50))
-    plan_period: Mapped[Optional[str]] = mapped_column(String(50))  # monthly / annual / credits
+    plan: Mapped[Optional[str]] = mapped_column(String(50))
+    plan_period: Mapped[Optional[str]] = mapped_column(String(50))
     credits_purchased: Mapped[Optional[int]] = mapped_column(Integer)
     status: Mapped[PaymentStatus] = mapped_column(
         Enum(PaymentStatus), default=PaymentStatus.created
