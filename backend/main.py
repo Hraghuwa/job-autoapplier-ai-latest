@@ -10,7 +10,7 @@ from jose import JWTError, jwt
 from backend.config import settings
 from backend.database import engine
 import backend.models  # noqa: F401 — imports all models, registers with database.Base
-from backend.routers import auth, onboarding, agents, jobs, users, payments, admin, resumes, ai, graph, bugs
+from backend.routers import auth, onboarding, agents, jobs, users, payments, admin, resumes, ai, graph, bugs, career_ops
 
 # ── In-memory WebSocket connection manager (Redis fallback) ───────────────────
 class ConnectionManager:
@@ -95,6 +95,7 @@ app.include_router(resumes.router,    prefix="/resumes",    tags=["resumes"])
 app.include_router(ai.router,         prefix="/ai",         tags=["ai"])
 app.include_router(graph.router,      prefix="/graph",      tags=["graph"])
 app.include_router(bugs.router,       prefix="/bugs",       tags=["bugs"])
+app.include_router(career_ops.router, prefix="/career-ops", tags=["career-ops"])
 
 
 # ── WebSocket — live agent feed ───────────────────────────────────────────────
