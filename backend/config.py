@@ -1,5 +1,10 @@
+import logging
+import secrets
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import validator
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -22,27 +27,38 @@ class Settings(BaseSettings):
     secret_key: str = ""
     algorithm: str = "HS256"
 
-    @validator("secret_key")
+    @validator("secret_key", pre=True, always=True)
     def secret_key_must_be_set(cls, v):
         if not v or v == "change-me-in-production":
-            raise ValueError(
-                "SECRET_KEY not configured in backend/.env — "
-                "generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+            # Generate an ephemeral key so the app starts. Tokens won't survive
+            # restarts — set SECRET_KEY env var in Railway for persistence.
+            ephemeral = secrets.token_hex(32)
+            logger.warning(
+                "SECRET_KEY not set — using an ephemeral random key. "
+                "Existing JWTs will be invalidated on every restart. "
+                "Set SECRET_KEY in Railway environment variables."
             )
+            return ephemeral
         return v
+
     access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 30
 
     # Encryption
-    fernet_key: str = ""  # generate: from cryptography.fernet import Fernet; Fernet.generate_key()
+    fernet_key: str = ""
 
     # AI
     system_gemini_key: str = ""
 
-    # Payments
+    # Payments — Razorpay (INR)
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
+
+    # Payments — Stripe (USD / global)
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_publishable_key: str = ""
 
     # Email
     resend_api_key: str = ""
