@@ -47,12 +47,15 @@ def _resolve_keys(user: User) -> Tuple[Optional[str], Optional[str]]:
     return gemini, groq
 
 
-# Models in fallback order. The primary stays gemini-1.5-flash for cost; we add
-# 2.0-flash and 1.5-pro as automatic fallbacks for quota / region errors.
+# Models in fallback order. gemini-1.5-flash was deprecated on v1beta in 2025
+# for some keys/regions, so we now try the 2.x family first.
 _GEMINI_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-flash-latest",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash-exp",
     "gemini-1.5-flash",
     "gemini-1.5-flash-8b",
-    "gemini-2.0-flash-exp",
     "gemini-1.5-pro",
 ]
 # Groq model names change frequently; this list is current as of 2026-04.
