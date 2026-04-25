@@ -59,10 +59,10 @@ async def set_gemini_key(
     try:
         import google.generativeai as genai
         genai.configure(api_key=body.api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        model.generate_content("Say OK")
+        # Cheapest validation: list models. Auth-only, no quota/region issues.
+        list(genai.list_models())
     except Exception as e:
-        raise HTTPException(400, f"Invalid Gemini API key: {e}")
+        raise HTTPException(400, f"Invalid Gemini API key: {type(e).__name__}: {str(e)[:160]}")
 
     user.gemini_key_encrypted = encrypt(body.api_key)
     await db.commit()
@@ -81,12 +81,11 @@ async def set_groq_key(
     try:
         from groq import Groq
         client = Groq(api_key=body.api_key)
-        # Cheap validation: list models. Raises on auth failure.
-        client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": "ok"}],
-            max_tokens=2,
-        )
+        # Cheapest possible validation: list models. Doesn't depend on a
+        # specific model still being supported, just checks auth.
+        models = client.models.list()
+        # Touch the response so any 401/403 surfaces here.
+        _ = list(getattr(models, "data", []) or [])
     except ImportError:
         raise HTTPException(500, "Groq SDK not installed on server (pip install groq)")
     except Exception as e:
