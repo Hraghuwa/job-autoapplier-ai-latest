@@ -99,6 +99,10 @@ for _u in (settings.frontend_url or "").split(","):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    # Allow any Vercel preview/production URL for this project. Each preview
+    # gets a unique subdomain (e.g. frontend-xyz123-…vercel.app), so a regex
+    # avoids needing to redeploy the backend every time Vercel rotates URLs.
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
