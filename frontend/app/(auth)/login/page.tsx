@@ -15,6 +15,7 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [slowHint, setSlowHint] = useState(false)
   const router = useRouter()
   const { setAuth } = useAuth()
 
@@ -22,6 +23,8 @@ export default function LoginPage() {
     e.preventDefault()
     setError('')
     setLoading(true)
+    setSlowHint(false)
+    const slowTimer = setTimeout(() => setSlowHint(true), 4000)
 
     try {
       const { data } = await api.post('/auth/login', { email, password })
@@ -44,11 +47,15 @@ export default function LoginPage() {
           `Set NEXT_PUBLIC_API_URL in Vercel to your Railway backend URL, ` +
           `or check that the backend is running.`
         )
+      } else if (err.code === 'ECONNABORTED') {
+        setError('Server took too long to respond. Please try again — the backend is warming up.')
       } else {
         setError('Login failed. Please try again.')
       }
     } finally {
+      clearTimeout(slowTimer)
       setLoading(false)
+      setSlowHint(false)
     }
   }
 
@@ -183,6 +190,12 @@ export default function LoginPage() {
                 </>
               )}
             </Button>
+
+            {slowHint && (
+              <p className="text-xs text-center text-muted-foreground animate-fade-up">
+                Backend is warming up — this can take 10–15 seconds on first request.
+              </p>
+            )}
           </form>
 
           <p className="mt-6 text-center text-sm text-muted-foreground">

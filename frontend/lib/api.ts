@@ -12,7 +12,17 @@ declare module 'axios' {
 
 const _apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
-const api = axios.create({ baseURL: _apiBase })
+// Generous timeout: Railway hobby tier can take 12-15s for the first byte.
+// Browsers/proxies sometimes kill idle requests around 30s; 60s gives plenty
+// of headroom for both cold-start and bcrypt-heavy endpoints (register/login).
+const api = axios.create({ baseURL: _apiBase, timeout: 60_000 })
+
+// Best-effort backend warm-up: fire a /health ping in the background as soon
+// as the app loads so by the time the user clicks Sign In / Sign Up, the
+// upstream is already warm. We don't await — failures are silent.
+if (typeof window !== 'undefined') {
+  fetch(`${_apiBase}/health`, { method: 'GET', cache: 'no-store' }).catch(() => {})
+}
 
 function getStoredToken(): string | null {
   try {
