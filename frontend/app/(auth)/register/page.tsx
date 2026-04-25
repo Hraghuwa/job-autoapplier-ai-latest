@@ -17,6 +17,7 @@ export default function RegisterPage() {
   const [referralCode, setReferralCode] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [slowHint, setSlowHint] = useState(false)
   const router = useRouter()
   const { setAuth } = useAuth()
 
@@ -36,6 +37,10 @@ export default function RegisterPage() {
     }
 
     setLoading(true)
+    setSlowHint(false)
+    // Backend on Railway hobby tier can take 10–15s on cold start. Show a
+    // reassuring message after 4s so users don't think it's broken.
+    const slowTimer = setTimeout(() => setSlowHint(true), 4000)
     try {
       const { data } = await api.post('/auth/register', {
         name,
@@ -49,9 +54,19 @@ export default function RegisterPage() {
       setAuth(data.access_token, data.refresh_token, meRes.data)
       router.replace('/dashboard')
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Registration failed. Please try again.')
+      if (err.response?.data?.detail) {
+        setError(err.response.data.detail)
+      } else if (err.code === 'ECONNABORTED') {
+        setError('Server took too long to respond. Please try again — the backend is warming up.')
+      } else if (err.code === 'ERR_NETWORK' || err.message === 'Network Error') {
+        setError("Can't reach the API. Check your internet connection and try again.")
+      } else {
+        setError('Registration failed. Please try again.')
+      }
     } finally {
+      clearTimeout(slowTimer)
       setLoading(false)
+      setSlowHint(false)
     }
   }
 
@@ -218,6 +233,12 @@ export default function RegisterPage() {
                 </>
               )}
             </Button>
+
+            {slowHint && (
+              <p className="text-xs text-center text-muted-foreground animate-fade-up">
+                Backend is warming up — this can take 10–15 seconds on first request.
+              </p>
+            )}
 
             <p className="text-xs text-muted-foreground text-center">
               By signing up, you agree to our Terms of Service and Privacy Policy.
