@@ -47,11 +47,32 @@ manager = ConnectionManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Startup must be resilient — the platform healthcheck (30s) hits
+    `/health` immediately after the process binds the port. If schema creation
+    blocks on an unreachable DB, the healthcheck times out and Railway tears
+    the deployment down. So we attempt schema creation with a short timeout
+    and log+continue on failure rather than crashing startup.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
     from backend.database import Base
     import backend.models  # noqa — ensure all models are registered before create_all
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    manager.loop = asyncio.get_event_loop()
+
+    try:
+        async def _init_schema():
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+
+        await asyncio.wait_for(_init_schema(), timeout=10.0)
+        log.info("Database schema ensured.")
+    except asyncio.TimeoutError:
+        log.error("DB schema init timed out after 10s — starting anyway. "
+                  "Check DATABASE_URL connectivity.")
+    except Exception as e:
+        log.error("DB schema init failed: %s — starting anyway. /health stays up.", e)
+
+    manager.loop = asyncio.get_running_loop()
     yield
 
 
