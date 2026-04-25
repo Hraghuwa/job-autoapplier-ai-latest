@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config import settings
 from backend.database import get_db
 from backend.dependencies import get_current_user
 from backend.models.user import User
@@ -26,9 +27,22 @@ from backend.models.profile import UserProfile
 
 router = APIRouter()
 
-_GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-if _GEMINI_KEY:
-    genai.configure(api_key=_GEMINI_KEY)
+
+def _resolve_gemini_key(user: Optional[User] = None) -> Optional[str]:
+    """User saved key → settings → env, in priority order."""
+    if user is not None:
+        try:
+            from backend.services.crypto_service import decrypt
+            blob = getattr(user, "gemini_key_encrypted", None)
+            if blob:
+                return decrypt(blob)
+        except Exception:
+            pass
+    return (
+        settings.system_gemini_key
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("SYSTEM_GEMINI_KEY")
+    )
 
 # In-memory story bank + negotiation cache (per-user). Survives process lifetime
 # only — good enough for the v1 slice, migrate to DB in follow-up.
@@ -36,9 +50,15 @@ _STORY_BANK: Dict[str, List[Dict[str, Any]]] = {}
 _EVALUATIONS: Dict[str, List[Dict[str, Any]]] = {}
 
 
-def _model():
-    if not _GEMINI_KEY:
-        raise HTTPException(503, "AI engine not configured")
+def _model(user: Optional[User] = None):
+    key = _resolve_gemini_key(user)
+    if not key:
+        raise HTTPException(
+            503,
+            "AI engine not configured. Add a Gemini API key in Settings → API Keys, "
+            "or set SYSTEM_GEMINI_KEY on the server.",
+        )
+    genai.configure(api_key=key)
     return genai.GenerativeModel("gemini-1.5-flash")
 
 
@@ -167,7 +187,7 @@ async def evaluate_offer(
         company=body.company or "",
     )
     try:
-        raw = _model().generate_content(prompt).text
+        raw = _model(user).generate_content(prompt).text
         data = _parse_json(raw)
     except Exception as e:
         raise HTTPException(500, f"Evaluation failed: {e}")
@@ -232,7 +252,7 @@ async def tailor_cv(
     cv = await _cv_summary(db, user)
     prompt = TAILOR_PROMPT.format(cv=cv[:5000] or "(no CV)", jd=body.jd_text[:6000])
     try:
-        raw = _model().generate_content(prompt).text
+        raw = _model(user).generate_content(prompt).text
         return _parse_json(raw)
     except Exception as e:
         raise HTTPException(500, f"Tailor failed: {e}")
@@ -295,7 +315,7 @@ async def negotiate(body: NegotiationBody, user: User = Depends(get_current_user
         geo=body.geo_context or "n/a",
     )
     try:
-        raw = _model().generate_content(prompt).text
+        raw = _model(user).generate_content(prompt).text
         return _parse_json(raw)
     except Exception as e:
         raise HTTPException(500, f"Negotiation failed: {e}")
@@ -322,7 +342,7 @@ Only include real, well-known companies. No invented URLs — if unsure, leave p
 async def scan(body: ScanBody, user: User = Depends(get_current_user)):
     prompt = SCAN_PROMPT.format(query=body.query, companies=", ".join(body.companies) or "any")
     try:
-        raw = _model().generate_content(prompt).text
+        raw = _model(user).generate_content(prompt).text
         return _parse_json(raw)
     except Exception as e:
         raise HTTPException(500, f"Scan failed: {e}")
@@ -330,4 +350,4 @@ async def scan(body: ScanBody, user: User = Depends(get_current_user)):
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "ai": bool(_GEMINI_KEY)}
+    return {"ok": True, "ai": bool(_resolve_gemini_key(None))}

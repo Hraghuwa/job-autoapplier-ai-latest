@@ -1,11 +1,12 @@
 import secrets
 import uuid
+from typing import Optional
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
@@ -56,8 +57,14 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    # Auto-flag admin if email matches configured admin email
+    # Auto-flag admin if:
+    #   1. email matches ADMIN_EMAIL env var, OR
+    #   2. this is the very first user in the DB (bootstrap admin)
     is_admin = bool(settings.admin_email and body.email == settings.admin_email)
+    if not is_admin:
+        count_res = await db.execute(select(func.count()).select_from(User))
+        if (count_res.scalar() or 0) == 0:
+            is_admin = True
 
     user = User(
         id=uuid.uuid4(),
@@ -122,3 +129,40 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(get_current_user)):
     return UserOut.model_validate(user)
+
+
+# ── Bootstrap admin promotion ────────────────────────────────────────────────
+#
+# Lets the operator promote any account to admin without redeploying. Two ways
+# to authorize:
+#   1. ADMIN_EMAIL env var matches the requesting user's email, OR
+#   2. ADMIN_BOOTSTRAP_SECRET env var matches the X-Admin-Secret header.
+# Without either, returns 403. Useful when you've already signed up but
+# forgot to set ADMIN_EMAIL beforehand.
+import os as _os
+from fastapi import Header
+
+
+@router.post("/promote-self")
+async def promote_self(
+    x_admin_secret: Optional[str] = Header(default=None, alias="X-Admin-Secret"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    bootstrap_secret = _os.environ.get("ADMIN_BOOTSTRAP_SECRET", "").strip()
+    email_match = bool(settings.admin_email and user.email == settings.admin_email)
+    secret_match = bool(bootstrap_secret and x_admin_secret == bootstrap_secret)
+
+    if not (email_match or secret_match):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Not authorized to self-promote. Set ADMIN_EMAIL to your account "
+                "email, or send X-Admin-Secret header matching ADMIN_BOOTSTRAP_SECRET."
+            ),
+        )
+
+    user.is_admin = True
+    await db.commit()
+    return {"ok": True, "is_admin": True, "email": user.email}
+

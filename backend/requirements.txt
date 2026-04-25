@@ -27,6 +27,7 @@ cryptography
 
 # ── AI ───────────────────────────────────────────────────────────────────────
 google-generativeai==0.8.6
+groq>=0.11.0              # Fallback LLM provider when Gemini quota/region fails
 
 # ── Payments ─────────────────────────────────────────────────────────────────
 razorpay
