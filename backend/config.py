@@ -28,15 +28,32 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
 
     @validator("secret_key", pre=True, always=True)
-    def secret_key_must_be_set(cls, v):
+    def secret_key_must_be_set(cls, v, values):
         if not v or v == "change-me-in-production":
-            # Generate an ephemeral key so the app starts. Tokens won't survive
-            # restarts — set SECRET_KEY env var in Railway for persistence.
+            # Try to derive a stable key from FERNET_KEY so tokens survive
+            # restarts even when SECRET_KEY is not explicitly set.
+            # FERNET_KEY is already required for credential encryption, so it's
+            # always present in production. Deriving from it gives stability
+            # without needing a second env var.
+            fernet_key = values.get("fernet_key") or ""
+            import os as _os
+            fernet_env = _os.environ.get("FERNET_KEY", "")
+            seed = fernet_key or fernet_env
+            if seed:
+                import hashlib
+                derived = hashlib.sha256(f"jobagent-jwt-{seed}".encode()).hexdigest()
+                logger.warning(
+                    "SECRET_KEY not set — derived a stable key from FERNET_KEY. "
+                    "JWTs will survive restarts but you should set SECRET_KEY "
+                    "explicitly in Railway environment variables for full security."
+                )
+                return derived
+            # Last resort: ephemeral. Tokens die on restart.
             ephemeral = secrets.token_hex(32)
-            logger.warning(
-                "SECRET_KEY not set — using an ephemeral random key. "
-                "Existing JWTs will be invalidated on every restart. "
-                "Set SECRET_KEY in Railway environment variables."
+            logger.error(
+                "SECRET_KEY and FERNET_KEY both unset — using an ephemeral random "
+                "key. Users will be logged out on every restart. "
+                "Set SECRET_KEY in Railway environment variables NOW."
             )
             return ephemeral
         return v

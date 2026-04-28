@@ -79,30 +79,38 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="JobAgent API", version="1.0.0", lifespan=lifespan)
 
 # Build CORS origin list from FRONTEND_URL env var (supports comma-separated list)
-# plus hardcoded Vercel deployment URL and local dev origins.
+# plus hardcoded known-good origins.
+#
+# IMPORTANT FOR PRODUCTION:
+#   Set FRONTEND_URL=https://nutriblend.store,https://www.nutriblend.store
+#   in your Railway environment variables.  The regex below covers *.vercel.app
+#   (preview deploys) and *.nutriblend.store (subdomains), but the apex domain
+#   must be listed explicitly because regex anchors don't match the bare domain.
 _cors_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    # Vercel production deployment
+    # Custom production domain (apex + www)
+    "https://nutriblend.store",
+    "https://www.nutriblend.store",
+    # Vercel deployment URLs (kept for legacy; regex below covers new previews)
     "https://frontend-2oec020pb-harshs-projects-68f6e57b.vercel.app",
-    # Vercel aliased domain (shorter URL)
     "https://frontend-lac-mu-2eggctjwqm.vercel.app",
-    # Latest Vercel production deployment
     "https://frontend-f0n34xezv-harshs-projects-68f6e57b.vercel.app",
 ]
-# FRONTEND_URL may be a single URL or comma-separated list
+# FRONTEND_URL may be a single URL or comma-separated list — Railway env var
 for _u in (settings.frontend_url or "").split(","):
     _u = _u.strip()
     if _u and _u not in _cors_origins:
         _cors_origins.append(_u)
 
+# Build CORS regex: always allow *.vercel.app; also allow *.nutriblend.store if set
+_cors_regex_parts = [r"https://.*\.vercel\.app", r"https://.*\.nutriblend\.store"]
+_cors_regex = "|".join(_cors_regex_parts)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    # Allow any Vercel preview/production URL for this project. Each preview
-    # gets a unique subdomain (e.g. frontend-xyz123-…vercel.app), so a regex
-    # avoids needing to redeploy the backend every time Vercel rotates URLs.
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=_cors_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

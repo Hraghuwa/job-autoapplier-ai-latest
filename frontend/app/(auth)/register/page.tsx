@@ -59,7 +59,12 @@ export default function RegisterPage() {
       } else if (err.code === 'ECONNABORTED') {
         setError('Server took too long to respond. Please try again — the backend is warming up.')
       } else if (err.code === 'ERR_NETWORK' || err.message === 'Network Error') {
-        setError("Can't reach the API. Check your internet connection and try again.")
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || '(unset — falling back to localhost)'
+        setError(
+          `Can't reach the API at ${apiUrl}. ` +
+          `Set NEXT_PUBLIC_API_URL in Vercel to your Railway backend URL, ` +
+          `or check that the backend is running.`
+        )
       } else {
         setError('Registration failed. Please try again.')
       }
