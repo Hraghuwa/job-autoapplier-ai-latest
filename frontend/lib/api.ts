@@ -10,20 +10,51 @@ declare module 'axios' {
   }
 }
 
-const _apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+// ── API base URL strategy ──────────────────────────────────────────────────
+//
+// PRODUCTION (Vercel + Railway):
+//   Do NOT set NEXT_PUBLIC_API_URL.
+//   Set BACKEND_URL (private, server-only) in Vercel → the Next.js rewrite
+//   proxy (next.config.mjs) forwards /api/* → BACKEND_URL/* server-side.
+//   Browser only ever talks to its own origin (nutriblend.store) → no CORS.
+//
+// LOCAL DEV (direct backend):
+//   Set NEXT_PUBLIC_API_URL=http://localhost:8000 in frontend/.env.local
+//   to bypass the proxy and hit the backend directly.
+//
+// The trick: axios paths like `/auth/login` start with `/`, so they ignore
+// a relative baseURL.  We handle the proxy case via a request interceptor
+// that rewrites `/foo` → `/api/foo` when no explicit URL override is set.
 
-// Generous timeout: Railway hobby tier can take 12-15s for the first byte.
-// Browsers/proxies sometimes kill idle requests around 30s; 60s gives plenty
-// of headroom for both cold-start and bcrypt-heavy endpoints (register/login).
-const api = axios.create({ baseURL: _apiBase, timeout: 60_000 })
+const _directUrl = process.env.NEXT_PUBLIC_API_URL   // e.g. http://localhost:8000
+const _proxyMode = !_directUrl                        // true in production
 
-// Best-effort backend warm-up: fire a /health ping in the background as soon
-// as the app loads so by the time the user clicks Sign In / Sign Up, the
-// upstream is already warm. We don't await — failures are silent.
+const api = axios.create({
+  // In proxy mode baseURL is empty — interceptor prepends /api to every path.
+  // In direct mode baseURL is the explicit URL and interceptor is a no-op.
+  baseURL: _directUrl || '',
+  timeout: 60_000,  // Railway cold-start can take 12-15s; leave generous headroom
+})
+
+// ── Proxy-path interceptor ─────────────────────────────────────────────────
+// Prepend /api so requests go through the Next.js rewrite → Railway backend.
+// Skip if:  already absolute URL, or NEXT_PUBLIC_API_URL is set (direct mode).
+api.interceptors.request.use((config) => {
+  if (_proxyMode && config.url && !config.url.startsWith('http')) {
+    config.url = '/api' + (config.url.startsWith('/') ? config.url : `/${config.url}`)
+  }
+  return config
+})
+
+// ── Warm-up ping ───────────────────────────────────────────────────────────
+// Fire a /health ping on load so the Railway instance is warm by the time
+// the user clicks Sign In. Failures are silent.
 if (typeof window !== 'undefined') {
-  fetch(`${_apiBase}/health`, { method: 'GET', cache: 'no-store' }).catch(() => {})
+  const healthUrl = _directUrl ? `${_directUrl}/health` : '/api/health'
+  fetch(healthUrl, { method: 'GET', cache: 'no-store' }).catch(() => {})
 }
 
+// ── Token helpers ──────────────────────────────────────────────────────────
 function getStoredToken(): string | null {
   try {
     const raw = localStorage.getItem('auth-store')
@@ -45,7 +76,7 @@ function getStoredRefresh(): string | null {
   }
 }
 
-// Inject stored token — but never overwrite an explicitly-set Authorization header
+// ── Auth header injection ──────────────────────────────────────────────────
 api.interceptors.request.use((config) => {
   if (!config.headers.Authorization) {
     const token = getStoredToken()
@@ -54,7 +85,7 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// On 401: attempt silent token refresh once; on failure, redirect to login
+// ── 401 → silent refresh, then retry ──────────────────────────────────────
 api.interceptors.response.use(
   (res) => res,
   async (error) => {
@@ -64,9 +95,9 @@ api.interceptors.response.use(
       const refresh = getStoredRefresh()
       if (refresh) {
         try {
-          const { data } = await axios.post(`${_apiBase}/auth/refresh`, {
-            refresh_token: refresh,
-          })
+          // Refresh endpoint must also go through the proxy in proxy mode
+          const refreshUrl = _proxyMode ? '/api/auth/refresh' : `${_directUrl}/auth/refresh`
+          const { data } = await axios.post(refreshUrl, { refresh_token: refresh })
           // Patch the stored token (zustand persist format: { state: {...}, version: 0 })
           try {
             const raw = localStorage.getItem('auth-store')
@@ -79,13 +110,11 @@ api.interceptors.response.use(
           original.headers.Authorization = `Bearer ${data.access_token}`
           return api(original)
         } catch {
-          // Refresh failed — clear auth and hard-redirect to login
           localStorage.removeItem('auth-store')
           window.location.href = '/login'
           return Promise.reject(error)
         }
       }
-      // No refresh token — go to login
       localStorage.removeItem('auth-store')
       window.location.href = '/login'
     }
@@ -93,9 +122,9 @@ api.interceptors.response.use(
   }
 )
 
-// Global error toast for non-401 errors.
-// Callers can opt out by passing `{ silent: true }` in the axios config — useful
-// for background queries (graph, analytics) that fail gracefully on empty data.
+// ── Global error toast for non-401 errors ─────────────────────────────────
+// Callers can opt out with { silent: true } — used for background queries
+// (graph, analytics) that fail gracefully on empty data.
 api.interceptors.response.use(
   (res) => res,
   (error) => {
