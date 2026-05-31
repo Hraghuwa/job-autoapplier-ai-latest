@@ -41,14 +41,14 @@ const DESCRIPTIONS: Record<Tab, { title: string; what: string; how: string; out:
     what: 'Surgical, non-fabricating rewrites of your CV for one specific JD. No invented experience.',
     how: 'Paste the JD. The AI reads your stored profile and proposes a new summary, keywords to inject, bullet rewrites, and section reorder.',
     out: 'Tailored summary, keyword chips, XYZ-formula bullet rewrites, and ATS tips.' },
-  scan:      { title: 'Portal Scan',
-    what: 'Suggests well-known target companies and concrete career-portal URLs (Ashby/Greenhouse/Lever) for a given archetype.',
-    how: 'Type an archetype query like "applied AI, agentic, llm-ops" and optionally seed companies.',
-    out: '10 prioritised companies with portal links and an example query string for each.' },
-  stories:   { title: 'Story Bank (STAR + R)',
-    what: 'Reusable interview stories using the STAR + Reflection framework. Auto-populated when you run an evaluation.',
-    how: 'Add stories manually, or let evaluations seed the bank automatically.',
-    out: 'Searchable story library you can mine before any interview.' },
+  scan:      { title: 'Portal Scan — Target Company Finder',
+    what: 'Discovers which companies are actively hiring for your target archetype and tells you exactly where to apply on their career portals. Instead of scrolling job boards, you go direct-to-source: Greenhouse, Lever, Ashby, Workday, and company careers pages — bypassing recruiter filters that hide direct applications. Works for any archetype: "applied AI / LLM ops", "senior backend Go", "product data analyst", "fintech PM", etc.',
+    how: '1. Type a keyword archetype that describes the role you want — be specific (e.g. "agentic AI engineer Python" or "growth PM B2C SaaS"). 2. Optionally list companies you already know about (comma-separated) — the AI will include their portals and suggest 10 more similar ones. 3. Click "Suggest targets" — results appear in ~5 seconds.',
+    out: '10 ranked companies, each with: why they\'re a good fit for your archetype, 3 direct portal URLs (careers page / ATS links), and an example search query to use on their portal. Click any URL to open the portal directly and use the Tailor CV tab to customise your CV before applying.' },
+  stories:   { title: 'Story Bank (STAR + Reflection)',
+    what: 'A private library of interview stories structured with the STAR + Reflection method: Situation → Task → Action → Result → what you learned. Strong candidates walk into every interview with 10–15 stories ready to flex to any question. The bank is auto-seeded every time you run an Evaluate Offer — the AI extracts the most relevant STAR stories from the JD so you never start from scratch.',
+    how: 'Either add stories manually using the form (one per real work experience, project, or leadership moment), OR run "Evaluate Offer" on any JD and the AI will draft STAR stories from the job requirements and add them to your bank automatically. Tag stories with skills (e.g. "conflict resolution", "data engineering") so you can filter by interview type.',
+    out: 'A persistent story library per account. Each story shows the full S-T-A-R-R breakdown. Delete stories you don\'t need. Before any interview, open the bank and pick 3–5 stories that match the job\'s key themes.' },
   negotiate: { title: 'Negotiation Scripts',
     what: 'Generates three concrete scripts: counter the current offer, push back on a geographic discount, leverage a competing offer.',
     how: 'Fill in the offer details — current, target, competing, geo context.',
@@ -390,7 +390,30 @@ function ScanPanel() {
   }
   return (
     <div className="space-y-4">
-      <input className="w-full rounded border border-border bg-background px-3 py-2 text-sm" placeholder="Query e.g. 'applied AI, agentic, llm-ops'" value={query} onChange={e => setQuery(e.target.value)} />
+      {/* Inline help */}
+      <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm space-y-2">
+        <p className="font-semibold">🎯 What does Portal Scan do?</p>
+        <p className="text-muted-foreground">
+          Finds the <strong>best companies hiring for your archetype</strong> right now and gives you their
+          direct career-portal URLs — bypassing job board algorithms. Apply direct to
+          Greenhouse / Lever / Ashby portals where competition is lower and your application lands in the ATS unfiltered.
+        </p>
+        <div className="grid sm:grid-cols-3 gap-3 mt-2 text-xs text-muted-foreground">
+          <div className="bg-background border border-border rounded p-2">
+            <p className="font-semibold text-foreground mb-1">Step 1</p>
+            Describe your target role archetype — be specific. e.g. <em>"applied AI engineer, LLM fine-tuning, Python"</em>
+          </div>
+          <div className="bg-background border border-border rounded p-2">
+            <p className="font-semibold text-foreground mb-1">Step 2</p>
+            Optionally list companies you already know. The AI adds 10 similar companies you might have missed.
+          </div>
+          <div className="bg-background border border-border rounded p-2">
+            <p className="font-semibold text-foreground mb-1">Step 3</p>
+            Click the portal URLs in results → open their careers page → use <strong>Tailor CV</strong> before applying.
+          </div>
+        </div>
+      </div>
+      <input className="w-full rounded border border-border bg-background px-3 py-2 text-sm" placeholder="e.g. 'applied AI, agentic systems, LLM ops' or 'senior backend Go, fintech, remote'" value={query} onChange={e => setQuery(e.target.value)} />
       <input className="w-full rounded border border-border bg-background px-3 py-2 text-sm" placeholder="Companies (comma-separated, optional)" value={companies} onChange={e => setCompanies(e.target.value)} />
       <Button onClick={run} disabled={loading || !query}>
         {loading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Radar className="w-4 h-4 mr-2" />}
@@ -422,6 +445,7 @@ function StoryBankPanel() {
   const [stories, setStories] = useState<any[]>([])
   const [form, setForm] = useState({ title: '', situation: '', task: '', action: '', result: '', reflection: '' })
   const [loading, setLoading] = useState(false)
+  const [showHelp, setShowHelp] = useState(false)
   const load = async () => {
     const { data } = await api.get('/career-ops/story-bank')
     setStories(data)
@@ -440,6 +464,39 @@ function StoryBankPanel() {
     await load()
   }
   return (
+    <div className="space-y-4">
+      {/* Inline help */}
+      <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm">
+        <div className="flex justify-between items-start gap-2">
+          <div>
+            <p className="font-semibold">📖 What is the Story Bank?</p>
+            <p className="text-muted-foreground mt-1">
+              Your personal library of interview stories in <strong>STAR + Reflection</strong> format.
+              Top candidates walk into every interview with 10–15 ready stories that flex to any question.
+            </p>
+          </div>
+          <button onClick={() => setShowHelp(h => !h)} className="text-xs text-primary shrink-0 hover:underline">
+            {showHelp ? 'Less' : 'Usage guide'}
+          </button>
+        </div>
+        {showHelp && (
+          <div className="mt-3 space-y-2 text-muted-foreground border-t border-border pt-3">
+            <p><strong className="text-foreground">How to fill each field:</strong></p>
+            <ul className="space-y-1.5 ml-3 list-none">
+              <li>📌 <strong>Title</strong> — Short name for easy retrieval. e.g. <em>"Led data-pipeline migration at Acme"</em></li>
+              <li>🎬 <strong>Situation</strong> — Set the scene. What was the context? What problem existed? (2-3 sentences)</li>
+              <li>🎯 <strong>Task</strong> — What was YOUR specific responsibility or goal?</li>
+              <li>⚡ <strong>Action</strong> — What did YOU do? Use "I" not "we". Be specific about your decisions.</li>
+              <li>📈 <strong>Result</strong> — Quantify the outcome. Cost saved? Revenue generated? Time reduced? User growth?</li>
+              <li>💡 <strong>Reflection</strong> — What did you learn? What would you do differently? (shows growth mindset)</li>
+            </ul>
+            <p className="text-xs italic mt-2">
+              💡 <strong>Tip:</strong> Run "Evaluate Offer" on any JD — the AI will auto-draft STAR stories from the job requirements and add them to your bank.
+            </p>
+          </div>
+        )}
+      </div>
+
     <div className="grid md:grid-cols-2 gap-6">
       <div className="space-y-2">
         <h3 className="font-semibold">Add story (STAR + R)</h3>
@@ -450,6 +507,9 @@ function StoryBankPanel() {
       </div>
       <div className="space-y-3">
         <h3 className="font-semibold">Bank ({stories.length})</h3>
+        {stories.length === 0 && (
+          <p className="text-xs text-muted-foreground italic">No stories yet. Add one manually, or run "Evaluate Offer" to auto-generate from a JD.</p>
+        )}
         {stories.map((s: any) => (
           <div key={s.id} className="border border-border rounded-lg p-3 bg-card">
             <div className="flex justify-between items-start gap-2">
@@ -457,9 +517,11 @@ function StoryBankPanel() {
               <button onClick={() => del(s.id)} className="text-xs text-red-500 hover:underline">delete</button>
             </div>
             <p className="text-xs text-muted-foreground mt-1 line-clamp-3">{s.situation}</p>
+            {s.result && <p className="text-xs text-green-600 mt-1 font-medium line-clamp-1">📈 {s.result}</p>}
           </div>
         ))}
       </div>
+    </div>
     </div>
   )
 }

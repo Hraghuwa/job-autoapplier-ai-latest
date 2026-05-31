@@ -113,10 +113,27 @@ def login(driver, email, password):
         print("[Internshala] ✅ Logged in!")
         return True
 
-    # Fallback: try email/password login
-    print("[Internshala] Google login failed or timed out, trying manual fallback...")
-    input("Please login manually in the opened browser window, then press Enter to continue...")
-    return True
+    # Web workers cannot safely block on stdin. Give the visible browser a
+    # bounded manual-login window, then continue only if the session is active.
+    print("[Internshala] Google login failed or timed out. Waiting briefly for manual login...")
+    try:
+        from config import CONFIG as _RUN_CONFIG
+        wait_sec = int(_RUN_CONFIG.get("manual_login_wait_sec", 60))
+    except Exception:
+        wait_sec = 60
+    deadline = time.time() + wait_sec
+    while time.time() < deadline:
+        try:
+            url = driver.current_url.lower()
+            page = driver.page_source.lower()
+            if "dashboard" in url or "student/dashboard" in url or "logout" in page:
+                print("[Internshala] ✅ Manual login detected.")
+                return True
+        except Exception:
+            pass
+        time.sleep(3)
+    print("[Internshala] ❌ Login not completed within the manual-login window.")
+    return False
 
 
 def search_and_apply(driver, keywords, locations, max_jobs, applied_count,

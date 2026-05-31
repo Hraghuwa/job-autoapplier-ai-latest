@@ -200,14 +200,92 @@ def _update_run(session, run_id: str, **kwargs):
 
 def _log_event(session, run_id: str, event_type: str, message: str, app_id: Optional[str] = None):
     from backend.models.agent_run import AgentLog
-    log = AgentLog(
-        run_id=uuid.UUID(run_id),
-        application_id=uuid.UUID(app_id) if app_id else None,
-        event_type=event_type,
-        message=message[:2048],
-    )
-    session.add(log)
+    try:
+        log = AgentLog(
+            run_id=uuid.UUID(run_id),
+            application_id=uuid.UUID(app_id) if app_id else None,
+            event_type=event_type,
+            message=message[:2048],
+        )
+        session.add(log)
+        session.commit()
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+
+
+def _learn_from_run_logs(session, user_id: str, run_id: str) -> Optional[str]:
+    """Turn concrete run errors into future custom instructions.
+
+    Best-effort and intentionally non-fatal. If Gemini is unavailable, still
+    records a small deterministic rule for common repeat failures.
+    """
+    from backend.config import settings
+    from backend.models.agent_run import AgentLog
+    from backend.models.profile import UserProfile
+    from sqlalchemy.orm.attributes import flag_modified
+
+    logs = session.query(AgentLog).filter(
+        AgentLog.run_id == uuid.UUID(run_id),
+        AgentLog.event_type.in_(["error", "login_challenge"]),
+    ).order_by(AgentLog.created_at).limit(30).all()
+    if not logs:
+        return None
+
+    errors_text = "\n".join(f"- {log.message[:500]}" for log in logs)
+    advice = ""
+    if settings.system_gemini_key:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=settings.system_gemini_key)
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            response = model.generate_content(f"""You are improving a browser job auto-applier.
+
+These are real failure logs from one run:
+{errors_text}
+
+Produce 1-3 concrete future rules. Each rule must be a single imperative sentence.
+Return only the rules, one per line.""")
+            advice = (response.text or "").strip()
+        except Exception as e:
+            logger.warning("Self-learning analysis failed for run %s: %s", run_id, e)
+
+    if not advice:
+        lowered = errors_text.lower()
+        rules = []
+        if any(x in lowered for x in ["captcha", "challenge", "checkpoint", "2fa"]):
+            rules.append("When a login challenge or CAPTCHA appears, pause the platform flow and ask the user to solve it before retrying.")
+        if any(x in lowered for x in ["no apply button", "could not auto-submit", "submit"]):
+            rules.append("If the primary apply or submit button is missing, scroll the page and try visible Apply, Submit, Continue, Next, and Send buttons before skipping.")
+        if any(x in lowered for x in ["resume", "file", "upload"]):
+            rules.append("Before submitting, verify the resume file input accepted the selected resume path; if upload fails, retry once with the static resume.")
+        advice = "\n".join(rules[:3])
+
+    if not advice:
+        return None
+
+    profile = session.query(UserProfile).filter_by(user_id=uuid.UUID(user_id)).first()
+    if not profile:
+        return advice
+    prefs = _ensure_dict(profile.job_preferences)
+    existing = (prefs.get("agent_custom_instructions") or "").strip()
+    new_rules = [line.strip("- ").strip() for line in advice.splitlines() if line.strip()]
+    added = []
+    for rule in new_rules:
+        if rule and rule not in existing:
+            added.append(rule)
+    if not added:
+        return advice
+    prefs["agent_custom_instructions"] = "\n".join(
+        part for part in [existing, "\n".join(added)] if part
+    ).strip()
+    profile.job_preferences = prefs
+    flag_modified(profile, "job_preferences")
     session.commit()
+    _log_event(session, run_id, "info", f"Self-learning added {len(added)} future rule(s).")
+    return "\n".join(added)
 
 
 def _decrypt(value: str) -> str:
@@ -427,6 +505,11 @@ def _build_config(user, profile) -> dict:
         # Certifications
         "certifications": certifications,
         "summary": extracted.get("summary", ""),
+        # Phase E cache-busting: the tailored_resume_store derives a profile
+        # version from these fields so any resume upload or profile edit
+        # automatically invalidates the old cached PDFs.
+        "resume_hash": str(profile.resume_hash or ""),
+        "experiences": extracted.get("experience", []),
     }
 
     # Build role_agents from user's job_titles + employment_types preferences
@@ -440,6 +523,11 @@ def _build_config(user, profile) -> dict:
         role_agents = prefs.get("role_agents", DEFAULT_ROLE_AGENTS)
 
     linkedin_creds = {"email": cred("linkedin", "email"), "password": cred("linkedin", "password")}
+    # LinkedIn session cookies — decrypted JSON string. Critical for bypassing
+    # the CAPTCHA/security challenge that wipes out password-only logins.
+    # Stored under platform_passwords["linkedin_cookies"] by /onboarding/linkedin-cookies.
+    linkedin_cookies_raw = creds.get("linkedin_cookies") or ""
+    linkedin_cookies_json = _decrypt(linkedin_cookies_raw) if linkedin_cookies_raw else ""
     internshala_creds = {"email": cred("internshala", "email"), "password": cred("internshala", "password")}
     naukri_creds = {"email": cred("naukri", "email"), "password": cred("naukri", "password")}
     unstop_creds = {"email": cred("unstop", "email"), "password": cred("unstop", "password")}
@@ -457,6 +545,10 @@ def _build_config(user, profile) -> dict:
         "resume_path": str(profile.resume_url or ""),
         
         "linkedin": linkedin_creds,
+        "linkedin_cookies": linkedin_cookies_json,    # raw JSON string for _try_cookie_login
+        # user_id is needed by resume_resolver (Phase E) to look up cached
+        # tailored PDFs in the store.
+        "user_id": user.id,
         "internshala": internshala_creds,
         "naukri": naukri_creds,
         "unstop": unstop_creds,
@@ -504,7 +596,7 @@ def _build_config(user, profile) -> dict:
 
 
 # ── Core logic (callable directly or via Celery) ─────────────────────────────
-def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
+def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_run: bool = False):
     session = _sync_session()
     applied = 0
     skipped = 0
@@ -541,6 +633,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
         celery_task_id = task_self.request.id if task_self else None
         _update_run(session, run_id, status="running", started_at=datetime.now(),
                     celery_task_id=celery_task_id)
+        _log_event(session, run_id, "info", f"Phase {phase} ({platform}) started.")
         publish(user_id, {"type": "phase_started", "phase": phase, "platform": platform,
                           "run_id": run_id})
 
@@ -568,11 +661,14 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
         PLATFORM_HINTS = ("linkedin", "internshala", "unstop", "naukri",
                           "wellfound", "google")
 
+        stats = {"skipped": 0, "errors": 0}
+
         class AgentStdout:
-            def __init__(self, original, uid, run_id):
+            def __init__(self, original, uid, run_id, db_session):
                 self._orig = original
                 self._uid = uid
                 self._run_id = run_id
+                self._session = db_session
                 self._buf = ""
 
             def write(self, text):
@@ -610,18 +706,22 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
 
                 # Applied externally or via Easy Apply
                 if "External form filled" in line or "✅ Applied" in line:
+                    _log_event(self._session, self._run_id, "applied", line)
                     publish(self._uid, {
                         "event": "applied",
                         "message": line,
                         "run_id": self._run_id,
                     })
                 elif "⏭" in line or "Already applied" in line or "Skipping" in line:
+                    stats["skipped"] += 1
+                    _log_event(self._session, self._run_id, "skipped", line)
                     publish(self._uid, {
                         "event": "skipped",
                         "message": line,
                         "run_id": self._run_id,
                     })
                 elif is_login_blocked:
+                    stats["errors"] += 1
                     platform_hint = "unknown"
                     for p in PLATFORM_HINTS:
                         if p in line_lower:
@@ -638,8 +738,11 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
                         ),
                         "run_id": self._run_id,
                     })
+                    _log_event(self._session, self._run_id, "login_challenge", line)
                     error_reasons.append(f"LOGIN CHALLENGE [{platform_hint}]: {line[:200]}")
                 elif is_error:
+                    stats["errors"] += 1
+                    _log_event(self._session, self._run_id, "error", line)
                     publish(self._uid, {
                         "event": "error",
                         "message": line,
@@ -647,6 +750,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
                     })
                     error_reasons.append(line[:200])
                 elif "🎯 KEYWORD" in line or "LINKEDIN AGENT" in line or "Phase" in line:
+                    _log_event(self._session, self._run_id, "info", line)
                     publish(self._uid, {
                         "event": "ping",
                         "message": line,
@@ -654,11 +758,12 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
                     })
 
         _orig_stdout = sys.stdout
-        sys.stdout = AgentStdout(_orig_stdout, user_id, run_id)
+        sys.stdout = AgentStdout(_orig_stdout, user_id, run_id, session)
 
         # Build config and patch agents module
         config = _build_config(user, profile)
         config["run_id"] = run_id
+        config["dry_run"] = bool(dry_run)
 
         agents_path = os.path.join(os.path.dirname(__file__), "..", "..", "agents")
         agents_path = os.path.abspath(agents_path)
@@ -687,6 +792,50 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
         # Sanitise user_id to a filesystem-safe suffix.
         _safe_suffix = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(user_id))
         config_snapshot["chrome_profile_suffix"] = _safe_suffix
+
+        # ── Resume tailoring (Phase E) — give appliers a way to open sync sessions
+        # so resume_resolver can look up cached tailored PDFs without each
+        # applier hand-rolling a DB connection.
+        from backend.database import engine as _async_engine
+        from sqlalchemy import create_engine as _create_engine
+        from sqlalchemy.orm import sessionmaker as _sessionmaker
+        try:
+            sync_url = str(_async_engine.url).replace("+aiosqlite", "").replace("+asyncpg", "")
+            _sync_eng = _create_engine(sync_url, future=True)
+            config_snapshot["_session_factory"] = _sessionmaker(_sync_eng, expire_on_commit=False)
+            config_snapshot["_tailored_upload_dir"] = os.environ.get(
+                "TAILORED_UPLOAD_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "tailored")
+            )
+        except Exception as _e:
+            logger.warning("Could not build sync session factory for tailoring: %s", _e)
+
+        # ── LinkedIn cookie refresh-back callback ──
+        # When the applier successfully logs in via cookie injection, it can
+        # call CONFIG["_save_linkedin_cookies"](fresh_json) to persist the
+        # post-login cookies — keeps the session alive for the next run
+        # without the user re-exporting.
+        def _save_linkedin_cookies(fresh_json: str, _uid=str(user_id)) -> None:
+            try:
+                from backend.models.profile import UserProfile as _UP
+                from sqlalchemy.orm.attributes import flag_modified as _fm
+                from backend.services.crypto_service import encrypt as _enc
+                _s = _sync_session()
+                try:
+                    _prof = _s.query(_UP).filter_by(user_id=uuid.UUID(_uid)).first()
+                    if _prof:
+                        _creds = dict(_prof.platform_passwords or {})
+                        _creds["linkedin_cookies"] = _enc(fresh_json)
+                        _prof.platform_passwords = _creds
+                        _fm(_prof, "platform_passwords")
+                        _s.commit()
+                        logger.info("Refreshed LinkedIn cookies for user %s (%d bytes)",
+                                    _uid, len(fresh_json))
+                finally:
+                    _s.close()
+            except Exception as _err:
+                logger.warning("Could not refresh LinkedIn cookies: %s", _err)
+        config_snapshot["_save_linkedin_cookies"] = _save_linkedin_cookies
+
         agent_config_mod = importlib.import_module("config")
         
         for k, v in config_snapshot.items():
@@ -740,10 +889,18 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
 
 
         sys.stdout = _orig_stdout
+        skipped = stats["skipped"]
+        errors = stats["errors"]
         _increment_quota(session, user_id, platform, applied)
         was_stopped = stop_event.is_set()
         final_status = "paused" if was_stopped else "completed"
         _log_event(session, run_id, "info", f"Phase {phase} {'stopped' if was_stopped else 'completed'}. Applied: {applied}")
+        try:
+            learned = _learn_from_run_logs(session, user_id, run_id)
+            if learned:
+                logger.info("Self-learning rules for run %s:\n%s", run_id, learned)
+        except Exception as _learn_err:
+            logger.warning("Self-learning skipped for run %s: %s", run_id, _learn_err)
         _update_run(session, run_id, status=final_status, completed_at=datetime.now(),
                     applied_count=applied, skipped_count=skipped, error_count=errors)
         publish(user_id, {
@@ -764,6 +921,10 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
         tb = traceback.format_exc()
         logger.error(f"Phase {phase} failed for user {user_id}: {e}\n{tb}")
         _log_event(session, run_id, "error", f"{e}\n{tb}"[:2000])
+        try:
+            _learn_from_run_logs(session, user_id, run_id)
+        except Exception as _learn_err:
+            logger.warning("Self-learning skipped for failed run %s: %s", run_id, _learn_err)
         _update_run(session, run_id, status="failed", completed_at=datetime.now(),
                     error_count=1)
         publish(user_id, {
@@ -780,8 +941,8 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None):
 
 # ── Celery task wrapper ───────────────────────────────────────────────────────
 @celery_app.task(bind=True, name="backend.workers.agent_tasks.run_phase_task", max_retries=0)
-def run_phase_task(self: Task, user_id: str, phase: int, run_id: str):
-    _run_phase_logic(user_id, phase, run_id, task_self=self)
+def run_phase_task(self: Task, user_id: str, phase: int, run_id: str, dry_run: bool = False):
+    _run_phase_logic(user_id, phase, run_id, task_self=self, dry_run=dry_run)
 
 
 @celery_app.task(name="backend.workers.agent_tasks.check_schedules")
