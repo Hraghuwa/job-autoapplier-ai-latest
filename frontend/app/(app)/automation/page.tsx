@@ -58,6 +58,16 @@ interface CredStatus {
   linkedin: boolean
   wellfound: boolean
   internshala: boolean
+  unstop: boolean
+  naukri: boolean
+}
+
+interface LiCookieStatus {
+  stored: boolean
+  has_li_at: boolean
+  ready: boolean
+  count: number
+  expiry?: number | null
 }
 
 interface Schedule {
@@ -223,6 +233,14 @@ export default function AutomationPage() {
     retry: false,
   })
 
+  // LinkedIn session-cookie status — rich shape from /onboarding/linkedin-cookies-status
+  const { data: liCookieStatus } = useQuery<LiCookieStatus>({
+    queryKey: ['li-cookies'],
+    queryFn: () => api.get('/onboarding/linkedin-cookies-status', { silent: true }).then(r => r.data),
+    retry: false,
+    staleTime: 30_000,
+  })
+
   // Schedule query
   useQuery<Schedule>({
     queryKey: ['schedule'],
@@ -312,7 +330,13 @@ export default function AutomationPage() {
   // ── Derived ──────────────────────────────────────────────────────────────
 
   const hasResume = !!profile?.resume_url
-  const hasCreds = credStatus && (credStatus.linkedin || credStatus.wellfound)
+  // Accept EITHER a stored password-credential OR valid LinkedIn session cookies.
+  // Without this, users who set up cookie-auth see "Setup Required" forever.
+  const hasLinkedInCookies = liCookieStatus?.ready === true
+  const hasCreds = !!(
+    (credStatus && (credStatus.linkedin || credStatus.wellfound || credStatus.internshala)) ||
+    hasLinkedInCookies
+  )
   const isReady = hasResume && hasCreds
 
   const activeRuns = runs.filter(r => r.status === 'running' || r.status === 'queued')
@@ -357,14 +381,14 @@ export default function AutomationPage() {
                 <CardDescription className="text-amber-700 dark:text-amber-400 mt-1">
                     To start the automation, you need to upload your resume and set up your platform credentials.
                 </CardDescription>
-                <div className="flex gap-4 mt-4">
+                <div className="flex flex-wrap gap-4 mt-4">
                     <div className="flex items-center gap-2 text-sm">
                         {hasResume ? <CheckCircle className="h-4 w-4 text-emerald-600" /> : <XCircle className="h-4 w-4 text-red-500" />}
                         Resume Uploaded
                     </div>
                     <div className="flex items-center gap-2 text-sm">
                         {hasCreds ? <CheckCircle className="h-4 w-4 text-emerald-600" /> : <XCircle className="h-4 w-4 text-red-500" />}
-                        Platform Credentials
+                        {hasLinkedInCookies ? 'LinkedIn Cookies ✓' : 'Platform Credentials'}
                     </div>
                 </div>
                 <Link href="/credentials" className="mt-4 inline-block">
@@ -495,9 +519,14 @@ export default function AutomationPage() {
                               variant="ghost"
                               size="sm"
                               onClick={() => stopMutation.mutate(run.id)}
-                              className="text-red-500 hover:text-red-600 hover:bg-red-50 transition-colors"
+                              disabled={stopMutation.isPending}
+                              className="text-red-500 hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
                           >
-                              <Square className="h-4 w-4 mr-2 fill-current" /> Stop
+                              {stopMutation.isPending
+                                ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                : <Square className="h-4 w-4 mr-2 fill-current" />
+                              }
+                              {stopMutation.isPending ? 'Stopping…' : 'Stop'}
                           </Button>
                         </div>
                       </div>
