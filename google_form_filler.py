@@ -237,7 +237,12 @@ def fill_google_form(driver, config):
     """Auto-fill a Google Form with profile data and upload resume."""
     print("    📝 [GoogleForm] Auto-filling...")
     filled_count = 0
-    resume_path = config.get("resume_path", "")
+    # Phase E: use JD-tailored PDF when available; fall back to static resume.
+    try:
+        from backend.services.resume_resolver import resolve_resume_path
+        resume_path = resolve_resume_path(config, jd_text=config.get("current_jd_text") or "")
+    except Exception:
+        resume_path = config.get("resume_path", "")
 
     try:
         time.sleep(2)
@@ -571,7 +576,12 @@ def fill_web_form(driver, config):
     print("    📝 [WebForm] Auto-filling...")
     filled_count = 0
     profile = config.get("profile", {})
-    resume_path = config.get("resume_path", "")
+    # Phase E: use JD-tailored PDF when available; fall back to static resume.
+    try:
+        from backend.services.resume_resolver import resolve_resume_path
+        resume_path = resolve_resume_path(config, jd_text=config.get("current_jd_text") or "")
+    except Exception:
+        resume_path = config.get("resume_path", "")
 
     # ── ATS-specific direct field mapping by name/id attribute ──
     # Values come STRICTLY from the logged-in user's profile. No hardcoded

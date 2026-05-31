@@ -13,6 +13,7 @@ from backend.models.payment import Payment, PaymentStatus  # noqa: F401
 from backend.models.notification import Notification  # noqa: F401
 from backend.models.referral import Referral, ReferralStatus  # noqa: F401
 from backend.models.graph import GraphNodePosition  # noqa: F401
+from backend.models.tailored_resume import TailoredResume as TailoredResumeRow  # noqa: F401
 
 # Resume Builder models
 from backend.models.resume import (  # noqa: F401

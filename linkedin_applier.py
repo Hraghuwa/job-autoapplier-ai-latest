@@ -88,17 +88,11 @@ def _build_custom_rules_block(config):
 
 
 def _ask_ai(question, config):
-    """Answer a form question via LLM.
+    """Answer a form question via the unified llm_router.
 
-    Priority: Groq (fast) → Gemini (fallback). Returns None on failure — the
-    caller should fall back to its autofill_bank or skip the field.
+    Routes through: Ollama (local, free) → Groq (fast) → Gemini (quality).
+    Returns None on failure — caller falls back to autofill_bank or skips.
     """
-    global _gemini_client, _groq_client
-    groq_key = config.get("groq_api_key", "") or os.environ.get("GROQ_API_KEY", "")
-    gemini_key = config.get("gemini_api_key", "") or os.environ.get("GEMINI_API_KEY", "")
-    if not groq_key and not gemini_key:
-        return None
-
     profile_block = _build_profile_block(config)
     custom_rules = _build_custom_rules_block(config)
 
@@ -126,47 +120,68 @@ Default rules:
 
 Output ONLY the answer, nothing else."""
 
-    # Try Groq first (10-100x faster than Gemini for structured short answers)
-    if groq_key:
-        try:
-            if _groq_client is None:
-                from groq import Groq
-                _groq_client = Groq(api_key=groq_key)
-            resp = _groq_client.chat.completions.create(
-                model="llama-3.1-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=120,
-                temperature=0.1,
-            )
-            answer = (resp.choices[0].message.content or "").strip().strip('"').strip("'")
-            if answer and len(answer) < 200:
-                return answer
-        except Exception as e:
-            # Reset client on import/auth failures; fall through to Gemini
-            _groq_client = None
-            print(f"  [_ask_ai] Groq failed ({type(e).__name__}), falling back to Gemini")
-
-    # Fall back to Gemini
-    if gemini_key:
-        try:
-            if _gemini_client is None:
-                from google import genai
-                _gemini_client = genai.Client(api_key=gemini_key)
-            response = _gemini_client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt,
-            )
-            answer = response.text.strip().strip('"').strip("'")
-            if answer and len(answer) < 200:
-                return answer
-        except Exception as e:
-            print(f"  [_ask_ai] Gemini failed ({type(e).__name__}): {str(e)[:120]}")
-
+    from llm_router import generate
+    answer = generate(prompt, role="form_fill", config=config, max_tokens=120, temperature=0.1)
+    if not answer:
+        return None
+    answer = answer.strip().strip('"').strip("'")
+    if answer and len(answer) < 200:
+        return answer
     return None
+
+
+def _try_cookie_login(driver, cookies_json: str) -> bool:
+    """Cookie-based login — see agents/linkedin_applier._try_cookie_login for
+    the full doc. Mirrors that implementation so CLI runs of this root copy
+    also bypass the LinkedIn CAPTCHA."""
+    try:
+        from backend.services.linkedin_cookies import (
+            parse_export, has_valid_session, dump_browser_cookies, extract_li_at,
+        )
+    except Exception:
+        return False
+    cookies = parse_export(cookies_json or "")
+    if not cookies or not has_valid_session(cookies):
+        if cookies_json:
+            print("[LinkedIn] ⚠️  Cookies present but no li_at — re-export AFTER logging in.")
+        return False
+    try:
+        driver.get("https://www.linkedin.com"); time.sleep(2)
+        for c in cookies:
+            try: driver.add_cookie(c)
+            except Exception: pass
+        driver.get("https://www.linkedin.com/feed/"); time.sleep(5)
+        url = driver.current_url
+        if any(x in url for x in ("feed", "mynetwork", "jobs")):
+            print(f"[LinkedIn] ✅ Cookie login active (li_at={(extract_li_at(cookies) or '?')[:8]}...).")
+            try:
+                from config import CONFIG
+                cb = CONFIG.get("_save_linkedin_cookies")
+                if callable(cb):
+                    fresh = dump_browser_cookies(driver)
+                    if fresh and fresh != "[]":
+                        cb(fresh)
+            except Exception:
+                pass
+            return True
+        return False
+    except Exception as e:
+        print(f"[LinkedIn] ⚠️  Cookie injection error: {type(e).__name__}: {e}")
+        return False
 
 
 def login(driver, email, password):
     print("\n[LinkedIn] Logging in...")
+
+    # ── 1. Try cookie injection first (bypasses CAPTCHA). ──
+    cookies_json = ""
+    try:
+        from config import CONFIG
+        cookies_json = CONFIG.get("linkedin_cookies", "")
+    except Exception:
+        pass
+    if cookies_json and _try_cookie_login(driver, cookies_json):
+        return True
 
     if not password or password.startswith("YOUR_"):
         print("[LinkedIn] ❌ Password not set! Update config.py with your real password.")
@@ -182,17 +197,40 @@ def login(driver, email, password):
         return True
 
     try:
-        # Check for alternative login form IDs
-        try:
-            email_field = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.ID, "username"))
-            )
-            pass_field = driver.find_element(By.ID, "password")
-        except:
-            email_field = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.ID, "session_key"))
-            )
-            pass_field = driver.find_element(By.ID, "session_password")
+        # LinkedIn rotates between stable IDs and generated React IDs.
+        # Prefer stable selectors, then fall back to visible email/password inputs.
+        email_field = None
+        pass_field = None
+        for by, sel in [
+            (By.ID, "username"),
+            (By.ID, "session_key"),
+            (By.CSS_SELECTOR, "input[name='session_key']"),
+            (By.CSS_SELECTOR, "input[type='email']"),
+            (By.CSS_SELECTOR, "input[autocomplete='username']"),
+        ]:
+            try:
+                candidates = driver.find_elements(by, sel)
+                email_field = next((el for el in candidates if el.is_displayed()), None)
+                if email_field:
+                    break
+            except Exception:
+                continue
+        for by, sel in [
+            (By.ID, "password"),
+            (By.ID, "session_password"),
+            (By.CSS_SELECTOR, "input[name='session_password']"),
+            (By.CSS_SELECTOR, "input[type='password']"),
+            (By.CSS_SELECTOR, "input[autocomplete='current-password']"),
+        ]:
+            try:
+                candidates = driver.find_elements(by, sel)
+                pass_field = next((el for el in candidates if el.is_displayed()), None)
+                if pass_field:
+                    break
+            except Exception:
+                continue
+        if not email_field or not pass_field:
+            raise TimeoutException("LinkedIn login form fields were not visible.")
 
         email_field.clear()
         email_field.send_keys(email)
@@ -200,13 +238,36 @@ def login(driver, email, password):
         pass_field.clear()
         pass_field.send_keys(password)
 
-        try:
-            driver.find_element(By.XPATH, "//button[@type='submit']").click()
-        except:
+        submitted = False
+        buttons = driver.find_elements(By.CSS_SELECTOR, "button[type='submit'], button")
+        submit = next(
+            (b for b in buttons if b.is_displayed() and (
+                b.get_attribute("type") == "submit" or "sign in" in b.text.lower()
+            )),
+            None,
+        )
+        if submit:
+            try:
+                submit.click()
+                submitted = True
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].click();", submit)
+                    submitted = True
+                except Exception:
+                    pass
+        if not submitted:
             pass_field.send_keys(Keys.RETURN)
             
         print("[LinkedIn] Submitted login form, waiting for response...")
         time.sleep(10)
+
+        if "login" in driver.current_url:
+            try:
+                pass_field.send_keys(Keys.RETURN)
+                time.sleep(5)
+            except Exception:
+                pass
     except Exception as e:
         print(f"[LinkedIn] ❌ Login error: {e}")
         return False
@@ -1017,8 +1078,10 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             # ── JD relevance filter ──
             try:
                 jd_text = _extract_jd_text(driver)
+                # ── Store for tailored resume generation (Phase E) ──
+                config["current_jd_text"] = jd_text or ""
                 jd_ok, jd_reason = _is_jd_relevant(jd_text, filter_keywords, config)
-                
+
                 if not jd_ok:
                     print(f"  ⏭️  Skipping (irrelevant JD): {job_title} ({jd_reason})")
                     continue
@@ -1026,6 +1089,7 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                     print(f"  ✅ JD Verified: {jd_reason}")
             except Exception as e:
                 print(f"  ⚠️  Error checking JD relevance: {e}")
+                config["current_jd_text"] = ""
 
             # ── Duration filter: only apply to 3-month internships ──
             try:

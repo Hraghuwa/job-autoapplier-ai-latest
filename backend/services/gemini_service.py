@@ -1,8 +1,22 @@
-"""Gemini AI service — resume parsing, match scoring, cover letter, interview prep."""
+"""Gemini AI service — resume parsing, match scoring, cover letter, interview prep.
+
+Text-generation paths (score_match / cover letter / interview prep) now route
+through `llm_router` so they can prefer a local Ollama model and fall back to
+Gemini. Resume *parsing* still uses Gemini directly because it needs PDF upload
+support that Ollama doesn't expose.
+"""
 from typing import Optional, Dict, Any, List
 import json
+import sys
+import os
 
 from backend.config import settings
+
+# Ensure repo root is on sys.path so we can import the top-level llm_router
+# from inside this backend package.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 
 def _get_client(user_key: Optional[str] = None):
@@ -12,11 +26,28 @@ def _get_client(user_key: Optional[str] = None):
     return genai.GenerativeModel("gemini-1.5-flash")
 
 
-def _call(prompt: str, user_key: Optional[str] = None) -> str:
+def _friendly_gemini_error(exc: Exception) -> str:
+    raw = str(exc)
+    lower = raw.lower()
+    if "api_key_invalid" in lower or "api key not valid" in lower or "api key expired" in lower:
+        return "Resume uploaded, but AI parsing was skipped because the Gemini API key is invalid or expired."
+    if "quota" in lower or "rate limit" in lower or "429" in lower:
+        return "Resume uploaded, but AI parsing was skipped because the AI provider quota or rate limit was reached."
+    if "permission" in lower or "403" in lower:
+        return "Resume uploaded, but AI parsing was skipped because the AI provider rejected access."
+    return f"Resume uploaded, but AI parsing was skipped: {type(exc).__name__}."
+
+
+def _call(prompt: str, user_key: Optional[str] = None, role: str = "writer") -> str:
+    """Route through llm_router (Ollama → Gemini). Returns '__ERROR__:...' on full failure."""
     try:
-        model = _get_client(user_key)
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        from llm_router import generate
+        key = user_key or settings.system_gemini_key
+        cfg = {"gemini_api_key": key} if key else {}
+        out = generate(prompt, role=role, config=cfg)
+        if out:
+            return out.strip()
+        return "__ERROR__:no provider returned a response"
     except Exception as e:
         return f"__ERROR__:{e}"
 
@@ -52,7 +83,7 @@ Return only the JSON object, no markdown."""
                 text = text[4:]
         return json.loads(text)
     except Exception as e:
-        return {"error": str(e), "name": "", "email": "", "phone": "", "skills": []}
+        return {"error": _friendly_gemini_error(e), "name": "", "email": "", "phone": "", "skills": []}
 
 
 def score_match(resume_summary: str, jd_text: str, user_key: Optional[str] = None) -> Dict[str, Any]:

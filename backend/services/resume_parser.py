@@ -11,8 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.models.profile import UserProfile
 
 UPLOAD_DIR = os.path.abspath("uploads")
-ALLOWED_MIME = {"application/pdf", "application/msword",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+ALLOWED_MIME = {
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+ALLOWED_EXT = {".pdf", ".doc", ".docx"}
 
 
 async def save_and_parse_resume(
@@ -25,8 +29,20 @@ async def save_and_parse_resume(
     Save resume file, check SHA-256 dedup, parse with Gemini.
     Returns (resume_url, resume_hash, extracted_data).
     """
-    if file.content_type not in ALLOWED_MIME:
-        raise HTTPException(400, f"Unsupported file type: {file.content_type}. Use PDF or DOCX.")
+    filename = (file.filename or "").lower().strip()
+    ext_from_name = os.path.splitext(filename)[1]
+
+    # Browsers/proxies sometimes send generic content-types (e.g. application/octet-stream).
+    # Accept when either MIME is allowed OR extension is one of .pdf/.doc/.docx.
+    ctype = (file.content_type or "").lower().strip()
+    mime_ok = ctype in ALLOWED_MIME
+    ext_ok = ext_from_name in ALLOWED_EXT
+    if not (mime_ok or ext_ok):
+        raise HTTPException(
+            400,
+            f"Unsupported file type: {file.content_type or 'unknown'} ({file.filename or 'unnamed'}). "
+            "Use .pdf, .doc, or .docx.",
+        )
 
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:  # 10MB limit
@@ -47,7 +63,15 @@ async def save_and_parse_resume(
     # Save file
     user_dir = os.path.join(UPLOAD_DIR, str(user_id))
     os.makedirs(user_dir, exist_ok=True)
-    ext = ".pdf" if "pdf" in (file.content_type or "") else ".docx"
+    # Prefer filename extension; fall back to MIME if extension is absent.
+    if ext_from_name in ALLOWED_EXT:
+        ext = ext_from_name
+    elif "pdf" in ctype:
+        ext = ".pdf"
+    elif "msword" in ctype:
+        ext = ".doc"
+    else:
+        ext = ".docx"
     file_path = os.path.join(user_dir, f"resume{ext}")
     with open(file_path, "wb") as f:
         f.write(content)

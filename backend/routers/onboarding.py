@@ -215,8 +215,13 @@ async def save_linkedin_cookies(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Store encrypted LinkedIn session cookies to bypass security challenges."""
+    """Store encrypted LinkedIn session cookies to bypass security challenges.
+
+    Rejects uploads that don't contain a usable session — saves the user from
+    discovering this only after the first agent run produces 0 applies.
+    """
     import json as _json
+    from backend.services.linkedin_cookies import parse_export, has_valid_session, extract_li_at
     # Validate that it's a parseable JSON array
     try:
         parsed = _json.loads(body.cookies_json)
@@ -226,6 +231,17 @@ async def save_linkedin_cookies(
             raise HTTPException(400, "Cookie list is empty")
     except (_json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(400, f"Invalid cookies JSON: {exc}")
+
+    # The parser also runs Selenium-compat sanitisation; if it returns empty
+    # the upload was garbage. If it returns cookies without li_at, the user
+    # exported BEFORE logging in — the most common mistake.
+    sanitised = parse_export(body.cookies_json)
+    if not sanitised:
+        raise HTTPException(400, "No valid cookies found after parsing.")
+    if not has_valid_session(sanitised):
+        raise HTTPException(400,
+            "Cookies do not include `li_at` — make sure you exported AFTER "
+            "logging in to linkedin.com.")
 
     from backend.services.crypto_service import encrypt
     profile = await _get_profile(user, db)
@@ -242,9 +258,36 @@ async def linkedin_cookies_status(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Rich status — does the user have cookies stored AND do they include
+    a valid `li_at`? Surfaces the most common failure (exported BEFORE
+    logging in) before the agent run wastes time on it."""
+    from backend.services.crypto_service import decrypt
+    from backend.services.linkedin_cookies import parse_export, extract_li_at
     profile = await _get_profile(user, db)
     creds = profile.platform_passwords or {}
-    return {"stored": bool(creds.get("linkedin_cookies"))}
+    blob = creds.get("linkedin_cookies")
+    if not blob:
+        return {"stored": False, "has_li_at": False, "count": 0, "ready": False}
+    try:
+        raw = decrypt(blob)
+    except Exception:
+        return {"stored": True, "has_li_at": False, "count": 0, "ready": False,
+                "error": "Could not decrypt stored cookies — please re-upload."}
+    cookies = parse_export(raw)
+    li_at = extract_li_at(cookies)
+    # Estimate session expiry from li_at's `expiry` field if available.
+    expiry_unix = None
+    for c in cookies:
+        if c.get("name") == "li_at" and isinstance(c.get("expiry"), int):
+            expiry_unix = c["expiry"]
+            break
+    return {
+        "stored":     True,
+        "count":      len(cookies),
+        "has_li_at":  bool(li_at),
+        "expiry":     expiry_unix,
+        "ready":      bool(li_at),
+    }
 
 
 @router.delete("/linkedin-cookies")

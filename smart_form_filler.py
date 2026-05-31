@@ -788,9 +788,18 @@ def fill_checkboxes(driver, container=None):
 
 
 def upload_resume(driver, config, container=None):
-    """Upload resume PDF if a file input is found."""
+    """Upload resume PDF if a file input is found.
+
+    Phase E: resolve to a JD-tailored PDF when context is available. Never
+    crashes — falls back to the static `config["resume_path"]` on any error.
+    """
     uploaded = False
-    resume_path = config.get("resume_path", "")
+    try:
+        from backend.services.resume_resolver import resolve_resume_path
+        jd_text = config.get("current_jd_text") or ""
+        resume_path = resolve_resume_path(config, jd_text=jd_text)
+    except Exception:
+        resume_path = config.get("resume_path", "")
     if not resume_path:
         return False
 

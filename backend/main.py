@@ -10,7 +10,7 @@ from jose import JWTError, jwt
 from backend.config import settings
 from backend.database import engine
 import backend.models  # noqa: F401 — imports all models, registers with database.Base
-from backend.routers import auth, onboarding, agents, jobs, users, payments, admin, resumes, ai, graph, bugs, career_ops
+from backend.routers import auth, onboarding, agents, jobs, users, payments, admin, resumes, ai, graph, bugs, career_ops, applications
 
 # ── In-memory WebSocket connection manager (Redis fallback) ───────────────────
 class ConnectionManager:
@@ -73,6 +73,19 @@ async def lifespan(app: FastAPI):
         log.error("DB schema init failed: %s — starting anyway. /health stays up.", e)
 
     manager.loop = asyncio.get_running_loop()
+
+    # ── Agent supervisor: recover stuck runs, auto-spawn worker, start watchdog ──
+    # Bulletproofs the run pipeline so a worker crash, dropped redis, or a
+    # killed in-process thread never leaves the UI staring at "queued" forever.
+    try:
+        from backend.services import agent_supervisor
+        agent_supervisor.ensure_application_columns()
+        agent_supervisor.recover_stuck_runs()
+        agent_supervisor.ensure_worker_running()
+        agent_supervisor.start_watchdog(manager.loop)
+    except Exception as e:
+        log.warning("Agent supervisor init failed (non-fatal): %s", e)
+
     yield
 
 
@@ -129,6 +142,7 @@ app.include_router(ai.router,         prefix="/ai",         tags=["ai"])
 app.include_router(graph.router,      prefix="/graph",      tags=["graph"])
 app.include_router(bugs.router,       prefix="/bugs",       tags=["bugs"])
 app.include_router(career_ops.router, prefix="/career-ops", tags=["career-ops"])
+app.include_router(applications.router, prefix="/applications", tags=["applications"])
 
 
 # ── WebSocket — live agent feed ───────────────────────────────────────────────

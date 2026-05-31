@@ -127,21 +127,47 @@ def _groq_call(api_key: str, prompt: str) -> str:
 
 
 def _ai(prompt: str, user: Optional[User]) -> str:
-    """Run prompt through Gemini → Groq fallback chain. Raises HTTPException on total failure."""
+    """Run prompt through the unified llm_router (Ollama → Gemini → Groq).
+
+    Resume-tailoring / evaluate-offer / negotiation prompts are writer-role —
+    longer prose, careful rewrites — so the router preferred order is
+    local-Qwen-14B → Gemini Flash → Groq Llama-70B.
+
+    Falls back to the in-file Gemini/Groq direct calls only if `llm_router`
+    is unimportable (defensive — should not happen in normal deploys).
+    """
+    import sys, os as _os
+    _root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+
     gemini, groq = _resolve_keys(user)
     errs: list[str] = []
-    if gemini:
-        try:
-            return _gemini_call(gemini, prompt)
-        except Exception as e:
-            errs.append(f"gemini: {type(e).__name__}: {str(e)[:160]}")
-    if groq:
-        try:
-            return _groq_call(groq, prompt)
-        except Exception as e:
-            errs.append(f"groq: {type(e).__name__}: {str(e)[:160]}")
+
+    try:
+        from llm_router import generate
+        cfg = {}
+        if gemini: cfg["gemini_api_key"] = gemini
+        if groq:   cfg["groq_api_key"]   = groq
+        out = generate(prompt, role="writer", config=cfg, max_tokens=2048)
+        if out:
+            return out
+        errs.append("llm_router: no provider returned a response")
+    except ImportError:
+        # Defensive — keep working if llm_router was removed.
+        if gemini:
+            try:
+                return _gemini_call(gemini, prompt)
+            except Exception as e:
+                errs.append(f"gemini: {type(e).__name__}: {str(e)[:160]}")
+        if groq:
+            try:
+                return _groq_call(groq, prompt)
+            except Exception as e:
+                errs.append(f"groq: {type(e).__name__}: {str(e)[:160]}")
+
     if not gemini and not groq:
-        raise HTTPException(503, "AI engine not configured. Add a Gemini or Groq API key in Settings → API Keys.")
+        raise HTTPException(503, "AI engine not configured. Add a Gemini or Groq API key in Settings → API Keys (or start Ollama locally).")
     raise HTTPException(502, f"All AI providers failed. {' | '.join(errs)}")
 
 

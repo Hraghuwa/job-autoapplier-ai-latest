@@ -40,20 +40,11 @@ def _retry(fn, retries=3, delay=2, label=""):
 _ai_client = None
 
 def _ask_ai(question, config):
-    """Use Gemini AI to answer a LinkedIn form question intelligently."""
-    global _ai_client
-    api_key = config.get("gemini_api_key", "") or os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        return None
-
-    try:
-        if _ai_client is None:
-            from google import genai
-            _ai_client = genai.Client(api_key=api_key)
-
-        profile = config.get("profile", {})
-        name = config.get("name", profile.get("full_name", "the applicant"))
-        prompt = f"""You are filling a LinkedIn job application form for {name}.
+    """Answer a LinkedIn form question via the unified llm_router.
+    Routes Ollama (local) → Groq → Gemini. None on failure."""
+    profile = config.get("profile", {})
+    name = config.get("name", profile.get("full_name", "the applicant"))
+    prompt = f"""You are filling a LinkedIn job application form for {name}.
 Read the EXACT question carefully and answer with ONLY the value, nothing else.
 
 Applicant profile:
@@ -93,76 +84,107 @@ CRITICAL RULES:
 
 Output ONLY the answer, nothing else."""
 
-        response = _ai_client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-        )
-        answer = response.text.strip().strip('"').strip("'")
-        if answer and len(answer) < 200:
-            return answer
+    try:
+        from llm_router import generate
+        answer = generate(prompt, role="form_fill", config=config, max_tokens=120, temperature=0.1)
+        if answer:
+            answer = answer.strip().strip('"').strip("'")
+            if answer and len(answer) < 200:
+                return answer
     except Exception as e:
         print(f"    [AI Error] {type(e).__name__}: {str(e)[:100]}")
-        # Fallback logic if Gemini fails — try to provide a generic but safe answer
-        q = question.lower()
-        if "notice period" in q: return config.get("profile", {}).get("notice_period", "30 days")
-        if "salary" in q or "ctc" in q: return config.get("profile", {}).get("expected_salary", "0")
-        if "experience" in q or "years" in q: return config.get("profile", {}).get("years_of_experience", "1")
-        if "authorized" in q or "eligible" in q: return "Yes"
-        if "sponsorship" in q: return "No"
-        if "relocate" in q: return "Yes"
+
+    # Heuristic fallback if every LLM tier failed — generic but safe.
+    q = question.lower()
+    if "notice period" in q: return config.get("profile", {}).get("notice_period", "30 days")
+    if "salary" in q or "ctc" in q: return config.get("profile", {}).get("expected_salary", "0")
+    if "experience" in q or "years" in q: return config.get("profile", {}).get("years_of_experience", "1")
+    if "authorized" in q or "eligible" in q: return "Yes"
+    if "sponsorship" in q: return "No"
+    if "relocate" in q: return "Yes"
     return None
 
 
 def _try_cookie_login(driver, cookies_json: str) -> bool:
-    """
-    Inject stored browser session cookies to bypass LinkedIn login challenge.
-    cookies_json: JSON array exported from EditThisCookie / Cookie-Editor.
-    Returns True if cookie injection results in a valid session.
-    """
-    import json as _json
-    try:
-        cookies = _json.loads(cookies_json)
-        if not isinstance(cookies, list) or not cookies:
-            return False
+    """Inject stored browser cookies → land on /feed/ as logged-in user.
 
-        # Navigate to linkedin.com so browser is on the right domain before adding cookies
+    Uses backend.services.linkedin_cookies.parse_export to:
+      - Strip toxic fields (`hostOnly`, `session`, `storeId`, `sameSite=no_restriction`,
+        float `expirationDate`) that make Selenium's add_cookie raise.
+      - Verify `li_at` is present — the actual auth cookie. Without it,
+        injection cannot possibly produce a logged-in session, so we bail
+        early instead of wasting a navigation + 5s wait.
+
+    Returns True iff the post-injection navigation lands on a logged-in URL.
+    """
+    try:
+        from backend.services.linkedin_cookies import (
+            parse_export, has_valid_session, dump_browser_cookies, extract_li_at,
+        )
+    except Exception:
+        # Fallback: backend services not importable (CLI use). Use the legacy
+        # minimal parser inline.
+        parse_export = lambda raw: []  # noqa: E731
+        has_valid_session = lambda c: False  # noqa: E731
+        dump_browser_cookies = lambda d: "[]"  # noqa: E731
+        extract_li_at = lambda c: None  # noqa: E731
+
+    cookies = parse_export(cookies_json or "")
+    if not cookies:
+        print("[LinkedIn] ⚠️  Could not parse cookies JSON.")
+        return False
+    if not has_valid_session(cookies):
+        print("[LinkedIn] ⚠️  No li_at cookie present — session is not authenticated. "
+              "Re-export AFTER logging in to linkedin.com.")
+        return False
+
+    try:
+        # Be on the right domain before add_cookie or Chrome rejects the host.
         driver.get("https://www.linkedin.com")
         time.sleep(2)
 
         injected = 0
+        rejected_reasons: dict = {}
         for c in cookies:
-            if not isinstance(c, dict):
-                continue
             try:
-                # Selenium requires 'name' and 'value'; other fields are optional
-                cookie = {"name": c["name"], "value": c["value"]}
-                if c.get("domain"):
-                    cookie["domain"] = c["domain"].lstrip(".")  # strip leading dot
-                if c.get("path"):
-                    cookie["path"] = c["path"]
-                # Skip expiry/httpOnly/secure — can cause add_cookie to reject
-                driver.add_cookie(cookie)
+                driver.add_cookie(c)
                 injected += 1
-            except Exception:
-                pass
+            except Exception as e:
+                key = type(e).__name__
+                rejected_reasons[key] = rejected_reasons.get(key, 0) + 1
+        if rejected_reasons:
+            print(f"[LinkedIn] 🍪 {injected} cookies accepted; rejected: {rejected_reasons}")
 
         if injected == 0:
             print("[LinkedIn] ⚠️  No cookies could be injected.")
             return False
 
-        print(f"[LinkedIn] 🍪 Injected {injected} cookies. Checking session...")
         driver.get("https://www.linkedin.com/feed/")
         time.sleep(5)
 
         url = driver.current_url
-        if "feed" in url or "mynetwork" in url or "jobs" in url:
-            print("[LinkedIn] ✅ Cookie login successful! Session active.")
+        if any(x in url for x in ("feed", "mynetwork", "jobs")):
+            print(f"[LinkedIn] ✅ Cookie login successful! Session active "
+                  f"(li_at={extract_li_at(cookies)[:8] if extract_li_at(cookies) else '?'}...).")
+            # Persist refreshed cookies — LinkedIn rotates session tokens
+            # on every authenticated load. Saving here keeps the agent
+            # working tomorrow without the user re-exporting.
+            try:
+                from config import CONFIG
+                cb = CONFIG.get("_save_linkedin_cookies")
+                if callable(cb):
+                    fresh = dump_browser_cookies(driver)
+                    if fresh and fresh != "[]":
+                        cb(fresh)
+            except Exception:
+                pass
             return True
 
-        print(f"[LinkedIn] ℹ️  Cookies did not establish a valid session (URL: {url}). Cookies may be expired.")
+        print(f"[LinkedIn] ℹ️  Cookies did not establish a valid session (URL: {url}). "
+              f"They may be expired — re-export from your logged-in browser.")
         return False
     except Exception as e:
-        print(f"[LinkedIn] ⚠️  Cookie injection error: {e}")
+        print(f"[LinkedIn] ⚠️  Cookie injection error: {type(e).__name__}: {e}")
         return False
 
 
@@ -192,17 +214,40 @@ def login(driver, email, password, cookies_json: str = None):
     time.sleep(3)
 
     try:
-        # Check for alternative login form IDs
-        try:
-            email_field = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.ID, "username"))
-            )
-            pass_field = driver.find_element(By.ID, "password")
-        except:
-            email_field = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.ID, "session_key"))
-            )
-            pass_field = driver.find_element(By.ID, "session_password")
+        # LinkedIn rotates between stable IDs and generated React IDs.
+        # Prefer stable selectors, then fall back to visible email/password inputs.
+        email_field = None
+        pass_field = None
+        for by, sel in [
+            (By.ID, "username"),
+            (By.ID, "session_key"),
+            (By.CSS_SELECTOR, "input[name='session_key']"),
+            (By.CSS_SELECTOR, "input[type='email']"),
+            (By.CSS_SELECTOR, "input[autocomplete='username']"),
+        ]:
+            try:
+                candidates = driver.find_elements(by, sel)
+                email_field = next((el for el in candidates if el.is_displayed()), None)
+                if email_field:
+                    break
+            except Exception:
+                continue
+        for by, sel in [
+            (By.ID, "password"),
+            (By.ID, "session_password"),
+            (By.CSS_SELECTOR, "input[name='session_password']"),
+            (By.CSS_SELECTOR, "input[type='password']"),
+            (By.CSS_SELECTOR, "input[autocomplete='current-password']"),
+        ]:
+            try:
+                candidates = driver.find_elements(by, sel)
+                pass_field = next((el for el in candidates if el.is_displayed()), None)
+                if pass_field:
+                    break
+            except Exception:
+                continue
+        if not email_field or not pass_field:
+            raise TimeoutException("LinkedIn login form fields were not visible.")
 
         email_field.clear()
         email_field.send_keys(email)
@@ -210,13 +255,36 @@ def login(driver, email, password, cookies_json: str = None):
         pass_field.clear()
         pass_field.send_keys(password)
 
-        try:
-            driver.find_element(By.XPATH, "//button[@type='submit']").click()
-        except:
+        submitted = False
+        buttons = driver.find_elements(By.CSS_SELECTOR, "button[type='submit'], button")
+        submit = next(
+            (b for b in buttons if b.is_displayed() and (
+                b.get_attribute("type") == "submit" or "sign in" in b.text.lower()
+            )),
+            None,
+        )
+        if submit:
+            try:
+                submit.click()
+                submitted = True
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].click();", submit)
+                    submitted = True
+                except Exception:
+                    pass
+        if not submitted:
             pass_field.send_keys(Keys.RETURN)
             
         print("[LinkedIn] Submitted login form, waiting for response...")
         time.sleep(10)
+
+        if "login" in driver.current_url:
+            try:
+                pass_field.send_keys(Keys.RETURN)
+                time.sleep(5)
+            except Exception:
+                pass
     except Exception as e:
         print(f"[LinkedIn] ❌ Login error: {e}")
         return False
@@ -247,6 +315,17 @@ def login(driver, email, password, cookies_json: str = None):
         url = driver.current_url
         if "feed" in url or "mynetwork" in url or "jobs" in url:
             print("[LinkedIn] ✅ Challenge solved! Logged in successfully.")
+            # Snapshot the cookies we just earned so the next run skips
+            # password+CAPTCHA entirely.
+            try:
+                from backend.services.linkedin_cookies import dump_browser_cookies
+                from config import CONFIG
+                cb = CONFIG.get("_save_linkedin_cookies")
+                if callable(cb):
+                    cb(dump_browser_cookies(driver))
+                    print("[LinkedIn] 🍪 Saved fresh session cookies for next run.")
+            except Exception:
+                pass
             return True
         print(f"[LinkedIn] ❌ Challenge not resolved. Current URL: {url}")
         return False
@@ -735,13 +814,20 @@ def process_easy_apply_modal(driver, config, dry_run=False):
 
         # Handle resume upload if file input is present
         try:
+            # Phase E: resolve to JD-tailored PDF if possible.
+            try:
+                from backend.services.resume_resolver import resolve_resume_path
+                jd_text = config.get("current_jd_text") or ""
+                _resume_to_upload = resolve_resume_path(config, jd_text=jd_text)
+            except Exception:
+                _resume_to_upload = config.get("resume_path", "")
             upload_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
             for upload_input in upload_inputs:
                 try:
                     driver.execute_script(
                         "arguments[0].style.display='block'; arguments[0].style.opacity='1';",
                         upload_input)
-                    upload_input.send_keys(config["resume_path"])
+                    upload_input.send_keys(_resume_to_upload or config["resume_path"])
                     print("    [Resume] Uploaded")
                     time.sleep(2)
                 except:
@@ -1111,6 +1197,28 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             if not is_relevant:
                 print(f"  ⏭️  Skipped: {job_title} ({reason})")
                 continue
+
+            # ── Extract full JD text and store for tailored resume (Phase E) ──
+            try:
+                _jd_selectors = [
+                    "div.jobs-description-content__text",
+                    "div.jobs-description__container",
+                    "div#job-details",
+                    "div.jobs-description",
+                    "article.jobs-description__container",
+                ]
+                _jd_text = ""
+                for _sel in _jd_selectors:
+                    try:
+                        _el = driver.find_element(By.CSS_SELECTOR, _sel)
+                        _jd_text = _el.text.strip()
+                        if _jd_text:
+                            break
+                    except Exception:
+                        continue
+                config["current_jd_text"] = _jd_text
+            except Exception:
+                config["current_jd_text"] = ""
 
             # ── Duration filter: only for internship searches + user set explicit duration ──
             _intern_types = {"internship", "trainee", "fresher"}

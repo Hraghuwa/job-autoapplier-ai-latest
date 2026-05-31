@@ -38,6 +38,7 @@ from config import CONFIG
 from utils.performance import PERFORMANCE_TRACKER, COST_OPTIMIZER
 
 import linkedin_applier
+import internshala_applier
 import job_finder
 import google_form_filler
 import web_search_applier
@@ -178,6 +179,59 @@ def run_linkedin_phase():
 
 
 # ─────────────────────────────────────────────
+#  PHASE 2: INTERNSHALA AUTO-APPLY
+# ─────────────────────────────────────────────
+def run_internshala_phase():
+    """Phase 2: Internshala search + apply."""
+    phase_name = "Phase 2: Internshala Auto-Apply"
+    PERFORMANCE_TRACKER.start_phase(phase_name)
+    driver = None
+    applied = 0
+
+    creds = CONFIG.get("internshala", {}) or {}
+    email = creds.get("email", "")
+    password = creds.get("password", "")
+    if not email or not password or password.startswith("YOUR_"):
+        print("  [Phase 2] ❌ Internshala credentials not set — skipping.")
+        PERFORMANCE_TRACKER.end_phase(phase_name, error="No credentials")
+        return 0
+
+    try:
+        driver = create_driver("_internshala")
+        print("  [Phase 2] 🔐 Logging into Internshala...")
+        if not internshala_applier.login(driver, email, password):
+            print("  [Phase 2] ❌ Internshala login failed.")
+            PERFORMANCE_TRACKER.end_phase(phase_name, error="Login failed")
+            return 0
+
+        tracker = load_tracker()
+        applied_urls = get_applied_urls(tracker)
+        applied, new_urls = internshala_applier.search_and_apply(
+            driver,
+            keywords=CONFIG["keywords"],
+            locations=CONFIG["locations"],
+            max_jobs=CONFIG["max_jobs_per_day"],
+            applied_count=0,
+            config=CONFIG,
+            dry_run=CONFIG.get("dry_run", False),
+            applied_urls=applied_urls,
+        )
+        if new_urls:
+            add_applied_urls(tracker, new_urls)
+        _autofill_all_tabs(driver, "Phase 2")
+        PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied)
+        print(f"  [Phase 2] ✅ Done — {applied} Internshala applications")
+    except Exception as e:
+        PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
+        traceback.print_exc()
+    finally:
+        if driver:
+            print("  [Phase 2] 🌐 Browser session preserved — tabs left open for review.")
+
+    return applied
+
+
+# ─────────────────────────────────────────────
 #  PHASE 2: WEB SEARCH + ATS AUTO-APPLY
 # ─────────────────────────────────────────────
 def run_web_search_phase():
@@ -187,7 +241,7 @@ def run_web_search_phase():
     - For each result: navigates, clicks Apply, auto-fills form, uploads resume
     - Also opens job-board tabs via job_finder for manual review
     """
-    phase_name = "Phase 2: Web Search + ATS Auto-Apply"
+    phase_name = "Phase 6: Web Search + ATS Auto-Apply"
     PERFORMANCE_TRACKER.start_phase(phase_name)
     driver = None
     applied = 0
@@ -197,7 +251,7 @@ def run_web_search_phase():
         tracker = load_tracker()
         applied_urls = get_applied_urls(tracker)
 
-        print("  [Phase 2] 🌐 Finding jobs across the internet...")
+        print("  [Phase 6] 🌐 Finding jobs across the internet...")
 
         # Open job board tabs (Internshala, Naukri, Unstop, Google results)
         found_urls = job_finder.find_all_jobs(driver, CONFIG, applied_urls=applied_urls, max_tabs=20)
@@ -205,22 +259,22 @@ def run_web_search_phase():
             add_applied_urls(tracker, found_urls)
         applied_urls = get_applied_urls(tracker)
 
-        print(f"  [Phase 2] 📑 {len(found_urls)} job tabs opened")
+        print(f"  [Phase 6] 📑 {len(found_urls)} job tabs opened")
 
         # Auto-apply on ATS/career pages via Google search
-        print("  [Phase 2] 🤖 Running ATS auto-applier...")
+        print("  [Phase 6] 🤖 Running ATS auto-applier...")
         web_count, web_urls = web_search_applier.search_and_apply(driver, CONFIG, applied_urls)
         if web_urls:
             add_applied_urls(tracker, web_urls)
         applied += web_count
 
-        print(f"  [Phase 2] ✅ ATS applied: {web_count}")
+        print(f"  [Phase 6] ✅ ATS applied: {web_count}")
 
         # Auto-fill any forms that opened in new tabs during web search
-        _autofill_all_tabs(driver, "Phase 2")
+        _autofill_all_tabs(driver, "Phase 6")
 
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied)
-        print(f"  [Phase 2] ✅ Done — {applied} applications")
+        print(f"  [Phase 6] ✅ Done — {applied} applications")
 
     except Exception as e:
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
@@ -229,7 +283,7 @@ def run_web_search_phase():
         # Tabs ALWAYS stay open so the user can review the web-search results
         # and apply manually later — this is the explicit Phase 2 contract.
         if driver:
-            print("  [Phase 2] 🌐 Browser session preserved — job tabs left open for review.")
+            print("  [Phase 6] 🌐 Browser session preserved — job tabs left open for review.")
 
     return applied
 
@@ -249,7 +303,7 @@ def run_form_fill_phase():
     - Uploads resume to every file input found
     - Fires React/Vue/Angular change events so values register in SPAs
     """
-    phase_name = "Phase 3: Form Fill (All Tabs)"
+    phase_name = "Phase 7: Form Fill (All Tabs)"
     PERFORMANCE_TRACKER.start_phase(phase_name)
     driver = None
     filled = 0
@@ -257,9 +311,9 @@ def run_form_fill_phase():
     try:
         driver = create_driver("_formfill")
 
-        print("  [Phase 3] 📝 Scanning all open tabs for forms...")
+        print("  [Phase 7] 📝 Scanning all open tabs for forms...")
         filled, total_fields = google_form_filler.auto_fill_open_tabs(driver, CONFIG)
-        print(f"  [Phase 3] ✅ Filled {total_fields} fields across {filled} tabs")
+        print(f"  [Phase 7] ✅ Filled {total_fields} fields across {filled} tabs")
 
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=filled)
 
@@ -270,7 +324,7 @@ def run_form_fill_phase():
         # Tabs ALWAYS stay open so the user can inspect what got filled and
         # hit submit manually if needed. No driver.quit().
         if driver:
-            print("  [Phase 3] 🌐 Browser session preserved — filled tabs left open for review.")
+            print("  [Phase 7] 🌐 Browser session preserved — filled tabs left open for review.")
 
     return filled
 
@@ -287,7 +341,7 @@ def run_wellfound_phase():
     - Click Apply on each matching job
     - Auto-fill any external form tabs that open + upload resume
     """
-    phase_name = "Phase 4: Wellfound Search + Apply"
+    phase_name = "Phase 3: Wellfound Search + Apply"
     PERFORMANCE_TRACKER.start_phase(phase_name)
     driver = None
     applied = 0
@@ -296,21 +350,21 @@ def run_wellfound_phase():
     wf_password = CONFIG.get("wellfound", {}).get("password", "")
 
     if not wf_email or not wf_password or wf_password.startswith("YOUR_"):
-        print("  [Phase 4] ❌ Wellfound credentials not set — skipping.")
+        print("  [Phase 3] ❌ Wellfound credentials not set — skipping.")
         PERFORMANCE_TRACKER.end_phase(phase_name, error="No credentials")
         return 0
 
     try:
         driver = create_driver("_wellfound")
 
-        print("  [Phase 4] 🔐 Logging into Wellfound...")
+        print("  [Phase 3] 🔐 Logging into Wellfound...")
         login_ok = wellfound_applier.login(driver, wf_email, wf_password)
         if not login_ok:
-            print("  [Phase 4] ❌ Wellfound login failed.")
+            print("  [Phase 3] ❌ Wellfound login failed.")
             PERFORMANCE_TRACKER.end_phase(phase_name, error="Login failed")
             return 0
 
-        print("  [Phase 4] ✅ Logged in — searching jobs...")
+        print("  [Phase 3] ✅ Logged in — searching jobs...")
         applied, applied_urls = wellfound_applier.search_and_apply(
             driver,
             keywords=CONFIG["keywords"],
@@ -323,10 +377,10 @@ def run_wellfound_phase():
         )
 
         # Auto-fill any external tabs Wellfound redirected to
-        _autofill_all_tabs(driver, "Phase 4")
+        _autofill_all_tabs(driver, "Phase 3")
 
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied)
-        print(f"  [Phase 4] ✅ Done — {applied} Wellfound applications")
+        print(f"  [Phase 3] ✅ Done — {applied} Wellfound applications")
 
     except Exception as e:
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
@@ -334,7 +388,114 @@ def run_wellfound_phase():
     finally:
         # Tabs ALWAYS stay open — same contract as every other phase.
         if driver:
+            print("  [Phase 3] 🌐 Browser session preserved — tabs left open for review.")
+
+    return applied
+
+
+# ─────────────────────────────────────────────
+#  PHASE 4: NAUKRI AUTO-APPLY
+# ─────────────────────────────────────────────
+def run_naukri_phase():
+    """Phase 4: Naukri search + apply."""
+    phase_name = "Phase 4: Naukri Auto-Apply"
+    PERFORMANCE_TRACKER.start_phase(phase_name)
+    driver = None
+    applied = 0
+
+    creds = CONFIG.get("naukri", {}) or {}
+    email = creds.get("email", "")
+    password = creds.get("password", "")
+    if not email or not password or password.startswith("YOUR_"):
+        print("  [Phase 4] ❌ Naukri credentials not set — skipping.")
+        PERFORMANCE_TRACKER.end_phase(phase_name, error="No credentials")
+        return 0
+
+    try:
+        driver = create_driver("_naukri")
+        print("  [Phase 4] 🔐 Logging into Naukri...")
+        if not other_platforms.naukri_login(driver, email, password):
+            print("  [Phase 4] ❌ Naukri login failed.")
+            PERFORMANCE_TRACKER.end_phase(phase_name, error="Login failed")
+            return 0
+
+        tracker = load_tracker()
+        applied_urls = get_applied_urls(tracker)
+        applied, new_urls = other_platforms.naukri_apply(
+            driver,
+            keywords=CONFIG["keywords"],
+            locations=CONFIG["locations"],
+            max_jobs=CONFIG["max_jobs_per_day"],
+            applied_count=0,
+            resume_path=CONFIG.get("resume_path", ""),
+            config=CONFIG,
+            dry_run=CONFIG.get("dry_run", False),
+            applied_urls=applied_urls,
+        )
+        if new_urls:
+            add_applied_urls(tracker, new_urls)
+        _autofill_all_tabs(driver, "Phase 4")
+        PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied)
+        print(f"  [Phase 4] ✅ Done — {applied} Naukri applications")
+    except Exception as e:
+        PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
+        traceback.print_exc()
+    finally:
+        if driver:
             print("  [Phase 4] 🌐 Browser session preserved — tabs left open for review.")
+
+    return applied
+
+
+# ─────────────────────────────────────────────
+#  PHASE 5: UNSTOP AUTO-APPLY
+# ─────────────────────────────────────────────
+def run_unstop_phase():
+    """Phase 5: Unstop search + apply."""
+    phase_name = "Phase 5: Unstop Auto-Apply"
+    PERFORMANCE_TRACKER.start_phase(phase_name)
+    driver = None
+    applied = 0
+
+    creds = CONFIG.get("unstop", {}) or {}
+    email = creds.get("email", "")
+    password = creds.get("password", "")
+    if not email or not password or password.startswith("YOUR_"):
+        print("  [Phase 5] ❌ Unstop credentials not set — skipping.")
+        PERFORMANCE_TRACKER.end_phase(phase_name, error="No credentials")
+        return 0
+
+    try:
+        driver = create_driver("_unstop")
+        print("  [Phase 5] 🔐 Logging into Unstop...")
+        if not other_platforms.unstop_login(driver, email, password):
+            print("  [Phase 5] ❌ Unstop login failed.")
+            PERFORMANCE_TRACKER.end_phase(phase_name, error="Login failed")
+            return 0
+
+        tracker = load_tracker()
+        applied_urls = get_applied_urls(tracker)
+        applied, new_urls = other_platforms.unstop_apply(
+            driver,
+            keywords=CONFIG["keywords"],
+            locations=CONFIG["locations"],
+            max_jobs=CONFIG["max_jobs_per_day"],
+            applied_count=0,
+            config=CONFIG,
+            dry_run=CONFIG.get("dry_run", False),
+            applied_urls=applied_urls,
+        )
+        if new_urls:
+            add_applied_urls(tracker, new_urls)
+        _autofill_all_tabs(driver, "Phase 5")
+        PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied)
+        print(f"  [Phase 5] ✅ Done — {applied} Unstop applications")
+    except Exception as e:
+        PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
+        traceback.print_exc()
+    finally:
+        if driver:
+            print("  [Phase 5] 🌐 Browser session preserved — tabs left open for review.")
 
     return applied
 
@@ -351,17 +512,23 @@ def main():
     print(f"📅 Started: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print()
     print("📌 Phase 1 — LinkedIn Auto-Apply (Easy Apply + External forms)")
-    print("📌 Phase 2 — Web Search + ATS Auto-Apply (Lever/Greenhouse/Workday)")
-    print("📌 Phase 3 — Form Fill: scan all tabs, detect & fill every form")
-    print("📌 Phase 4 — Wellfound Search + Apply")
+    print("📌 Phase 2 — Internshala Auto-Apply")
+    print("📌 Phase 3 — Wellfound Search + Apply")
+    print("📌 Phase 4 — Naukri Auto-Apply")
+    print("📌 Phase 5 — Unstop Auto-Apply")
+    print("📌 Phase 6 — Web Search + ATS Auto-Apply (Lever/Greenhouse/Workday)")
+    print("📌 Phase 7 — Form Fill: scan all tabs, detect & fill every form")
     print("=" * 60)
 
     # Map phase number → function
     phase_map = {
         1: run_linkedin_phase,
-        2: run_web_search_phase,
-        3: run_form_fill_phase,
-        4: run_wellfound_phase,
+        2: run_internshala_phase,
+        3: run_wellfound_phase,
+        4: run_naukri_phase,
+        5: run_unstop_phase,
+        6: run_web_search_phase,
+        7: run_form_fill_phase,
     }
 
     # Allow running specific phases: python orchestrator.py 1 4

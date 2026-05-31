@@ -51,6 +51,13 @@ class Application(Base):
     history: Mapped[Optional[List[Dict]]] = mapped_column(JSONB, default=list) # Activity log
     applied_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # Phase E — links the application to the cached tailored PDF that was
+    # uploaded. NULL for legacy applications submitted before this feature.
+    tailored_resume_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("tailored_resumes.id", ondelete="SET NULL"), nullable=True,
+    )
+    cover_note_used: Mapped[Optional[str]] = mapped_column(Text)
+
     user: Mapped["User"] = relationship(back_populates="applications")  # noqa: F821
     outcome: Mapped[Optional["JobOutcome"]] = relationship(
         back_populates="application", uselist=False, cascade="all, delete-orphan"

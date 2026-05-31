@@ -80,15 +80,8 @@ def _build_custom_rules_block(config):
 
 
 def _ask_ai(company_name, job_title, config):
-    """Generate a personalized Wellfound cover note via LLM.
-    Priority: Groq (fast) → Gemini (fallback). Returns empty string on failure.
-    """
-    global _gemini_client, _groq_client
-    groq_key = config.get("groq_api_key", "") or os.environ.get("GROQ_API_KEY", "")
-    gemini_key = config.get("gemini_api_key", "") or os.environ.get("GEMINI_API_KEY", "")
-    if not groq_key and not gemini_key:
-        return ""
-
+    """Generate a personalized Wellfound cover note via the unified llm_router.
+    Routes Ollama → Gemini → Groq. Empty string on failure."""
     profile_block = _build_profile_block(config)
     custom_rules = _build_custom_rules_block(config)
 
@@ -108,43 +101,13 @@ Rules:
 
 Output ONLY the note, nothing else."""
 
-    # Try Groq first (much faster than Gemini)
-    if groq_key:
-        try:
-            if _groq_client is None:
-                from groq import Groq
-                _groq_client = Groq(api_key=groq_key)
-            resp = _groq_client.chat.completions.create(
-                model="llama-3.1-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=200,
-                temperature=0.3,
-            )
-            text = (resp.choices[0].message.content or "").strip()[:500]
-            if text:
-                COST_OPTIMIZER.log_usage(input_chars=prompt, output_chars=text)
-                return text
-        except Exception as e:
-            _groq_client = None
-            print(f"    [AI] Groq failed ({type(e).__name__}), falling back to Gemini")
-
-    # Fall back to Gemini
-    if gemini_key:
-        try:
-            if _gemini_client is None:
-                from google import genai
-                _gemini_client = genai.Client(api_key=gemini_key)
-            response = _gemini_client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt,
-            )
-            text = response.text.strip()[:500]
-            COST_OPTIMIZER.log_usage(input_chars=prompt, output_chars=text)
-            return text
-        except Exception as e:
-            print(f"    [AI] Gemini failed ({type(e).__name__}): {str(e)[:120]}")
-
-    return ""
+    from llm_router import generate
+    text = generate(prompt, role="writer", config=config, max_tokens=200, temperature=0.3)
+    if not text:
+        return ""
+    text = text.strip()[:500]
+    COST_OPTIMIZER.log_usage(input_chars=prompt, output_chars=text)
+    return text
 
 
 # ─────────────────────────────────────────────
@@ -722,9 +685,17 @@ def _apply_on_job_page(driver, config, job_title, company_name, default_note):
     # Use AI or default note, will skip if no textarea is present
     note_filled = _fill_cover_note(driver, config, job_title, company_name, default_note)
     
-    # Step 4: Upload resume if file input is present
+    # Step 4: Upload resume if file input is present.
+    # Phase E: prefer the JD-tailored PDF when context is available. Falls
+    # back to the static config["resume_path"] on any failure so we never
+    # block the apply on tailoring.
     try:
-        resume_path = config.get("resume_path", "")
+        try:
+            from backend.services.resume_resolver import resolve_resume_path
+            jd_text = config.get("current_jd_text") or job_description or ""
+            resume_path = resolve_resume_path(config, jd_text=jd_text)
+        except Exception:
+            resume_path = config.get("resume_path", "")
         if resume_path:
             file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
             for fi in file_inputs:

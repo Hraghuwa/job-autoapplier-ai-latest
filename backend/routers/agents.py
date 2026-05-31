@@ -45,6 +45,27 @@ def _redis_available() -> bool:
         return False
 
 
+def _celery_worker_listening(queue: str = "agents", timeout: float = 0.5) -> bool:
+    """True iff at least one Celery worker is consuming `queue`.
+
+    Used to decide whether queuing a task will actually get processed, or
+    whether we should fall back to running it in-process. Without this check,
+    a reachable Redis with no worker = tasks queued forever and the agent
+    never opens a browser tab.
+    """
+    try:
+        from backend.workers.celery_app import celery_app
+        insp = celery_app.control.inspect(timeout=timeout)
+        active = insp.active_queues() or {}
+        for queues in active.values():
+            for q in queues or []:
+                if q.get("name") == queue:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
 def _allowed_phases(user: User, requested: List[int]) -> List[int]:
     """Filter phases based on plan."""
     if user.plan == "free":
@@ -86,7 +107,7 @@ async def run_agents(
         platform = needs_creds.get(phase)
         if platform:
             nested = creds.get(platform)
-            if not isinstance(nested, dict) or not nested.get("email"):
+            if not isinstance(nested, dict) or not nested.get("email") or not nested.get("password"):
                 raise HTTPException(
                     400,
                     detail=f"Set your {platform.capitalize()} credentials before running Phase {phase}."
@@ -97,8 +118,15 @@ async def run_agents(
         raise HTTPException(400, "No phases available on your plan. Upgrade to Pro.")
 
     run_ids = []
+    # Use Celery ONLY if Redis is reachable AND a worker is actually
+    # consuming the agents queue. Otherwise the task would sit in Redis
+    # forever and the user would see "queued" with no browser tab and no
+    # logs — the exact failure mode that bit us in production.
     redis_up = _redis_available()
+    worker_up = _celery_worker_listening("agents") if redis_up else False
+    use_celery = redis_up and worker_up
 
+    fallback_pairs = []
     for phase in phases:
         run = AgentRun(
             id=uuid.uuid4(),
@@ -111,38 +139,57 @@ async def run_agents(
         await db.flush()
         run_ids.append(str(run.id))
 
-        # Queue to Celery if Redis is up
-        if redis_up:
+        if use_celery:
             try:
                 run_phase_task.apply_async(
-                    args=[str(user.id), phase, str(run.id)],
+                    args=[str(user.id), phase, str(run.id), bool(body.dry_run)],
                     queue="agents",
                 )
             except Exception:
-                pass  # Celery queue failed; will fall through to thread below
+                fallback_pairs.append((phase, str(run.id)))
+        else:
+            fallback_pairs.append((phase, str(run.id)))
 
     await db.commit()
 
-    # Without Redis: run all phases SEQUENTIALLY in a single background thread.
-    # Running them simultaneously would cause a CONFIG race condition — all phases
-    # share the global CONFIG dict and would corrupt each other's credentials.
-    if not redis_up:
+    # Fallback: run all phases SEQUENTIALLY in a single background thread.
+    # Triggered when there is no Redis, no worker consuming `agents`, or
+    # the enqueue raised. Sequential is required because all phases share
+    # the global CONFIG dict and parallel runs would corrupt credentials.
+    if fallback_pairs:
         import threading
         from backend.workers.agent_tasks import _run_phase_logic
 
-        def _run_phases_sequentially(uid: str, phase_run_pairs: list):
+        def _run_phases_sequentially(uid: str, phase_run_pairs: list, dry: bool):
             for _phase, _run_id in phase_run_pairs:
-                _run_phase_logic(uid, _phase, _run_id)
+                _run_phase_logic(uid, _phase, _run_id, dry_run=dry)
 
-        phase_run_pairs = list(zip(phases, run_ids))
         t = threading.Thread(
             target=_run_phases_sequentially,
-            args=(str(user.id), phase_run_pairs),
+            args=(str(user.id), fallback_pairs, bool(body.dry_run)),
             daemon=True,
         )
         t.start()
 
     return RunResponse(run_ids=run_ids, message=f"Queued phases: {phases}")
+
+
+@router.get("/healthcheck")
+async def agent_healthcheck():
+    """Public dependency probe — Redis, Celery worker, Chrome binary, Ollama.
+
+    The UI polls this so users see *why* a run can't start instead of staring
+    at a queued spinner. `ok` is True iff the hard requirements (Chrome) pass —
+    everything else is degraded but still works via fallbacks.
+    """
+    from backend.services.agent_supervisor import healthcheck, ensure_worker_running
+    snap = healthcheck()
+    # Self-heal opportunistically: every healthcheck poll re-spawns the worker
+    # if it died. Cheap because ensure_worker_running short-circuits when alive.
+    if snap["redis"] and not snap["celery_worker"]:
+        ensure_worker_running()
+        snap["celery_worker"] = healthcheck()["celery_worker"]
+    return snap
 
 
 @router.get("/preflight")
