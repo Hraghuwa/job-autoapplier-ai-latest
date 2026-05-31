@@ -1,7 +1,5 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { useQuery } from '@tanstack/react-query'
 import api from '@/lib/api'
@@ -10,9 +8,8 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import {
-  Zap, Briefcase, Search, Sparkles, TrendingUp, Download,
-  MoreHorizontal, ArrowRight, ExternalLink, Loader2,
-  CheckCircle2, Clock, AlertCircle, PlayCircle, BarChart3,
+  Zap, Briefcase, Search, Sparkles, TrendingUp, ArrowRight,
+  Loader2, CheckCircle2, PlayCircle, BarChart3,
   ShieldCheck, Globe, Linkedin, FileText
 } from 'lucide-react'
 import { GraphMiniMap } from '@/components/GraphMiniMap'
@@ -52,17 +49,16 @@ const PHASE_ICONS: Record<number, any> = {
 }
 
 export default function DashboardPage() {
-  const { user } = useAuth()
-  const router = useRouter()
+  useAuth() // keep auth guard active
 
   // Queries
-  const { data: analytics, isLoading: loadingAnalytics } = useQuery<Analytics>({
+  const { data: analytics } = useQuery<Analytics>({
     queryKey: ['job-analytics'],
     queryFn: () => api.get('/jobs/analytics', { silent: true }).then(r => r.data),
     retry: false,
   })
 
-  const { data: activeRuns = [], isLoading: loadingRuns } = useQuery<RunStatus[]>({
+  const { data: activeRuns = [] } = useQuery<RunStatus[]>({
     queryKey: ['active-runs'],
     queryFn: () => api.get('/agents/runs', { silent: true }).then(r => r.data.filter((run: any) => run.status === 'running' || run.status === 'queued')),
     refetchInterval: 5000,

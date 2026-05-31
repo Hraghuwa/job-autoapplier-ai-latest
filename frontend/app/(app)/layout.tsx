@@ -6,9 +6,9 @@ import { useAuth } from '@/lib/auth'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
-  LayoutDashboard, FileText, Sparkles, BarChart3, Settings, Shield,
-  LogOut, PenTool, ChevronLeft, ChevronRight, Mail, Menu, X,
-  User as UserIcon, Zap, Key, Briefcase, ShieldCheck, Target
+  Sparkles, BarChart3, Settings,
+  LogOut, ChevronLeft, ChevronRight, Menu, X,
+  Zap, Briefcase, ShieldCheck, Target, Shield
 } from 'lucide-react'
 import { BugReportButton } from '@/components/BugReportButton'
 import { TokenBadge } from '@/components/TokenBadge'

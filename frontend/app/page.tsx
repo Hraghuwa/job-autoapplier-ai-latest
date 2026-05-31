@@ -3,8 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
-  ArrowRight, Bot, CheckCircle, ChevronRight, Globe,
-  Linkedin, Search, Sparkles, Star, Zap, Shield, Clock,
+  ArrowRight, CheckCircle, ChevronRight, Globe,
+  Linkedin, Search, Sparkles, Star, Zap, Shield,
   TrendingUp, Target, FileText, BarChart3, Lock,
   DollarSign, Users, Award,
 } from "lucide-react";

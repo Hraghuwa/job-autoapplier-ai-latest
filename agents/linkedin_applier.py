@@ -1330,10 +1330,26 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             # Check if an external tab opened first
             ext_result = handle_external_application(driver, config, handles_before, linkedin_tab)
 
+            # ── Rate limiter check (prevents account bans) ───────────────────
+            try:
+                from backend.services.rate_limits import default_limiter
+                _uid = str(config.get("user_id", ""))
+                _ok, _reason = default_limiter.can_apply(_uid, "linkedin")
+                if not _ok:
+                    print(f"  🛑 Rate limit reached: {_reason}")
+                    return applied_count
+            except Exception:
+                pass  # limiter unavailable — proceed without it
+
             if ext_result in ("submitted", "filled"):
                 applied_count += 1
                 label = "submitted" if ext_result == "submitted" else "filled (review & submit)"
                 print(f"  📊 External form {label}: {applied_count}/{max_jobs}\n")
+                try:
+                    from backend.services.rate_limits import default_limiter
+                    default_limiter.register_apply(str(config.get("user_id", "")), "linkedin")
+                except Exception:
+                    pass
             else:
                 # No external tab — process LinkedIn Easy Apply modal
                 result = process_easy_apply_modal(driver, config, dry_run=dry_run)
@@ -1341,9 +1357,19 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 if result == "submitted" or result == "closed":
                     applied_count += 1
                     print(f"  📊 Progress: {applied_count}/{max_jobs} applications\n")
+                    try:
+                        from backend.services.rate_limits import default_limiter
+                        default_limiter.register_apply(str(config.get("user_id", "")), "linkedin")
+                    except Exception:
+                        pass
                 else:
                     print(f"  ⚠️  Could not complete: {job_title}")
                     dismiss_modal(driver)
+                    try:
+                        from backend.services.rate_limits import default_limiter
+                        default_limiter.register_failure(str(config.get("user_id", "")), "linkedin")
+                    except Exception:
+                        pass
 
             # Short delay between applications
             delay = random.uniform(3, 8)

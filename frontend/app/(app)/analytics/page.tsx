@@ -2,7 +2,7 @@
 import { useQuery } from '@tanstack/react-query'
 import api from '@/lib/api'
 import {
-  BarChart3, TrendingUp, Target, CheckCircle2, XCircle,
+  BarChart3, TrendingUp, Target, CheckCircle2,
   Briefcase, Calendar, ArrowUpRight, Loader2
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'

@@ -12,8 +12,8 @@ import ReactFlow, {
 import 'reactflow/dist/style.css'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import api from '@/lib/api'
-import { Zap, Building2, Target, X, Briefcase, ExternalLink, Sparkles, RefreshCw, Share2, Loader2 } from 'lucide-react'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { Zap, Building2, Target, X, Briefcase, ExternalLink, RefreshCw, Share2, Loader2 } from 'lucide-react'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Handle, Position } from 'reactflow'
@@ -66,7 +66,8 @@ const CompanyNode = ({ data }: any) => (
   </div>
 )
 
-const UserNode = ({ data }: any) => (
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const UserNode = (_props: any) => (
   <div className="px-4 py-3 shadow-2xl rounded-2xl bg-indigo-600 text-white border-4 border-white dark:border-slate-800 scale-110">
     <div className="flex items-center gap-3">
       <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center">
