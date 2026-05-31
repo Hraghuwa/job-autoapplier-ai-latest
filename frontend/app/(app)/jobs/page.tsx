@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import api from '@/lib/api'
 import { useAuth } from '@/lib/auth'
-import { Search, ExternalLink, Lock, GripVertical } from 'lucide-react'
+import { Search, ExternalLink, Lock } from 'lucide-react'
 import { DndContext, DragEndEvent, closestCenter } from '@dnd-kit/core'
 import { DroppableColumn } from './_components/DroppableColumn'
 import { DraggableCard } from './_components/DraggableCard'

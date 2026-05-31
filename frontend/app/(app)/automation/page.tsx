@@ -10,15 +10,14 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Progress } from '@/components/ui/progress'
-import { Separator } from '@/components/ui/separator'
 import {
-  Zap, Play, Square, RefreshCcw, CheckCircle2, XCircle, AlertCircle,
-  Clock, Linkedin, Search, Sparkles, FileText, ArrowRight, ExternalLink,
+  Zap, Square, RefreshCcw, CheckCircle2, XCircle, AlertCircle,
+  Clock, Linkedin, Search, Sparkles, FileText, ArrowRight,
   Loader2, PlayCircle, History, Settings, CheckCircle, Calendar,
   BrainCircuit, ChevronRight, Lock, GraduationCap, Trophy, Briefcase,
   Terminal, ChevronDown, ChevronUp
 } from 'lucide-react'
-import { useRef, useCallback } from 'react'
+import { useRef } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -554,6 +553,20 @@ export default function AutomationPage() {
                         <Progress value={Math.min(100, ((run.applied_count + run.skipped_count + run.error_count) / 20) * 100)} className="h-1.5 bg-blue-100 dark:bg-blue-900/20 shadow-inner" />
                       </div>
 
+                      {/* ── Error Reasons Panel (shown whenever errors surfaced via WS) ── */}
+                      {(runErrorReasons[run.id] || []).length > 0 && (
+                        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 dark:bg-red-950/20 dark:border-red-900/40 p-3">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-red-600 dark:text-red-400 mb-1.5 flex items-center gap-1">
+                            <AlertCircle className="h-3 w-3" /> Why this run hit errors
+                          </p>
+                          <ul className="space-y-0.5">
+                            {runErrorReasons[run.id].map((r, i) => (
+                              <li key={i} className="text-[11px] text-red-700 dark:text-red-300 font-mono break-all">• {r}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
                       {/* ── Live Log Panel ── */}
                       {liveLogsOpen[run.id] && (
                         <div className="mt-4">
@@ -724,6 +737,12 @@ export default function AutomationPage() {
                               <ChevronRight className="h-3 w-3 opacity-0 group-hover:opacity-100 transition-opacity" />
                            </span>
                         </div>
+                        {/* Show failure reason inline in history if available */}
+                        {run.status === 'failed' && (runErrorReasons[run.id] || []).length > 0 && (
+                          <p className="text-[10px] text-red-500 mt-1 truncate">
+                            ↳ {runErrorReasons[run.id][0]}
+                          </p>
+                        )}
                      </div>
                    ))}
                  </div>

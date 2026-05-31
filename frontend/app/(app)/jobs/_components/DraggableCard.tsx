@@ -3,7 +3,6 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { GripVertical } from 'lucide-react'
 import Link from 'next/link'
-import { Badge } from '@/components/ui/badge'
 
 export function DraggableCard({ job, updateStatus, statusVariants, kanbanCols }: any) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({

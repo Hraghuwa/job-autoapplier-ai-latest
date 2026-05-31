@@ -490,6 +490,16 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                 applied_urls.add(job_url)
                 continue
 
+            # ── Rate limiter guard ───────────────────────────────────────────
+            try:
+                from backend.services.rate_limits import default_limiter
+                _ok, _reason = default_limiter.can_apply(str(config.get("user_id", "")), "wellfound")
+                if not _ok:
+                    print(f"  🛑 Rate limit: {_reason}")
+                    return applied_count, new_urls
+            except Exception:
+                pass
+
             try:
                 # Open job page in new tab
                 driver.execute_script(f"window.open('{job_url}', '_blank');")
@@ -507,8 +517,18 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                     keyword_applied += 1
                     new_urls.append(job_url)
                     applied_urls.add(job_url)
+                    try:
+                        from backend.services.rate_limits import default_limiter
+                        default_limiter.register_apply(str(config.get("user_id", "")), "wellfound")
+                    except Exception:
+                        pass
                 else:
                     print(f"  ⏭️  Could not apply — skipping")
+                    try:
+                        from backend.services.rate_limits import default_limiter
+                        default_limiter.register_failure(str(config.get("user_id", "")), "wellfound")
+                    except Exception:
+                        pass
 
                 # Close tab and go back
                 try:

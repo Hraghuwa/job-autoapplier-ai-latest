@@ -309,6 +309,16 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                         driver.switch_to.window(driver.window_handles[0])
                         continue
 
+                    # ── Rate limiter guard ───────────────────────────────────
+                    try:
+                        from backend.services.rate_limits import default_limiter
+                        _ok, _reason = default_limiter.can_apply(str(config.get("user_id", "")), "internshala")
+                        if not _ok:
+                            print(f"  🛑 Rate limit: {_reason}")
+                            return applied_count, new_urls
+                    except Exception:
+                        pass
+
                     # Step 5: Click Apply
                     print(f"  🎯 Clicking Apply...")
                     try_click(driver, apply_btn)
@@ -319,12 +329,20 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                     print(f"  📝 Filling form...")
                     result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=8)
 
+                    def _register_success():
+                        try:
+                            from backend.services.rate_limits import default_limiter
+                            default_limiter.register_apply(str(config.get("user_id", "")), "internshala")
+                        except Exception:
+                            pass
+
                     if result == "submitted":
                         print(f"  ✅ SUCCESS: Applied successfully!")
                         applied_count += 1
                         keyword_applied += 1
                         new_urls.append(url)
                         applied_urls.add(url)
+                        _register_success()
                     elif result == "stuck":
                         # Fallback: fill everything and try submit
                         smart_form_filler.fill_all_form_fields(driver, config)
@@ -335,8 +353,14 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                             keyword_applied += 1
                             new_urls.append(url)
                             applied_urls.add(url)
+                            _register_success()
                         else:
                             print(f"  ⚠️  Could not auto-submit — skipping")
+                            try:
+                                from backend.services.rate_limits import default_limiter
+                                default_limiter.register_failure(str(config.get("user_id", "")), "internshala")
+                            except Exception:
+                                pass
                     else:
                         # Form closed or one-click apply
                         print(f"  ✅ Applied (one-click)!")
@@ -344,6 +368,7 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                         keyword_applied += 1
                         new_urls.append(url)
                         applied_urls.add(url)
+                        _register_success()
 
                     # Step 7: Close tab and go back to search results
                     try:
