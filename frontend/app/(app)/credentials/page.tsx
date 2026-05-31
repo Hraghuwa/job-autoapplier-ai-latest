@@ -329,10 +329,17 @@ export default function CredentialsPage() {
     retry: false,
   })
 
-  const { data: liCookieStatus } = useQuery<{ stored: boolean }>({
+  const { data: liCookieStatus } = useQuery<{
+    stored: boolean
+    has_li_at: boolean
+    ready: boolean
+    count: number
+    expiry?: number | null
+  }>({
     queryKey: ['li-cookies'],
     queryFn: () => api.get('/onboarding/linkedin-cookies-status', { silent: true }).then(r => r.data),
     retry: false,
+    staleTime: 30_000,
   })
 
   useEffect(() => {
@@ -1133,23 +1140,44 @@ export default function CredentialsPage() {
       {/* ── 4.5 LinkedIn Cookie Bypass ──────────────────────────────────────── */}
       <Section title="LinkedIn Login Boost (Fix CAPTCHA)" icon={KeyRound}>
         <div className="space-y-4">
-          <div className={`flex items-start gap-3 rounded p-3 text-sm ${cookiesStored ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
-            {cookiesStored ? (
-              <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5 text-green-600" />
-            ) : (
-              <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-amber-600" />
-            )}
-            <div>
-              {cookiesStored ? (
-                <p>LinkedIn session cookies are saved. The agent will use them to bypass CAPTCHA/security challenges.</p>
-              ) : (
-                <p>
-                  LinkedIn blocks automated logins with a security challenge (CAPTCHA). Provide your session cookies
-                  to let the agent log in as you — no password needed.
-                </p>
-              )}
+          {/* Status banner — shows rich state from the API */}
+          {liCookieStatus?.stored && !liCookieStatus?.has_li_at ? (
+            <div className="flex items-start gap-3 rounded p-3 text-sm bg-red-50 text-red-800 border border-red-200">
+              <XCircle className="h-4 w-4 shrink-0 mt-0.5 text-red-600" />
+              <div>
+                <p className="font-semibold">Cookies saved but missing <code>li_at</code></p>
+                <p className="mt-0.5 text-xs">You exported cookies <em>before</em> logging in. Log in to linkedin.com first, then re-export.</p>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className={`flex items-start gap-3 rounded p-3 text-sm ${liCookieStatus?.ready ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
+              {liCookieStatus?.ready ? (
+                <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5 text-green-600" />
+              ) : (
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-amber-600" />
+              )}
+              <div>
+                {liCookieStatus?.ready ? (
+                  <div className="space-y-1">
+                    <p>
+                      LinkedIn session cookies are active ({liCookieStatus.count} cookies, <code>li_at</code> present).
+                      The agent will use them to bypass CAPTCHA/security challenges.
+                    </p>
+                    {liCookieStatus.expiry && (
+                      <p className="text-xs opacity-75">
+                        Session expires: {new Date(liCookieStatus.expiry * 1000).toLocaleDateString()}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p>
+                    LinkedIn blocks automated logins with a security challenge (CAPTCHA). Provide your session cookies
+                    to let the agent log in as you — no password needed.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
 
           <button
             type="button"
