@@ -377,6 +377,35 @@ investment that makes the product multi-tenant for real.
 
 ---
 
+## 7c. Remediation log (branch `audit-remediation`, 2026-06-09)
+
+Fixes applied and verified against the 56-test baseline (still green after every batch):
+
+| ID | Status | What shipped |
+|---|---|---|
+| C1 | ✅ code done; ⚠️ operator must rotate keys + scrub history | `git rm --cached jobagent.db`; `docs/SECURITY_INCIDENT_C1.md` runbook |
+| H5 | ✅ done | `_owned_run_or_404` guards `/runs/{id}/logs` & `/analyze` |
+| H1 | ✅ done | linkedin applier calls `register_success` on apply |
+| H2 | ✅ done | `decrypt()` returns "" on real Fernet failure (gAAAAA check), not ciphertext |
+| C3 | ✅ done | `RedisRateLimiter` + `_LazyLimiter`; caps survive restart, shared across procs |
+| M6 | ✅ done | `/analyze` gated to Pro + per-user daily cap (analyze:20) |
+| N1 | ✅ done | server runs (`_server_mode`) quit Chrome instead of detaching |
+| M7 | ✅ plumbing done | resolver wired into smart_form_filler + google_form_filler chokepoints (covers internshala/web_search/form_fill). Follow-up: appliers must set `_current_jd` to actually tailor on those platforms |
+| M1 | ✅ done | JWT `type` claim; refresh/access not interchangeable (legacy-tolerant) |
+| M3 | ✅ done | self-learning instructions capped at 25 deduped rules |
+| H4 | ✅ done | boot recovery only fails `queued` runs; watchdog handles `running` (no worker race) |
+| M4 | ✅ done | `croniter`-based schedule matching w/ hour-check fallback; dep added |
+| M2 | ✅ mitigated | per-apply enforcement now comes from the persistent limiter (C3); appliers call `can_apply` before each apply. DB `_check_quota` remains the per-phase plan quota |
+| **C2/M5** | ⏳ **planned, not implemented** | Design in `docs/C2_CONCURRENCY_PLAN.md`. Deliberately not blind-rewritten — unverifiable without a live worker/Chrome/Redis stack; would violate Phase 9 (no unverified regressions) |
+| M8 | 📝 documented | localStorage JWT/refresh = XSS-exfil tradeoff; recommend httpOnly-cookie refresh + rotation (future) |
+| M9 | 📝 documented | WS token-in-URL → move to a post-connect auth message / single-use ticket (future, frontend+backend) |
+
+**Deploy gate now satisfied:** C1 (code) + H5 are fixed → a safe deploy is unblocked
+**once the operator completes the C1 key-rotation/history-scrub runbook.** C2 remains the
+next major investment (needs a live stack to implement + verify).
+
+---
+
 ## 7b. Learnings (Phase 12, running)
 - The "bulletproof layer" (PLAN §5) genuinely improved *liveness* (stuck-run recovery, worker respawn)
   but introduced *safety/consistency* regressions (H4 status flap; the global lock that caps throughput).
