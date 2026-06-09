@@ -605,208 +605,113 @@ def _build_config(user, profile) -> dict:
     return config
 
 
-# ── Core logic (callable directly or via Celery) ─────────────────────────────
-def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_run: bool = False):
-    session = _sync_session()
-    applied = 0
-    skipped = 0
-    errors = 0
-    error_reasons: list = []  # collect error messages for post-run summary
+# ── stdout → WS-event classifier (pure; unit-tested) ─────────────────────────
+# Markers that mean "the agent is stuck at a human-solvable login/captcha step",
+# NOT a crash. When any of these appear with a ❌, we emit `login_challenge`
+# (actionable) instead of `error` (toast spam).
+CHALLENGE_MARKERS = (
+    "security challenge", "captcha", "checkpoint", "2fa", "two-factor",
+    "two factor", "verify it's you", "verify its you",
+    "🚨",  # other_platforms.py uses 🚨 as the CAPTCHA prefix
+    "challenge detected", "challenge not resolved", "solve it manually",
+)
+PLATFORM_HINTS = ("linkedin", "internshala", "unstop", "naukri", "wellfound", "google")
 
-    # Create a stop event for this run — can be triggered via request_stop(run_id)
-    stop_event = get_stop_event(run_id)
+PHASE_PLATFORM_MAP = {
+    1: "linkedin", 2: "internshala", 3: "wellfound", 4: "naukri",
+    5: "unstop", 6: "web_search", 7: "form_fill",
+}
 
+
+def classify_agent_line(line: str):
+    """Classify one printed agent line into a WS event.
+
+    Pure function (no I/O) so it can be unit-tested and reused by both the
+    in-process path and the subprocess stdout reader. Returns a dict
+    {"category", "event"} (event has no run_id — the caller adds it), or None.
+    Order matters: applied/skipped first, then login_challenge (must beat the
+    generic "❌ = error" rule), then generic error, then ping.
+    """
+    line = (line or "").strip()
+    if not line:
+        return None
+    ll = line.lower()
+    is_login_msg = ("login" in ll or any(m in ll for m in CHALLENGE_MARKERS))
+    has_failure = ("❌" in line or "failed" in ll or "error" in ll)
+    is_login_blocked = has_failure and is_login_msg
+    is_error = has_failure and not is_login_msg
+
+    if "External form filled" in line or "✅ Applied" in line:
+        return {"category": "applied", "event": {"event": "applied", "message": line}}
+    if "⏭" in line or "Already applied" in line or "Skipping" in line:
+        return {"category": "skipped", "event": {"event": "skipped", "message": line}}
+    if is_login_blocked:
+        hint = next((p for p in PLATFORM_HINTS if p in ll), "unknown")
+        return {"category": "login_challenge", "platform_hint": hint, "event": {
+            "event": "login_challenge", "platform": hint, "message": line,
+            "action_required": (f"Open the Chrome window and solve the {hint} "
+                                 f"security challenge manually, then click Run again."),
+        }}
+    if is_error:
+        return {"category": "error", "event": {"event": "error", "message": line}}
+    if "🎯 KEYWORD" in line or "LINKEDIN AGENT" in line or "Phase" in line:
+        return {"category": "ping", "event": {"event": "ping", "message": line}}
+    return None
+
+
+def _redis_paused(run_id: str) -> bool:
     try:
-        user, profile = _load_user_and_profile(session, user_id)
-        if not user or not profile:
-            _update_run(session, run_id, status="failed", completed_at=datetime.now())
-            return
+        import redis as _r
+        from backend.config import settings as _s
+        c = _r.from_url(_s.redis_url, decode_responses=True, socket_connect_timeout=0.2)
+        return c.get(f"pause:{run_id}") == "1"
+    except Exception:
+        return False
 
-        platform_map = {
-            1: "linkedin", 
-            2: "internshala", 
-            3: "wellfound", 
-            4: "naukri", 
-            5: "unstop", 
-            6: "web_search", 
-            7: "form_fill"
-        }
 
-        platform = platform_map.get(phase, "unknown")
+# ── In-process executor (legacy path; escape hatch via JOBAGENT_INPROC_PHASE=1) ─
+# Audit C2: the default path now runs each phase in an isolated subprocess
+# (_execute_subprocess) so there is NO process-global CONFIG, NO global stdout
+# swap, and NO global lock serialising every user's run. This in-process path is
+# preserved for emergencies and selected with JOBAGENT_INPROC_PHASE=1; it still
+# uses the global lock because it shares the module-global CONFIG.
+def _execute_inproc(user_id, phase, run_id, config, dry_run, session, on_line, stop_event) -> int:
+    import importlib
+    applied = 0
 
-        # Quota check
-        if not _check_quota(session, user_id, platform, user.plan):
-            _update_run(session, run_id, status="limit_reached", completed_at=datetime.now())
-            publish(user_id, {"type": "run_complete", "message": "Daily limit reached."})
-            return
+    class _Cap:
+        def __init__(self, orig):
+            self._orig = orig
+            self._buf = ""
+        def write(self, text):
+            self._orig.write(text)
+            self._buf += text
+            if "\n" in self._buf:
+                parts = self._buf.split("\n")
+                self._buf = parts[-1]
+                for ln in parts[:-1]:
+                    on_line(ln)
+        def flush(self):
+            self._orig.flush()
 
-        celery_task_id = task_self.request.id if task_self else None
-        _update_run(session, run_id, status="running", started_at=datetime.now(),
-                    celery_task_id=celery_task_id)
-        _log_event(session, run_id, "info", f"Phase {phase} ({platform}) started.")
-        publish(user_id, {"type": "phase_started", "phase": phase, "platform": platform,
-                          "run_id": run_id})
-
-        # Intercept stdout to stream agent output as WS events
-        import sys
-        import re
-
-        # Markers that mean "the agent is stuck at a human-solvable login/captcha step",
-        # NOT a crash. When any of these appear with a ❌, we emit `login_challenge`
-        # (actionable) instead of `error` (toast spam).
-        CHALLENGE_MARKERS = (
-            "security challenge",
-            "captcha",
-            "checkpoint",
-            "2fa",
-            "two-factor",
-            "two factor",
-            "verify it's you",
-            "verify its you",
-            "🚨",  # other_platforms.py uses 🚨 as the CAPTCHA prefix
-            "challenge detected",
-            "challenge not resolved",
-            "solve it manually",
-        )
-        PLATFORM_HINTS = ("linkedin", "internshala", "unstop", "naukri",
-                          "wellfound", "google")
-
-        stats = {"skipped": 0, "errors": 0}
-
-        class AgentStdout:
-            def __init__(self, original, uid, run_id, db_session):
-                self._orig = original
-                self._uid = uid
-                self._run_id = run_id
-                self._session = db_session
-                self._buf = ""
-
-            def write(self, text):
-                self._orig.write(text)
-                self._buf += text
-                if "\n" in self._buf:
-                    lines = self._buf.split("\n")
-                    self._buf = lines[-1]
-                    for line in lines[:-1]:
-                        self._emit(line)
-
-            def flush(self):
-                self._orig.flush()
-
-            def _emit(self, line):
-                line = line.strip()
-                if not line:
-                    return
-                line_lower = line.lower()
-
-                # Classifier: order matters. Applied/skipped take precedence, then
-                # login_challenge (which must short-circuit before the generic
-                # "❌ means error" rule), then generic error, then ping.
-                is_login_msg = (
-                    "login" in line_lower
-                    or any(m in line_lower for m in CHALLENGE_MARKERS)
-                )
-                has_failure_marker = (
-                    "❌" in line
-                    or "failed" in line_lower
-                    or "error" in line_lower
-                )
-                is_login_blocked = has_failure_marker and is_login_msg
-                is_error = has_failure_marker and not is_login_msg
-
-                # Applied externally or via Easy Apply
-                if "External form filled" in line or "✅ Applied" in line:
-                    _log_event(self._session, self._run_id, "applied", line)
-                    publish(self._uid, {
-                        "event": "applied",
-                        "message": line,
-                        "run_id": self._run_id,
-                    })
-                elif "⏭" in line or "Already applied" in line or "Skipping" in line:
-                    stats["skipped"] += 1
-                    _log_event(self._session, self._run_id, "skipped", line)
-                    publish(self._uid, {
-                        "event": "skipped",
-                        "message": line,
-                        "run_id": self._run_id,
-                    })
-                elif is_login_blocked:
-                    stats["errors"] += 1
-                    platform_hint = "unknown"
-                    for p in PLATFORM_HINTS:
-                        if p in line_lower:
-                            platform_hint = p
-                            break
-                    publish(self._uid, {
-                        "event": "login_challenge",
-                        "platform": platform_hint,
-                        "message": line,
-                        "action_required": (
-                            f"Open the Chrome window and solve the "
-                            f"{platform_hint} security challenge manually, "
-                            f"then click Run again."
-                        ),
-                        "run_id": self._run_id,
-                    })
-                    _log_event(self._session, self._run_id, "login_challenge", line)
-                    error_reasons.append(f"LOGIN CHALLENGE [{platform_hint}]: {line[:200]}")
-                elif is_error:
-                    stats["errors"] += 1
-                    _log_event(self._session, self._run_id, "error", line)
-                    publish(self._uid, {
-                        "event": "error",
-                        "message": line,
-                        "run_id": self._run_id,
-                    })
-                    error_reasons.append(line[:200])
-                elif "🎯 KEYWORD" in line or "LINKEDIN AGENT" in line or "Phase" in line:
-                    _log_event(self._session, self._run_id, "info", line)
-                    publish(self._uid, {
-                        "event": "ping",
-                        "message": line,
-                        "run_id": self._run_id,
-                    })
-
-        _orig_stdout = sys.stdout
-        sys.stdout = AgentStdout(_orig_stdout, user_id, run_id, session)
-
-        # Build config and patch agents module
-        config = _build_config(user, profile)
-        config["run_id"] = run_id
-        config["dry_run"] = bool(dry_run)
-
-        agents_path = os.path.join(os.path.dirname(__file__), "..", "..", "agents")
-        agents_path = os.path.abspath(agents_path)
+    _orig_stdout = sys.stdout
+    sys.stdout = _Cap(_orig_stdout)
+    try:
+        agents_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "agents"))
         if agents_path not in sys.path:
             sys.path.insert(0, agents_path)
-
-        # Flush cached agent modules so they re-import fresh with the new CONFIG.
-        # Critical: without this, modules that did `from config import CONFIG` at
-        # module-load time hold a stale reference to the old dict — meaning
-        # _stop_event and role_agents from the previous config are never seen.
         for _mod in ['run_phase1', 'orchestrator', 'main', 'linkedin_applier',
                      'wellfound_applier', 'web_search_applier', 'google_form_filler',
                      'other_platforms', 'job_finder']:
             sys.modules.pop(_mod, None)
 
-        # ── CRITICAL: Hold the config lock for the ENTIRE phase execution ──
-        # Previously we released the lock after CONFIG.update(), but concurrent
-        # phases could then overwrite CONFIG while we were still running.
-        # Now we copy the config for safety and hold the lock through execution.
-        # Note: No deepcopy needed because _build_config returns a new plain dict.
-        import importlib
         config_snapshot = config.copy()
-        config_snapshot["_server_mode"] = True  # audit N1: server runs must quit Chrome, not detach
-        config_snapshot["_stop_event"] = stop_event  # agents check this to honour Stop requests
-        config_snapshot["current_run_id"] = run_id   # CLI agents use _should_stop() to look up stop state
-        # Per-user chrome profile avoids SingletonLock collisions across concurrent users.
-        # Sanitise user_id to a filesystem-safe suffix.
+        config_snapshot["_server_mode"] = True
+        config_snapshot["_stop_event"] = stop_event
+        config_snapshot["current_run_id"] = run_id
         _safe_suffix = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(user_id))
         config_snapshot["chrome_profile_suffix"] = _safe_suffix
 
-        # ── Resume tailoring (Phase E) — give appliers a way to open sync sessions
-        # so resume_resolver can look up cached tailored PDFs without each
-        # applier hand-rolling a DB connection.
         from backend.database import engine as _async_engine
         from sqlalchemy import create_engine as _create_engine
         from sqlalchemy.orm import sessionmaker as _sessionmaker
@@ -815,16 +720,10 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
             _sync_eng = _create_engine(sync_url, future=True)
             config_snapshot["_session_factory"] = _sessionmaker(_sync_eng, expire_on_commit=False)
             config_snapshot["_tailored_upload_dir"] = os.environ.get(
-                "TAILORED_UPLOAD_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "tailored")
-            )
+                "TAILORED_UPLOAD_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "tailored"))
         except Exception as _e:
             logger.warning("Could not build sync session factory for tailoring: %s", _e)
 
-        # ── LinkedIn cookie refresh-back callback ──
-        # When the applier successfully logs in via cookie injection, it can
-        # call CONFIG["_save_linkedin_cookies"](fresh_json) to persist the
-        # post-login cookies — keeps the session alive for the next run
-        # without the user re-exporting.
         def _save_linkedin_cookies(fresh_json: str, _uid=str(user_id)) -> None:
             try:
                 from backend.models.profile import UserProfile as _UP
@@ -839,8 +738,6 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
                         _prof.platform_passwords = _creds
                         _fm(_prof, "platform_passwords")
                         _s.commit()
-                        logger.info("Refreshed LinkedIn cookies for user %s (%d bytes)",
-                                    _uid, len(fresh_json))
                 finally:
                     _s.close()
             except Exception as _err:
@@ -848,62 +745,176 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
         config_snapshot["_save_linkedin_cookies"] = _save_linkedin_cookies
 
         agent_config_mod = importlib.import_module("config")
-        
         for k, v in config_snapshot.items():
             setattr(agent_config_mod, k, v)
 
         with _config_lock:
             agent_config_mod.CONFIG.clear()
             agent_config_mod.CONFIG.update(config_snapshot)
-
-            # Run the appropriate phase INSIDE the lock
-            if phase == 1:
-                from run_phase1 import main as phase_fn
-                applied = phase_fn() or 0
-            elif phase == 2:
-                from orchestrator import run_internshala_phase
-                applied = run_internshala_phase()
-            elif phase == 3:
-                from orchestrator import run_wellfound_phase
-                applied = run_wellfound_phase()
-            elif phase == 4:
-                from orchestrator import run_naukri_phase
-                applied = run_naukri_phase()
-            elif phase == 5:
-                from orchestrator import run_unstop_phase
-                applied = run_unstop_phase()
-            elif phase == 6:
-                from orchestrator import run_web_search_phase
-                applied = run_web_search_phase()
-            elif phase == 7:
-                from orchestrator import run_form_fill_phase
-                filled = run_form_fill_phase()
-                applied = filled
-                # Persist any newly learned autofill values back to the user's profile
-                try:
-                    import importlib as _il
-                    _cfg_mod = _il.import_module("config")
-                    learned_bank = _cfg_mod.CONFIG.get("autofill_bank", {})
-                    if learned_bank:
-                        from backend.models.profile import UserProfile
-                        prof = session.query(UserProfile).filter_by(
-                            user_id=uuid.UUID(user_id)
-                        ).first()
-                        if prof:
-                            existing = prof.autofill_bank or {}
-                            existing.update(learned_bank)
-                            prof.autofill_bank = existing
-                            session.commit()
-                            logger.info(f"Persisted {len(learned_bank)} autofill entries for user {user_id}")
-                except Exception as _e:
-                    logger.warning(f"Could not persist autofill bank: {_e}")
-
-
+            applied = _dispatch_phase(phase) or 0
+            if phase == 7:
+                _persist_autofill_bank(session, user_id, agent_config_mod)
+        return applied
+    finally:
         sys.stdout = _orig_stdout
+
+
+def _dispatch_phase(phase: int) -> int:
+    if phase == 1:
+        from run_phase1 import main as phase_fn
+        return phase_fn() or 0
+    if phase == 2:
+        from orchestrator import run_internshala_phase
+        return run_internshala_phase()
+    if phase == 3:
+        from orchestrator import run_wellfound_phase
+        return run_wellfound_phase()
+    if phase == 4:
+        from orchestrator import run_naukri_phase
+        return run_naukri_phase()
+    if phase == 5:
+        from orchestrator import run_unstop_phase
+        return run_unstop_phase()
+    if phase == 6:
+        from orchestrator import run_web_search_phase
+        return run_web_search_phase()
+    if phase == 7:
+        from orchestrator import run_form_fill_phase
+        return run_form_fill_phase()
+    return 0
+
+
+def _persist_autofill_bank(session, user_id, agent_config_mod) -> None:
+    try:
+        learned_bank = agent_config_mod.CONFIG.get("autofill_bank", {})
+        if not learned_bank:
+            return
+        from backend.models.profile import UserProfile
+        prof = session.query(UserProfile).filter_by(user_id=uuid.UUID(str(user_id))).first()
+        if prof:
+            existing = prof.autofill_bank or {}
+            existing.update(learned_bank)
+            prof.autofill_bank = existing
+            session.commit()
+            logger.info("Persisted %d autofill entries for user %s", len(learned_bank), user_id)
+    except Exception as _e:
+        logger.warning("Could not persist autofill bank: %s", _e)
+
+
+# ── Subprocess executor (default) — full isolation, no globals, no lock ──────
+def _execute_subprocess(user_id, phase, run_id, config, dry_run, on_line) -> int:
+    import subprocess
+    import tempfile
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    script = os.path.join(repo_root, "agents", "run_phase_subprocess.py")
+
+    cfg = dict(config)
+    cfg["user_id"] = str(config.get("user_id") or user_id)
+    cfg["run_id"] = run_id
+    cfg["dry_run"] = bool(dry_run)
+
+    applied = 0
+    with tempfile.TemporaryDirectory(prefix=f"jobrun_{run_id}_") as td:
+        cfg_path = os.path.join(td, "config.json")
+        res_path = os.path.join(td, "result.json")
+        with open(cfg_path, "w") as f:
+            json.dump(cfg, f, default=str)
+
+        env = {**os.environ, "PYTHONUNBUFFERED": "1", "JOBAGENT_SERVER_MODE": "1"}
+        proc = subprocess.Popen(
+            [sys.executable, script, cfg_path, str(phase), run_id, res_path],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, cwd=repo_root, env=env,
+        )
+        try:
+            for line in proc.stdout:  # streams live; classifier runs per line
+                on_line(line.rstrip("\n"))
+        finally:
+            proc.wait()
+        try:
+            with open(res_path) as f:
+                applied = int(json.load(f).get("applied") or 0)
+        except Exception:
+            logger.warning("Subprocess produced no result file for run %s (exit=%s)",
+                           run_id, proc.returncode)
+    return applied
+
+
+# ── Core logic (callable directly or via Celery) ─────────────────────────────
+def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_run: bool = False):
+    import sys as _sys  # noqa: F401 — kept for parity; sys imported at module top
+    session = _sync_session()
+    applied = 0
+    skipped = 0
+    errors = 0
+    error_reasons: list = []  # collect error messages for post-run summary
+    stats = {"skipped": 0, "errors": 0}
+
+    # Create a stop event for this run — used by the in-process path; the
+    # subprocess path honours stop via the Redis pause:{run_id} key.
+    stop_event = get_stop_event(run_id)
+
+    try:
+        user, profile = _load_user_and_profile(session, user_id)
+        if not user or not profile:
+            _update_run(session, run_id, status="failed", completed_at=datetime.now())
+            return
+
+        platform = PHASE_PLATFORM_MAP.get(phase, "unknown")
+
+        # Quota check
+        if not _check_quota(session, user_id, platform, user.plan):
+            _update_run(session, run_id, status="limit_reached", completed_at=datetime.now())
+            publish(user_id, {"type": "run_complete", "message": "Daily limit reached."})
+            return
+
+        celery_task_id = task_self.request.id if task_self else None
+        _update_run(session, run_id, status="running", started_at=datetime.now(),
+                    celery_task_id=celery_task_id)
+        _log_event(session, run_id, "info", f"Phase {phase} ({platform}) started.")
+        publish(user_id, {"type": "phase_started", "phase": phase, "platform": platform,
+                          "run_id": run_id})
+
+        # Per-line handler: classify → log + publish + accumulate stats. Shared
+        # by both executors so behaviour is identical regardless of path.
+        def _handle_line(line):
+            res = classify_agent_line(line)
+            if not res:
+                return
+            cat = res["category"]
+            event = dict(res["event"])
+            event["run_id"] = run_id
+            if cat == "applied":
+                _log_event(session, run_id, "applied", line)
+            elif cat == "skipped":
+                stats["skipped"] += 1
+                _log_event(session, run_id, "skipped", line)
+            elif cat == "login_challenge":
+                stats["errors"] += 1
+                _log_event(session, run_id, "login_challenge", line)
+                error_reasons.append(f"LOGIN CHALLENGE [{res.get('platform_hint','unknown')}]: {line[:200]}")
+            elif cat == "error":
+                stats["errors"] += 1
+                _log_event(session, run_id, "error", line)
+                error_reasons.append(line[:200])
+            elif cat == "ping":
+                _log_event(session, run_id, "info", line)
+            publish(user_id, event)
+
+        config = _build_config(user, profile)
+        config["run_id"] = run_id
+        config["dry_run"] = bool(dry_run)
+
+        if os.environ.get("JOBAGENT_INPROC_PHASE") == "1":
+            applied = _execute_inproc(user_id, phase, run_id, config, dry_run,
+                                      session, _handle_line, stop_event)
+        else:
+            applied = _execute_subprocess(user_id, phase, run_id, config, dry_run, _handle_line)
+
         skipped = stats["skipped"]
         errors = stats["errors"]
         _increment_quota(session, user_id, platform, applied)
-        was_stopped = stop_event.is_set()
+        was_stopped = stop_event.is_set() or _redis_paused(run_id)
         final_status = "paused" if was_stopped else "completed"
         _log_event(session, run_id, "info", f"Phase {phase} {'stopped' if was_stopped else 'completed'}. Applied: {applied}")
         try:
@@ -925,10 +936,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
         })
 
     except Exception as e:
-        try:
-            sys.stdout = _orig_stdout  # restore even on error
-        except Exception:
-            pass
+        # Executors restore their own stdout in a finally; nothing to undo here.
         tb = traceback.format_exc()
         logger.error(f"Phase {phase} failed for user {user_id}: {e}\n{tb}")
         _log_event(session, run_id, "error", f"{e}\n{tb}"[:2000])
