@@ -32,6 +32,10 @@ async def get_current_user(
         user_id: str = payload.get("sub")
         if not user_id:
             raise exc
+        # Audit M1: a refresh token must not be usable as an access token.
+        # Legacy tokens (no "type" claim) are still accepted during rollout.
+        if payload.get("type") == "refresh":
+            raise exc
     except JWTError:
         raise exc
 

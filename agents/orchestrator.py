@@ -48,6 +48,35 @@ from main import load_tracker, save_tracker, get_applied_urls, add_applied_urls
 
 
 # ─────────────────────────────────────────────
+#  SERVER-MODE TEARDOWN (audit N1)
+# ─────────────────────────────────────────────
+# Layer-A (local CLI) intentionally leaves tabs open for the human to review.
+# Layer-B (the SaaS worker) has no human at the browser, so leaving Chrome alive
+# leaks one process per run and eventually OOMs the box. The worker sets
+# CONFIG["_server_mode"]=True; in that mode we DON'T detach and we DO quit().
+def _server_mode() -> bool:
+    try:
+        if CONFIG.get("_server_mode"):
+            return True
+    except Exception:
+        pass
+    return os.environ.get("JOBAGENT_SERVER_MODE") == "1"
+
+
+def _teardown(driver, phase_label: str = "") -> None:
+    if driver is None:
+        return
+    if _server_mode():
+        try:
+            driver.quit()
+            print(f"  [{phase_label}] 🧹 Browser closed (server mode).")
+        except Exception:
+            pass
+    else:
+        print(f"  [{phase_label}] 🌐 Browser session preserved — tabs left open for review.")
+
+
+# ─────────────────────────────────────────────
 #  SHARED BROWSER FACTORY
 # ─────────────────────────────────────────────
 def create_driver(profile_suffix=""):
@@ -67,7 +96,7 @@ def create_driver(profile_suffix=""):
     # CRITICAL: detach=True keeps Chrome alive after the Python driver object
     # is garbage collected. Without this, every phase exit (normal OR stop)
     # would close all found-job tabs the user wants to review later.
-    opts.add_experimental_option("detach", True)
+    opts.add_experimental_option("detach", not _server_mode())
     # Incognito: ensures no cached login session bypasses credential-based login
     opts.add_argument("--incognito")
 
@@ -172,8 +201,7 @@ def run_linkedin_phase():
         # Tabs ALWAYS stay open (both on stop AND on normal completion) so the
         # user can review/apply to jobs manually. detach=True + no driver.quit()
         # is the contract enforced at every phase boundary.
-        if driver:
-            print("  [Phase 1] 🌐 Browser session preserved — tabs left open for review.")
+        _teardown(driver, "Phase 1")
 
     return applied
 
@@ -225,8 +253,7 @@ def run_internshala_phase():
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
         traceback.print_exc()
     finally:
-        if driver:
-            print("  [Phase 2] 🌐 Browser session preserved — tabs left open for review.")
+        _teardown(driver, "Phase 2")
 
     return applied
 
@@ -282,8 +309,7 @@ def run_web_search_phase():
     finally:
         # Tabs ALWAYS stay open so the user can review the web-search results
         # and apply manually later — this is the explicit Phase 2 contract.
-        if driver:
-            print("  [Phase 6] 🌐 Browser session preserved — job tabs left open for review.")
+        _teardown(driver, "Phase 6")
 
     return applied
 
@@ -323,8 +349,7 @@ def run_form_fill_phase():
     finally:
         # Tabs ALWAYS stay open so the user can inspect what got filled and
         # hit submit manually if needed. No driver.quit().
-        if driver:
-            print("  [Phase 7] 🌐 Browser session preserved — filled tabs left open for review.")
+        _teardown(driver, "Phase 7")
 
     return filled
 
@@ -387,8 +412,7 @@ def run_wellfound_phase():
         traceback.print_exc()
     finally:
         # Tabs ALWAYS stay open — same contract as every other phase.
-        if driver:
-            print("  [Phase 3] 🌐 Browser session preserved — tabs left open for review.")
+        _teardown(driver, "Phase 3")
 
     return applied
 
@@ -441,8 +465,7 @@ def run_naukri_phase():
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
         traceback.print_exc()
     finally:
-        if driver:
-            print("  [Phase 4] 🌐 Browser session preserved — tabs left open for review.")
+        _teardown(driver, "Phase 4")
 
     return applied
 
@@ -494,8 +517,7 @@ def run_unstop_phase():
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied, error=str(e))
         traceback.print_exc()
     finally:
-        if driver:
-            print("  [Phase 5] 🌐 Browser session preserved — tabs left open for review.")
+        _teardown(driver, "Phase 5")
 
     return applied
 

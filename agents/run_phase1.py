@@ -60,11 +60,13 @@ def main():
                 print(f"\n  ⏳ Next agent in 5s...")
                 time.sleep(5)
     finally:
+        from main import _server_mode as _srv
         _stop = CONFIG.get("_stop_event")
-        if _stop and _stop.is_set():
+        if _stop and _stop.is_set() and not _srv():
             print("  [Phase 1] ⏸️  Stopped by user — browser tab preserved for inspection.")
-            # Do NOT quit driver — leave the browser open so user can see where it stopped
+            # Local CLI only: leave the browser open so the user can see where it stopped.
         else:
+            # Normal completion, or server mode (no human to review) → close Chrome.
             safe_quit(driver)
 
     print(f"\n  ✅ PHASE 1 COMPLETE: {total_applied} LinkedIn applications")

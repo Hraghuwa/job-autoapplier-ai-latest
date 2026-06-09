@@ -20,3 +20,4 @@ httpx
 networkx>=3.0
 pyotp
 python-dotenv
+croniter>=2.0.0  # accurate cron matching for scheduled agent runs (audit M4)
