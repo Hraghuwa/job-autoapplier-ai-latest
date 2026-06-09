@@ -351,6 +351,24 @@ async def get_schedule(
 
     return schedule
 
+async def _owned_run_or_404(db: AsyncSession, run_id: str, user: User) -> AgentRun:
+    """Fetch a run and assert it belongs to the requesting user.
+
+    Without this, the run-log endpoints leaked logs across tenants (IDOR / OWASP
+    A01) because they queried AgentLog by run_id alone.
+    """
+    result = await db.execute(
+        select(AgentRun).where(
+            AgentRun.id == uuid.UUID(run_id),
+            AgentRun.user_id == user.id,
+        )
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    return run
+
+
 @router.get("/runs/{run_id}/logs")
 async def get_run_logs(
     run_id: str,
@@ -358,6 +376,7 @@ async def get_run_logs(
     db: AsyncSession = Depends(get_db),
 ):
     from backend.models.agent_run import AgentLog
+    await _owned_run_or_404(db, run_id, user)
     result = await db.execute(
         select(AgentLog).where(
             AgentLog.run_id == uuid.UUID(run_id)
@@ -371,12 +390,21 @@ async def get_run_logs(
 @router.post("/runs/{run_id}/analyze")
 async def analyze_run_logs(
     run_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_plan("pro")),
     db: AsyncSession = Depends(get_db),
 ):
+    # This endpoint spends the operator's system Gemini key. Two guards (audit M6):
+    #   1. Pro-plan only (via require_plan above) — shrinks the abuse surface.
+    #   2. Per-user daily cap so a single account can't drain operator LLM budget.
     from backend.models.agent_run import AgentLog
     from backend.models.profile import UserProfile
-    
+    from backend.services.rate_limits import default_limiter
+
+    _ok, _reason = default_limiter.can_apply(str(user.id), "analyze")
+    if not _ok:
+        raise HTTPException(429, detail=f"Analyze rate limit: {_reason}")
+
+    await _owned_run_or_404(db, run_id, user)
     result = await db.execute(
         select(AgentLog).where(
             AgentLog.run_id == uuid.UUID(run_id),
@@ -414,7 +442,8 @@ BAD rules (too vague — do NOT produce these):
 Output ONLY the rules, one per line, no numbering, no extra commentary."""
         response = model.generate_content(prompt)
         advice = response.text.strip()
-        
+        default_limiter.register_apply(str(user.id), "analyze")  # count toward daily cap
+
         # Save to profile
         prof_result = await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))
         profile = prof_result.scalar_one_or_none()

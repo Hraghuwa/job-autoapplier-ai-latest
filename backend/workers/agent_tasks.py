@@ -16,7 +16,7 @@ import uuid
 import json
 import traceback
 import threading
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 from celery import Task
 from celery.utils.log import get_task_logger
@@ -278,9 +278,19 @@ Return only the rules, one per line.""")
             added.append(rule)
     if not added:
         return advice
-    prefs["agent_custom_instructions"] = "\n".join(
-        part for part in [existing, "\n".join(added)] if part
-    ).strip()
+    # Audit M3: cap growth. Self-learning appends every run; without a bound the
+    # instructions blob grows forever, bloating every future prompt (cost + drift).
+    # Keep only the most recent MAX_RULES lines.
+    MAX_RULES = 25
+    merged = [ln.strip() for ln in (existing.splitlines() + added) if ln.strip()]
+    # de-dupe preserving order, then keep the last MAX_RULES
+    seen_rules: set = set()
+    deduped = []
+    for ln in merged:
+        if ln not in seen_rules:
+            seen_rules.add(ln)
+            deduped.append(ln)
+    prefs["agent_custom_instructions"] = "\n".join(deduped[-MAX_RULES:]).strip()
     profile.job_preferences = prefs
     flag_modified(profile, "job_preferences")
     session.commit()
@@ -786,6 +796,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
         # Note: No deepcopy needed because _build_config returns a new plain dict.
         import importlib
         config_snapshot = config.copy()
+        config_snapshot["_server_mode"] = True  # audit N1: server runs must quit Chrome, not detach
         config_snapshot["_stop_event"] = stop_event  # agents check this to honour Stop requests
         config_snapshot["current_run_id"] = run_id   # CLI agents use _should_stop() to look up stop state
         # Per-user chrome profile avoids SingletonLock collisions across concurrent users.
@@ -963,15 +974,30 @@ def check_schedules():
             if not schedule or not schedule.get("enabled"):
                 continue
                 
-            # Basic naive check: if the hour matches the cron hour (e.g. "0 9 * * *" -> 9)
-            # In a real app we'd use 'croniter', but for this demo a simple hour check works.
+            # Audit M4: use croniter for correct cron matching when available;
+            # fall back to the legacy hour-only check otherwise. Beat is assumed
+            # to call this ~hourly, so we match the cron against the current hour
+            # window. The per-day dedup below prevents double-fires either way.
             cron = schedule.get("cron", "0 9 * * *")
-            parts = cron.split(" ")
-            if len(parts) >= 2:
-                target_hour = parts[1]
-                if target_hour != "*" and str(datetime.now().hour) != target_hour:
-                    continue  # not time yet
-                    
+            now = datetime.now()
+            should_fire = None
+            try:
+                from croniter import croniter as _croniter
+                # True iff the cron's most-recent scheduled time falls within this hour.
+                prev = _croniter(cron, now).get_prev(datetime)
+                should_fire = (now - prev) < timedelta(hours=1)
+            except Exception:
+                should_fire = None  # croniter unavailable / bad expr → use fallback
+
+            if should_fire is None:
+                parts = cron.split(" ")
+                if len(parts) >= 2:
+                    target_hour = parts[1]
+                    if target_hour != "*" and str(now.hour) != target_hour:
+                        continue  # not time yet
+            elif not should_fire:
+                continue
+
             phases = schedule.get("phases", [])
             for phase in phases:
                 # To prevent running multiple times an hour, check if already ran today

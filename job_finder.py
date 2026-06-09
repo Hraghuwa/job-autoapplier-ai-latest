@@ -88,6 +88,9 @@ JOB_INDICATORS = [
     "naukri.com", "internshala.com", "unstop.com", "foundit.in",
     "indeed.com", "glassdoor.", "linkedin.com/jobs",
     "workindia.in", "apna.co", "iimjobs.com",
+    "arc.dev", "toptal.com", "gun.io", "yunojuno.com",
+    "upwork.com", "usebraintrust.com", "fiverr.com/pro",
+    "weworkremotely.com",
 ]
 
 
@@ -157,6 +160,14 @@ REMOTE_JOB_BOARDS = [
     # Common remote boards kept because they pair well with the above
     "weworkremotely.com", "remoteok.com", "justremote.co",
     "himalayas.app", "remote.co", "workingnomads.co",
+    # Remote dev-focused job boards
+    "arc.dev",
+]
+
+FREELANCE_PLATFORMS = [
+    # Freelance & contract marketplaces added per user request
+    "toptal.com", "gun.io", "yunojuno.com",
+    "upwork.com", "usebraintrust.com", "fiverr.com/pro",
 ]
 
 ATS_PLATFORMS = [
@@ -189,8 +200,8 @@ def build_search_queries(keywords, config):
     extra_sites = web_cfg.get("extra_sites", []) or []
 
     # Full list of job boards the user wants searched every run.
-    # Order: mainstream → remote → ATS → user-provided extras.
-    job_boards = MAINSTREAM_JOB_BOARDS + REMOTE_JOB_BOARDS + list(extra_sites)
+    # Order: mainstream → remote → freelance → ATS → user-provided extras.
+    job_boards = MAINSTREAM_JOB_BOARDS + REMOTE_JOB_BOARDS + FREELANCE_PLATFORMS + list(extra_sites)
 
     locations = config.get("locations") or ["Bangalore"]
     primary_loc = locations[0] if locations else ""

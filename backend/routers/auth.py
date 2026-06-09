@@ -33,18 +33,18 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_ctx.verify(plain, hashed)
 
 
-def create_token(subject: str, expires_delta: timedelta) -> str:
+def create_token(subject: str, expires_delta: timedelta, token_type: str = "access") -> str:
     expire = datetime.utcnow() + expires_delta
     return jwt.encode(
-        {"sub": subject, "exp": expire},
+        {"sub": subject, "exp": expire, "type": token_type},
         settings.secret_key,
         algorithm=settings.algorithm,
     )
 
 
 def create_tokens(user_id: str) -> TokenResponse:
-    access = create_token(user_id, timedelta(minutes=settings.access_token_expire_minutes))
-    refresh = create_token(user_id, timedelta(days=settings.refresh_token_expire_days))
+    access = create_token(user_id, timedelta(minutes=settings.access_token_expire_minutes), "access")
+    refresh = create_token(user_id, timedelta(days=settings.refresh_token_expire_days), "refresh")
     return TokenResponse(access_token=access, refresh_token=refresh)
 
 
@@ -115,6 +115,11 @@ async def refresh_token(body: RefreshRequest, db: AsyncSession = Depends(get_db)
     try:
         payload = jwt.decode(body.refresh_token, settings.secret_key, algorithms=[settings.algorithm])
         user_id: str = payload.get("sub")
+        # Audit M1: only a refresh token may be exchanged here. Tokens minted
+        # before this change have no "type" claim — accept them during rollout.
+        token_type = payload.get("type")
+        if token_type is not None and token_type != "refresh":
+            raise HTTPException(status_code=401, detail="Not a refresh token")
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 

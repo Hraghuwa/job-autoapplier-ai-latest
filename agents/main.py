@@ -160,12 +160,33 @@ def create_driver(headless=False):
 
 
 
+def _server_mode():
+    """True when running inside the SaaS worker (no human at the browser)."""
+    try:
+        from config import CONFIG as _C
+        if _C.get("_server_mode"):
+            return True
+    except Exception:
+        pass
+    return os.environ.get("JOBAGENT_SERVER_MODE") == "1"
+
+
 def safe_quit(driver):
     """
-    Never forcefully close the browser.
-    The user wants to see where the agent stopped or what it applied to.
-    The Chrome window stays open until the user manually closes it.
+    Local CLI (Layer A): never forcefully close the browser — the user wants to
+    see where the agent stopped or what it applied to.
+
+    Server (Layer B): there is no human at the browser, so leaving Chrome alive
+    leaks one process per run and eventually OOMs the box (audit N1). In server
+    mode we quit().
     """
+    if driver is not None and _server_mode():
+        try:
+            driver.quit()
+            print("  🧹 Browser closed (server mode).")
+        except Exception:
+            pass
+        return
     print("  🌐 Browser session preserved — window left open for review.")
 
 
