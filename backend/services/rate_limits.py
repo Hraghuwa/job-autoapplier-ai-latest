@@ -39,6 +39,7 @@ PLATFORM_DAILY_CAP: Dict[str, int] = {
     "unstop":      40,
     "web_search":  60,
     "form_fill":   30,
+    "analyze":     20,   # /agents/runs/{id}/analyze — caps operator LLM spend per user/day
 }
 
 WINDOW = timedelta(hours=24)
