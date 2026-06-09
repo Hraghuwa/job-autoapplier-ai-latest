@@ -786,6 +786,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
         # Note: No deepcopy needed because _build_config returns a new plain dict.
         import importlib
         config_snapshot = config.copy()
+        config_snapshot["_server_mode"] = True  # audit N1: server runs must quit Chrome, not detach
         config_snapshot["_stop_event"] = stop_event  # agents check this to honour Stop requests
         config_snapshot["current_run_id"] = run_id   # CLI agents use _should_stop() to look up stop state
         # Per-user chrome profile avoids SingletonLock collisions across concurrent users.
