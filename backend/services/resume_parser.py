@@ -71,7 +71,6 @@ async def save_and_parse_resume(
     elif "msword" in ctype:
         ext = ".doc"
     else:
-        ext = ".docx"
     file_path = os.path.join(user_dir, f"resume{ext}")
     with open(file_path, "wb") as f:
         f.write(content)

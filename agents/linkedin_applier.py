@@ -1347,7 +1347,9 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 print(f"  📊 External form {label}: {applied_count}/{max_jobs}\n")
                 try:
                     from backend.services.rate_limits import default_limiter
-                    default_limiter.register_apply(str(config.get("user_id", "")), "linkedin")
+                    _uid2 = str(config.get("user_id", ""))
+                    default_limiter.register_apply(_uid2, "linkedin")
+                    default_limiter.register_success(_uid2, "linkedin")  # reset consecutive-failure counter
                 except Exception:
                     pass
             else:
@@ -1359,7 +1361,9 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                     print(f"  📊 Progress: {applied_count}/{max_jobs} applications\n")
                     try:
                         from backend.services.rate_limits import default_limiter
-                        default_limiter.register_apply(str(config.get("user_id", "")), "linkedin")
+                        _uid2 = str(config.get("user_id", ""))
+                        default_limiter.register_apply(_uid2, "linkedin")
+                        default_limiter.register_success(_uid2, "linkedin")  # reset consecutive-failure counter
                     except Exception:
                         pass
                 else:
