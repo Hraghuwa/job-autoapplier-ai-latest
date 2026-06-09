@@ -2,7 +2,7 @@ import logging
 import secrets
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import validator
+from pydantic import field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -27,18 +27,19 @@ class Settings(BaseSettings):
     secret_key: str = ""
     algorithm: str = "HS256"
 
-    @validator("secret_key", pre=True, always=True)
-    def secret_key_must_be_set(cls, v, values):
+    @field_validator("secret_key", mode="before")
+    @classmethod
+    def secret_key_must_be_set(cls, v):
         if not v or v == "change-me-in-production":
             # Try to derive a stable key from FERNET_KEY so tokens survive
             # restarts even when SECRET_KEY is not explicitly set.
             # FERNET_KEY is already required for credential encryption, so it's
             # always present in production. Deriving from it gives stability
-            # without needing a second env var.
-            fernet_key = values.get("fernet_key") or ""
+            # without needing a second env var. (Read from the environment
+            # directly — in Pydantic v2 a before-validator can't see sibling
+            # fields, and FERNET_KEY is always env-provided in production.)
             import os as _os
-            fernet_env = _os.environ.get("FERNET_KEY", "")
-            seed = fernet_key or fernet_env
+            seed = _os.environ.get("FERNET_KEY", "")
             if seed:
                 import hashlib
                 derived = hashlib.sha256(f"jobagent-jwt-{seed}".encode()).hexdigest()

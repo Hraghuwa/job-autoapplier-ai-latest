@@ -87,6 +87,12 @@ def phase1_linkedin(driver):
     total = 0
     start = time.time()
 
+    for i, agent in enumerate(agents, 1):
+        remaining = max(0, int(PHASE_TIMEOUT - (time.time() - start)))
+        if remaining <= 0:
+            print("  ⏰ Phase 1 time budget exhausted — moving on.")
+            break
+
         if isinstance(agent, str):
             print(f"\n  {'▓' * 55}")
             print(f"  🔹 AGENT {i}/{len(agents)}: {agent}")
