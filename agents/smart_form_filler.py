@@ -788,9 +788,21 @@ def fill_checkboxes(driver, container=None):
 
 
 def upload_resume(driver, config, container=None):
-    """Upload resume PDF if a file input is found."""
+    """Upload resume PDF if a file input is found.
+
+    Audit M7: prefer the JD-tailored PDF when we have JD context. Internshala,
+    web-search, and form-fill all route their uploads through here, so wiring
+    the resolver at this chokepoint extends Phase E beyond LinkedIn/Wellfound.
+    resolve_resume_path falls back to the static PDF whenever JD text or the
+    tailoring context is missing, so this can never regress to "no upload".
+    """
     uploaded = False
     resume_path = config.get("resume_path", "")
+    try:
+        from backend.services.resume_resolver import resolve_resume_path
+        resume_path = resolve_resume_path(config, jd_text=config.get("_current_jd")) or resume_path
+    except Exception:
+        pass
     if not resume_path:
         return False
 
