@@ -115,8 +115,14 @@ def recover_stuck_runs() -> int:
 
     session = _sync_session()
     try:
+        # Audit H4: only fail 'queued' runs on boot. A 'running' run may be
+        # executing in a detached Celery worker that survived this web-process
+        # restart (ensure_worker_running spawns with start_new_session=True), so
+        # failing it here would fight the live worker and flap the status. The
+        # watchdog (_fail_stale_runs) handles genuinely-dead 'running' runs via
+        # log-recency, which does not race the worker.
         stuck = session.query(AgentRun).filter(
-            AgentRun.status.in_(["queued", "running"])
+            AgentRun.status == "queued"
         ).all()
         n = 0
         for run in stuck:
@@ -125,7 +131,7 @@ def recover_stuck_runs() -> int:
             n += 1
         if n:
             session.commit()
-            log.warning("Supervisor: recovered %d stuck runs from a previous process.", n)
+            log.warning("Supervisor: recovered %d stuck queued runs from a previous process.", n)
         return n
     except Exception as e:
         log.warning("Supervisor: stuck-run recovery failed (%s)", e)
