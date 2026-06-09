@@ -68,9 +68,12 @@ async def save_and_parse_resume(
         ext = ext_from_name
     elif "pdf" in ctype:
         ext = ".pdf"
+    elif "wordprocessingml" in ctype or "officedocument" in ctype:
+        ext = ".docx"
     elif "msword" in ctype:
         ext = ".doc"
     else:
+        ext = ".pdf"  # safe default — Gemini parsing only runs for .pdf anyway
     file_path = os.path.join(user_dir, f"resume{ext}")
     with open(file_path, "wb") as f:
         f.write(content)
