@@ -1,12 +1,28 @@
-# C2 / M5 — Concurrency migration plan (NOT yet implemented)
+# C2 / M5 — Concurrency migration (IMPLEMENTED on branch `c2-concurrency`)
 
-> **Status: design only.** This is the audit's rank-9 item. It is deliberately
-> NOT implemented in the remediation branch because it cannot be verified here:
-> there is no runnable Chrome/Redis/DB-with-data/LLM stack, and the test suite
-> (56 tests) exercises the resume pipeline + services — **none of the worker
-> runtime**. A blind rewrite would risk an unverifiable production regression,
-> which Phase 9 of the audit forbids. Implement this with a live stack + manual
-> end-to-end run per phase.
+> **Status: implemented; pending live end-to-end verification.** The subprocess
+> design below is now built (branch `c2-concurrency`). What IS verified here:
+> the stdout→event classifier is extracted and unit-tested (9 tests), the full
+> suite is green (65 passed), and the subprocess runner's setup/teardown path
+> (config load, sys.path, SQLite session factory, result-file write) runs
+> cleanly in a smoke test. What is NOT yet verified (no Chrome/Redis/LLM stack
+> in this environment): an actual phase driving a browser, live WS streaming,
+> Redis-based stop, and true concurrent runs. **Do a manual end-to-end run per
+> phase on a real stack before merging — see Acceptance below.** The legacy
+> in-process path is preserved behind `JOBAGENT_INPROC_PHASE=1` as an escape
+> hatch if the subprocess path misbehaves in production.
+
+## What shipped
+- `backend/workers/agent_tasks.py`: `classify_agent_line()` (pure, tested);
+  `_execute_subprocess()` (default) and `_execute_inproc()` (escape hatch);
+  `_run_phase_logic()` now orchestrates load/quota/status → executor → bookkeeping,
+  with a shared `_handle_line` classifier callback. The global `_config_lock`
+  and global `sys.stdout` swap are gone from the default path.
+- `agents/run_phase_subprocess.py`: runs one phase in its own interpreter; owns
+  the DB session factory, cookie-saver, and a Redis-fed stop event; writes
+  `{"applied": n}` to a result file.
+- `tests/career_pipeline/test_agent_line_classifier.py`: 9 tests pinning the
+  classifier (incl. the login_challenge-beats-error ordering).
 
 ## The problem (recap)
 `backend/workers/agent_tasks.py::_run_phase_logic`:

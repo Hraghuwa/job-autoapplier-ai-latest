@@ -396,7 +396,8 @@ Fixes applied and verified against the 56-test baseline (still green after every
 | H4 | ✅ done | boot recovery only fails `queued` runs; watchdog handles `running` (no worker race) |
 | M4 | ✅ done | `croniter`-based schedule matching w/ hour-check fallback; dep added |
 | M2 | ✅ mitigated | per-apply enforcement now comes from the persistent limiter (C3); appliers call `can_apply` before each apply. DB `_check_quota` remains the per-phase plan quota |
-| **C2/M5** | ⏳ **planned, not implemented** | Design in `docs/C2_CONCURRENCY_PLAN.md`. Deliberately not blind-rewritten — unverifiable without a live worker/Chrome/Redis stack; would violate Phase 9 (no unverified regressions) |
+| **C2/M5** | 🔶 **implemented on branch `c2-concurrency`; needs live end-to-end verify** | Subprocess-per-phase: dropped the global lock + global stdout swap; extracted+unit-tested the line classifier (65 tests green); legacy path kept behind `JOBAGENT_INPROC_PHASE=1`. Browser/WS/Redis-stop/concurrency still need a manual run on a real stack before merge — see `docs/C2_CONCURRENCY_PLAN.md` |
+| N2 (new) | 📝 noted | Latent: a 🚨 CAPTCHA line with no failure marker (❌/failed/error) is not classified as `login_challenge` — pre-existing in the original classifier, documented by a test. Low priority |
 | M8 | 📝 documented | localStorage JWT/refresh = XSS-exfil tradeoff; recommend httpOnly-cookie refresh + rotation (future) |
 | M9 | 📝 documented | WS token-in-URL → move to a post-connect auth message / single-use ticket (future, frontend+backend) |
 
