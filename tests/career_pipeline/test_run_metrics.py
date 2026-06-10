@@ -103,3 +103,53 @@ def test_accepts_objects_with_attributes_not_just_dicts():
         completed_at = datetime(2026, 6, 1, 9, 5)
     m = compute_metrics([Row()])
     assert m["platforms"]["linkedin"]["runs"] == 1
+
+
+# ── LLM usage aggregation (cost story) ───────────────────────────────────────
+from backend.services.run_metrics import compute_llm_metrics  # noqa: E402
+
+
+def _ai(provider="ollama", model="qwen2.5:7b-instruct", tokens=100, cost=0.0):
+    return {
+        "type": "llm:form_fill",
+        "input_data": {"provider": provider, "model": model,
+                       "prompt_tokens": tokens - 20, "output_tokens": 20},
+        "tokens_used": tokens,
+        "cost_estimate": cost,
+    }
+
+
+def test_llm_metrics_empty():
+    m = compute_llm_metrics([])
+    assert m["totals"] == {"calls": 0, "tokens": 0, "cost_usd": 0.0}
+    assert m["providers"] == {}
+
+
+def test_llm_metrics_groups_by_provider():
+    rows = [
+        _ai(provider="ollama", tokens=100, cost=0.0),
+        _ai(provider="ollama", tokens=50, cost=0.0),
+        _ai(provider="gemini", model="gemini-2.0-flash", tokens=2000, cost=0.0005),
+    ]
+    m = compute_llm_metrics(rows)
+    assert m["providers"]["ollama"]["calls"] == 2
+    assert m["providers"]["ollama"]["tokens"] == 150
+    assert m["providers"]["gemini"]["calls"] == 1
+    assert abs(m["totals"]["cost_usd"] - 0.0005) < 1e-9
+    assert m["totals"]["calls"] == 3
+
+
+def test_llm_metrics_tolerates_missing_fields():
+    m = compute_llm_metrics([{"type": "llm:writer"}])  # no input_data/tokens
+    assert m["totals"]["calls"] == 1
+    assert m["providers"]["unknown"]["tokens"] == 0
+
+
+def test_llm_metrics_accepts_orm_like_objects():
+    class Row:
+        type = "llm:writer"
+        input_data = {"provider": "groq", "model": "llama-3.1-8b-instant"}
+        tokens_used = 42
+        cost_estimate = 0.001
+    m = compute_llm_metrics([Row()])
+    assert m["providers"]["groq"]["tokens"] == 42
