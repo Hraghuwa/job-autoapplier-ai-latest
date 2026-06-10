@@ -1404,9 +1404,13 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                     except Exception:
                         pass
 
-            # Short delay between applications
-            delay = random.uniform(3, 8)
-            time.sleep(delay)
+            # Adaptive delay between applications — escalates after consecutive
+            # failures to dodge bot detection. Fail-open to a flat jittered wait.
+            try:
+                from backend.services.backoff import delay_for
+                delay_for(config, "linkedin")
+            except Exception:
+                time.sleep(random.uniform(3, 8))
 
         except StaleElementReferenceException:
             print(f"  [Retry] Card went stale, will re-find on next iteration")

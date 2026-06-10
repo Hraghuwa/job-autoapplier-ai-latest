@@ -144,7 +144,14 @@ def _wait_for_google_login(driver, max_wait_sec: int = 120):
 
 
 def random_delay(config):
-    """Random delay between applies to appear human."""
+    """Adaptive delay between applies — escalates after consecutive failures to
+    avoid bot detection (backend.services.backoff). Fail-open to the flat band."""
+    try:
+        from backend.services.backoff import delay_for
+        delay_for(config, "web_search")
+        return
+    except Exception:
+        pass
     delay_range = config.get("delay_between_applies_sec", (3, 8))
     time.sleep(random.uniform(*delay_range))
 
