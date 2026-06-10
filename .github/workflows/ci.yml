@@ -25,7 +25,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
+          # selenium is an agents-layer dep (requirements-agents.txt); tests
+          # that exercise the appliers' pure helpers import it. No browser
+          # is needed — import only.
+          pip install pytest selenium
 
       - name: Compile every backend + agent module (syntax gate)
         # compileall does NOT import, so it catches syntax/indentation errors
