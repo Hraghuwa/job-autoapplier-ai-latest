@@ -436,6 +436,18 @@ can't win. Built the decision engine, TDD:
 Parsimony in action: a SKIP costs one cheap JD analysis and saves the whole tailor+render+apply spend
 plus a slot of the ban-safety budget. Floor defaults to the user's onboarding `match_threshold`.
 Suite: 95 → **115**, all green; compile + import gates pass.
+
+### Skip-list cooldown iteration (2026-06-10, branch `skiplist-dedup`) — PLAN Phase G
+The tracker skipped applied jobs FOREVER (flat URL set), and `?utm=...` decoration created duplicate
+keys (double-applies). Built a time-windowed dedup, TDD:
+| Piece | What shipped |
+|---|---|
+| `backend/services/skiplist.py` | `normalize_job_key` (drops utm*/ref/fbclid/gclid/fragment/trailing-slash/case, KEEPS gh_jid etc.), `is_on_cooldown`, `should_skip`, `mark_applied`, `prune_expired`, `active_skip_keys`, and `SkipSet` (set-compatible `in`/`add`/`len` view). Pure, injected `now`, 21 tests. |
+| `agents/main.py` tracker | `get_applied_urls` now returns a `SkipSet` (cooldown-aware membership, legacy flat entries still skipped); `add_applied_urls` stamps a `{key: ts}` map and prunes expired. **No applier changes** — the existing `url in applied_urls` / `.add()` interface gains time-windowing transparently. Falls back to the legacy forever-set when the backend isn't importable (bare CLI). |
+
+Verified live: same job + different `utm` dedupes (one stamped key); unseen job not skipped; expired
+(>90d) jobs roll off → reposted roles become applyable again. Default cooldown 90 days.
+Suite: 115 → **136**, all green; compile + import gates pass.
 | M8 | 📝 documented | localStorage JWT/refresh = XSS-exfil tradeoff; recommend httpOnly-cookie refresh + rotation (future) |
 | M9 | 📝 documented | WS token-in-URL → move to a post-connect auth message / single-use ticket (future, frontend+backend) |
 
