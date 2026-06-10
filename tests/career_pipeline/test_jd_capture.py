@@ -57,3 +57,44 @@ def test_short_or_empty_body_returns_none():
 
 def test_driver_failure_returns_none():
     assert _capture_jd_text(ExplodingDriver(), {}) is None
+
+
+# ── _passes_fit_gate integration (smart_form_filler) ─────────────────────────
+from smart_form_filler import _passes_fit_gate  # noqa: E402
+
+
+def _gate_profile():
+    return {"skills": "python, fastapi", "years_of_experience": 2,
+            "experience": [{"role": "Eng", "bullets": [{"id": "b1", "text": "python fastapi"}]}]}
+
+
+def _llm_good(prompt, **kw):
+    return ('{"keywords":["python"],"must_haves":["python"],"nice_to_haves":[],'
+            '"seniority":"junior","archetype":"backend","red_flags":[]}')
+
+
+def _llm_unpaid(prompt, **kw):
+    return ('{"keywords":["python"],"must_haves":["python"],"nice_to_haves":[],'
+            '"seniority":"intern","archetype":"backend","red_flags":["unpaid"]}')
+
+
+def test_gate_allows_good_fit():
+    cfg = {"profile": _gate_profile(), "_jd_llm": _llm_good,
+           "_current_jd": "Python role. Must have python. Junior. " + "x" * 80}
+    assert _passes_fit_gate(FakeDriver("page"), cfg) is True
+
+
+def test_gate_blocks_unpaid():
+    cfg = {"profile": _gate_profile(), "_jd_llm": _llm_unpaid,
+           "_current_jd": "Unpaid python internship no stipend. " + "x" * 80}
+    assert _passes_fit_gate(FakeDriver("page"), cfg) is False
+
+
+def test_gate_fails_open_when_no_jd():
+    # FakeDriver body too short → no JD → should_apply fail-opens → gate True.
+    assert _passes_fit_gate(FakeDriver("hi"), {"profile": _gate_profile()}) is True
+
+
+def test_gate_fails_open_on_driver_error():
+    assert _passes_fit_gate(ExplodingDriver(), {"profile": _gate_profile(),
+                                                "_jd_llm": _llm_unpaid}) is True

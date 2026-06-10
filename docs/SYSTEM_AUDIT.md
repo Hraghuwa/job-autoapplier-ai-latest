@@ -422,6 +422,20 @@ Tokens/costs are ESTIMATES (consistent heuristic beats 3 fragile provider parser
 leak detection, not invoicing. Suite: 80 → **95**. All Phase-10 metrics from the brief are now measurable
 except user satisfaction (needs product instrumentation): success/failure rates ✅, latency ✅,
 token usage ✅, cost ✅, retry/challenge frequency ✅.
+
+### Agent-intelligence iteration (2026-06-10, branch `agent-intelligence`) — make the appliers THINK
+The PLAN's "match gate" (skip jobs below a fit floor) was specified but never built — agents applied to
+every title-search hit, burning the daily-apply budget, LLM tokens, and ban-risk on jobs the candidate
+can't win. Built the decision engine, TDD:
+| Piece | What shipped |
+|---|---|
+| `backend/services/fit_scorer.py` | `score_fit(jd_sig, profile, title, floor)` → `FitDecision(score, apply, vetoed, reasons, components)`. Weights: must-have coverage 55 / title match 25 / seniority fit 20; hard red flags (unpaid/scam/MLM/pay-to-apply) veto outright; soft flags penalise. Pure, fail-open, 10 tests. |
+| `backend/services/apply_decision.py` | `should_apply(config, jd_text, title)` — jd_analyser → fit_scorer; floor from `config['match_threshold']`; opt-out via `fit_gate_enabled=False`; fail-open everywhere. 6 tests. |
+| Wiring (end-to-end) | LinkedIn: gates at the apply point using the JD text it already scrapes. smart_form_filler.`walk_multi_step_form`: `_passes_fit_gate` covers internshala/workday/generic web-search (returns "skipped" sentinel; callers check `=="submitted"`). 4 integration tests. Skips print `⏭ Skipping (fit N/100): …` → classified as `skipped` → counted in /admin/metrics. |
+
+Parsimony in action: a SKIP costs one cheap JD analysis and saves the whole tailor+render+apply spend
+plus a slot of the ban-safety budget. Floor defaults to the user's onboarding `match_threshold`.
+Suite: 95 → **115**, all green; compile + import gates pass.
 | M8 | 📝 documented | localStorage JWT/refresh = XSS-exfil tradeoff; recommend httpOnly-cookie refresh + rotation (future) |
 | M9 | 📝 documented | WS token-in-URL → move to a post-connect auth message / single-use ticket (future, frontend+backend) |
 
