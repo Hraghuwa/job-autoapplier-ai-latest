@@ -385,8 +385,12 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                     # Always clean up: close extra tabs, go back to first
                     ensure_single_tab(driver)
 
-                # Short delay before next job
-                time.sleep(random.uniform(3, 8))
+                # Adaptive delay before next job — backs off after failures.
+                try:
+                    from backend.services.backoff import delay_for
+                    delay_for(config, "internshala")
+                except Exception:
+                    time.sleep(random.uniform(3, 8))
 
             # If no jobs applied on this page after page 2, skip keyword
             if keyword_applied == 0 and page >= 2:
