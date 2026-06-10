@@ -636,9 +636,14 @@ def classify_agent_line(line: str):
     if not line:
         return None
     ll = line.lower()
-    is_login_msg = ("login" in ll or any(m in ll for m in CHALLENGE_MARKERS))
+    has_challenge_marker = any(m in ll for m in CHALLENGE_MARKERS)
+    is_login_msg = ("login" in ll or has_challenge_marker)
     has_failure = ("❌" in line or "failed" in ll or "error" in ll)
-    is_login_blocked = has_failure and is_login_msg
+    # Audit N2: an explicit challenge marker (🚨 CAPTCHA, "security challenge",
+    # "solve it manually", …) is actionable on its own — other_platforms.py
+    # prints these WITHOUT a ❌. The bare word "login" still needs a failure
+    # marker so routine "Logging in..." lines don't spam login_challenge.
+    is_login_blocked = has_challenge_marker or (has_failure and is_login_msg)
     is_error = has_failure and not is_login_msg
 
     if "External form filled" in line or "✅ Applied" in line:

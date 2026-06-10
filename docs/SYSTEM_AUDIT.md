@@ -400,7 +400,16 @@ Fixes applied and verified against the 56-test baseline (still green after every
 | N2 (new) | 📝 noted | Latent: a 🚨 CAPTCHA line with no failure marker (❌/failed/error) is not classified as `login_challenge` — pre-existing in the original classifier, documented by a test. Low priority |
 | **C4 (new)** | ✅ fixed | **The backend could not import at all.** `backend/services/resume_parser.py` had an empty `else:` (dropped default-extension assignment) → `IndentationError` → `import backend.main` raised → every API request 500s / app won't boot. Was present on `main`. Fixed + added the missing DOCX MIME branch. Found by the new import gate. |
 | **C5 (new)** | ✅ fixed | `agents/run_all_phases.py::phase1_linkedin` was missing its `for i, agent in enumerate(...)` loop header (+`remaining` budget) → `IndentationError`, phase-1 multi-run entrypoint uncompilable. Was present on `main`. Restored the loop. Found by the syntax gate. |
-| **CI (new)** | ✅ added | `.github/workflows/ci.yml`: compile-all gate + `import backend.main` gate + `pytest` on every push/PR. Previously only the frontend was built (Vercel), so the C4/C5 syntax errors shipped to `main` unnoticed. |
+| **CI (new)** | ✅ added | `.github/workflows/ci.yml`: compile-all gate + `import backend.main` gate + `pytest` on every push/PR. Previously only the frontend was built (Vercel), so the C4/C5 syntax errors shipped to `main` unnoticed. First run caught **C6**: `reportlab` was an undeclared prod dependency (resume_pdf.py imports it; Railway deploys would crash). Fixed. |
+
+### Ship-gaps iteration (2026-06-10, branch `ship-gaps`) — closing the functional gaps
+| Gap | Status | What shipped |
+|---|---|---|
+| N2 | ✅ fixed (TDD) | Bare 🚨/CAPTCHA/"solve it manually" lines (no ❌) now classify as `login_challenge`; routine "Logging in..." lines still don't. 3 new classifier tests. |
+| Observability (§6c proposal) | ✅ built (TDD) | `backend/services/run_metrics.compute_metrics` — pure, 8 unit tests: per-platform run/apply success rates, latency p50/p95, login-challenge counts — exposed at `GET /admin/metrics?days=N` (admin-only). Cost/token capture in llm_router remains the documented next step. |
+| M7 follow-up | ✅ wired (TDD) | `_capture_jd_text` in smart_form_filler (5 tests): explicit `_current_jd` wins, else the visible page body at upload time is the JD context (≥80 chars, 8k cap, never raises). Used by `upload_resume` and both google_form_filler fill paths → tailored PDFs now actually trigger on internshala/web-search/form-fill. |
+
+Test suite: 56 (baseline) → 65 (C2) → **80** (ship-gaps). All green.
 | M8 | 📝 documented | localStorage JWT/refresh = XSS-exfil tradeoff; recommend httpOnly-cookie refresh + rotation (future) |
 | M9 | 📝 documented | WS token-in-URL → move to a post-connect auth message / single-use ticket (future, frontend+backend) |
 
