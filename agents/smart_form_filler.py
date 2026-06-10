@@ -787,6 +787,30 @@ def fill_checkboxes(driver, container=None):
     return filled
 
 
+def _capture_jd_text(driver, config):
+    """Return the JD text for the page being applied to, or None.
+
+    Priority: an explicitly-set config['_current_jd'] (an applier that scraped
+    the real JD) wins; otherwise the current page's visible body text serves as
+    JD context — at upload time the applier is ON the job/application page, so
+    its text is the best available signature (jd_analyser truncates to 8k and
+    filters hallucinated must-haves against this same text, so page chrome is
+    tolerated). Pages too short to carry a JD signal (< 80 chars) and any
+    driver failure return None, which keeps the static-PDF fallback.
+    """
+    explicit = (config or {}).get("_current_jd")
+    if explicit:
+        return explicit
+    try:
+        body = driver.find_element(By.TAG_NAME, "body").text or ""
+        body = body.strip()
+        if len(body) < 80:
+            return None
+        return body[:8000]
+    except Exception:
+        return None
+
+
 def upload_resume(driver, config, container=None):
     """Upload resume PDF if a file input is found.
 
@@ -800,7 +824,8 @@ def upload_resume(driver, config, container=None):
     resume_path = config.get("resume_path", "")
     try:
         from backend.services.resume_resolver import resolve_resume_path
-        resume_path = resolve_resume_path(config, jd_text=config.get("_current_jd")) or resume_path
+        jd_text = _capture_jd_text(driver, config)
+        resume_path = resolve_resume_path(config, jd_text=jd_text) or resume_path
     except Exception:
         pass
     if not resume_path:
