@@ -811,6 +811,36 @@ def _capture_jd_text(driver, config):
         return None
 
 
+def _passes_fit_gate(driver, config):
+    """Return True if the agent should proceed to apply, False to skip.
+
+    Consults backend.services.apply_decision.should_apply with the page's JD
+    text + the job title. Fail-OPEN: missing backend, no JD text, or any error
+    → True (apply), so the gate can only prevent waste, never block a working
+    flow. Prints a '⏭ Skipping (fit ...)' line on veto so the worker's stdout
+    classifier records a skipped event with the reason.
+    """
+    try:
+        from backend.services.apply_decision import should_apply
+    except Exception:
+        return True  # standalone/CLI without backend on path → no gate
+    try:
+        jd = _capture_jd_text(driver, config)
+        title = (config or {}).get("_current_title") or ""
+        if not title:
+            try:
+                title = (driver.title or "").strip()
+            except Exception:
+                title = ""
+        decision = should_apply(config or {}, jd_text=jd, title=title or None)
+        if not decision.apply:
+            print(f"    ⏭ Skipping (fit {decision.score}/100): {decision.reasons[-1]}")
+            return False
+        return True
+    except Exception:
+        return True
+
+
 def upload_resume(driver, config, container=None):
     """Upload resume PDF if a file input is found.
 
@@ -887,8 +917,14 @@ def walk_multi_step_form(driver, config, max_steps=10):
     """
     Walk through a multi-step form (Next → Next → ... → Submit).
     Works for any platform that has multi-step application forms.
-    Returns: 'submitted', 'stuck', or 'closed'
+    Returns: 'submitted', 'stuck', 'closed', or 'skipped' (fit gate vetoed).
     """
+    # ── Fit gate (PLAN match gate): internshala / workday / generic web-search
+    # all funnel through here, so one check stops the agent wasting an apply on
+    # a job the candidate can't win or shouldn't take. Fail-open on any error.
+    if not _passes_fit_gate(driver, config):
+        return "skipped"
+
     for step in range(max_steps):
         time.sleep(2)
 

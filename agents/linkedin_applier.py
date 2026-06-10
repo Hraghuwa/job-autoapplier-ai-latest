@@ -1237,6 +1237,21 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 except Exception:
                     pass  # description not found, don't skip
 
+            # ── Fit gate: think before spending an application (PLAN match gate) ──
+            # We have the JD text + title here, just before clicking Apply. Skip
+            # jobs the candidate can't win (low must-have coverage) or shouldn't
+            # take (unpaid/scam red flags) — saves the daily-apply budget, LLM
+            # tailoring cost, and ban-risk. Fail-open: any error → apply as before.
+            try:
+                from backend.services.apply_decision import should_apply
+                _decision = should_apply(config, jd_text=config.get("current_jd_text"),
+                                         title=job_title)
+                if not _decision.apply:
+                    print(f"  ⏭️  Skipping (fit {_decision.score}/100): {_decision.reasons[-1]}")
+                    continue
+            except Exception:
+                pass  # gate must never block a working apply
+
             # Look for Easy Apply button in the right panel / detail area
             easy_apply_btn = None
 
