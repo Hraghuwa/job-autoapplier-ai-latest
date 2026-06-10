@@ -21,3 +21,4 @@ networkx>=3.0
 pyotp
 python-dotenv
 croniter>=2.0.0  # accurate cron matching for scheduled agent runs (audit M4)
+reportlab>=4.0  # ATS-safe tailored-resume PDF rendering (backend/services/resume_pdf.py)
