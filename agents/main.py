@@ -62,15 +62,50 @@ def save_tracker(tracker):
             # Sequential execution (Fix 6) makes this safe in practice
             json.dump(tracker, f, indent=2)
 
+def _skiplist():
+    """Import the cooldown skiplist when the backend is on the path; None for
+    the bare CLI (then we fall back to the legacy forever-skip set)."""
+    try:
+        from backend.services import skiplist
+        return skiplist
+    except Exception:
+        return None
+
+
 def get_applied_urls(tracker):
-    return set(tracker.get("applied_urls", []))
+    """Return a skip view the appliers test with `url in applied_urls`.
+
+    PLAN Phase G: skip a job only while it's within the cooldown window (default
+    90d) — a role reposted later becomes applyable again — and dedupe on a
+    normalized key so `?utm=...` noise can't create a double-apply. Old flat
+    `applied_urls` entries are treated as legacy keys (still skipped). Falls
+    back to the legacy set when the backend isn't importable (bare CLI).
+    """
+    sl = _skiplist()
+    flat = tracker.get("applied_urls", []) or []
+    if sl is None:
+        return set(flat)
+    legacy = {sl.normalize_job_key(u) for u in flat if u}
+    return sl.SkipSet(tracker.get("applied_at") or {}, datetime.now(),
+                      legacy_keys=legacy)
 
 def add_applied_urls(tracker, new_urls):
+    """Persist applied jobs: stamp each into the cooldown map (and keep the flat
+    list for back-compat/inspection). Prunes expired entries so it can't grow
+    unbounded."""
+    sl = _skiplist()
     existing = set(tracker.get("applied_urls", []))
     for url in new_urls:
         if url and url not in existing:
             tracker.setdefault("applied_urls", []).append(url)
             existing.add(url)
+    if sl is not None:
+        now = datetime.now()
+        amap = tracker.get("applied_at") or {}
+        for url in new_urls:
+            if url:
+                amap = sl.mark_applied(amap, url, now)
+        tracker["applied_at"] = sl.prune_expired(amap, now)
     save_tracker(tracker)
 
 
