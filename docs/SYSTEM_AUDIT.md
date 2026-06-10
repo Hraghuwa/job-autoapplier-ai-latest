@@ -409,7 +409,19 @@ Fixes applied and verified against the 56-test baseline (still green after every
 | Observability (§6c proposal) | ✅ built (TDD) | `backend/services/run_metrics.compute_metrics` — pure, 8 unit tests: per-platform run/apply success rates, latency p50/p95, login-challenge counts — exposed at `GET /admin/metrics?days=N` (admin-only). Cost/token capture in llm_router remains the documented next step. |
 | M7 follow-up | ✅ wired (TDD) | `_capture_jd_text` in smart_form_filler (5 tests): explicit `_current_jd` wins, else the visible page body at upload time is the JD context (≥80 chars, 8k cap, never raises). Used by `upload_resume` and both google_form_filler fill paths → tailored PDFs now actually trigger on internshala/web-search/form-fill. |
 
-Test suite: 56 (baseline) → 65 (C2) → **80** (ship-gaps). All green.
+Test suite: 56 (baseline) → 65 (C2) → 80 (ship-gaps). All green.
+
+### LLM cost-capture iteration (2026-06-10, branch `llm-cost-capture`) — metrics story complete
+| Piece | What shipped |
+|---|---|
+| `backend/services/llm_usage.py` | `estimate_tokens` (~4 chars/token), `estimate_cost` (per-1M pricing table; local/unknown → $0), `record_usage` → ai_requests row (`type='llm:<role>'`). Never raises; skips when no user_id (CLI runs). 11 tests incl. sqlite round-trip + broken-factory. |
+| `llm_router.generate` hook | records provider/model/token-estimates/latency after every successful provider call via `_record_usage_safe` (guarded import → standalone CLI no-ops; sink failure can't break generate — both tested). |
+| `run_metrics.compute_llm_metrics` | pure per-provider/per-model aggregation (calls, tokens, cost_usd); 4 tests. Surfaced as the `llm` section of `GET /admin/metrics`. |
+
+Tokens/costs are ESTIMATES (consistent heuristic beats 3 fragile provider parsers) — trend lines and
+leak detection, not invoicing. Suite: 80 → **95**. All Phase-10 metrics from the brief are now measurable
+except user satisfaction (needs product instrumentation): success/failure rates ✅, latency ✅,
+token usage ✅, cost ✅, retry/challenge frequency ✅.
 | M8 | 📝 documented | localStorage JWT/refresh = XSS-exfil tradeoff; recommend httpOnly-cookie refresh + rotation (future) |
 | M9 | 📝 documented | WS token-in-URL → move to a post-connect auth message / single-use ticket (future, frontend+backend) |
 
