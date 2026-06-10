@@ -554,8 +554,13 @@ def fill_modal_fields(driver, config):
             try:
                 val = (ta.get_attribute("value") or "").strip()
                 if not val:
-                    ta.send_keys(config.get("cover_letter",
-                        "I am excited to apply for this opportunity and believe my skills align well with the role."))
+                    try:
+                        from backend.services.cover_note import resolve_cover_note
+                        _ln_note = resolve_cover_note(config)
+                    except Exception:
+                        _ln_note = config.get("cover_letter", "")
+                    ta.send_keys(_ln_note or
+                        "I am excited to apply for this opportunity and believe my skills align well with the role.")
                     filled_something = True
                     print("    [Fill] Cover letter / text area")
             except:
@@ -1249,6 +1254,15 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 if not _decision.apply:
                     print(f"  ⏭️  Skipping (fit {_decision.score}/100): {_decision.reasons[-1]}")
                     continue
+                # Applying — tailor the cover note once for this job (fail-open).
+                try:
+                    from backend.services.cover_note import generate as _gen_note
+                    _note = _gen_note(config.get("profile") or {},
+                                      jd_text=config.get("current_jd_text"), config=config)
+                    if _note:
+                        config["_tailored_cover_note"] = _note
+                except Exception:
+                    pass
             except Exception:
                 pass  # gate must never block a working apply
 
