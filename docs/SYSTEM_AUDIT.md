@@ -460,6 +460,19 @@ Every "why this role / motivation / cover letter" field was filled with the same
 Verified live: `resolve_cover_note` returns the tailored note when set, static otherwise. One generation
 per application reuses across all "why" fields → no extra LLM cost per field.
 Suite: 136 → **146**, all green; compile + import gates pass.
+
+### Adaptive backoff (2026-06-11, branch `adaptive-backoff`) — ban-aware pacing
+The appliers slept `random.uniform(3, 8)` between applies regardless of how the run was going — and a
+run that just hit several failures (tripped captcha / changed form) is exactly when hammering the
+platform gets the account flagged. Built adaptive pacing, TDD:
+| Piece | What shipped |
+|---|---|
+| `backend/services/backoff.py` | `next_delay(base_range, consecutive_failures, rng)` = jittered base × 1.8^failures, capped 120s; `polite_sleep` (injectable sleep, never raises); `delay_for(config, platform)` reads the live per-(user,platform) consecutive-failure count from the rate limiter and sleeps. Pure, 9 tests (monotonic curve, cap, jitter bounds, bad-input tolerance). |
+| Wiring | The 3 inter-apply sleeps (LinkedIn, internshala, web-search `random_delay`) now call `delay_for`, fail-open to the old flat band. Healthy run ≈ unchanged (factor 1 at 0 failures); a struggling run backs off automatically. |
+
+Verified live: curve 6→10.8→19.4→35→63s by failure count, caps at 120s; `delay_for` after 3 real
+limiter failures → 35s. Ties the consecutive-failure signal (the rate limiter already tracks) to actual
+pacing. Suite: 146 → **155**, all green; compile + import gates pass.
 | M8 | 📝 documented | localStorage JWT/refresh = XSS-exfil tradeoff; recommend httpOnly-cookie refresh + rotation (future) |
 | M9 | 📝 documented | WS token-in-URL → move to a post-connect auth message / single-use ticket (future, frontend+backend) |
 
