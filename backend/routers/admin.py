@@ -117,3 +117,41 @@ async def platform_health(admin: User = Depends(require_admin), db: AsyncSession
         total = h["completed"] + h["failed"]
         h["success_rate"] = round(h["completed"] / total * 100 if total else 0, 1)
     return health
+
+
+@router.get("/metrics")
+async def metrics(
+    days: int = 30,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Observability snapshot (audit §6c): per-platform success rates, apply
+    volume, latency p50/p95, and login-challenge counts over the last `days`.
+    The math lives in services/run_metrics.compute_metrics (pure + unit-tested);
+    this endpoint just feeds it rows.
+    """
+    from datetime import datetime, timedelta
+    from backend.models.agent_run import AgentLog
+    from backend.services.run_metrics import compute_metrics
+
+    days = max(1, min(int(days or 30), 365))
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    runs_res = await db.execute(
+        select(AgentRun).where(AgentRun.started_at >= cutoff)
+    )
+    runs = runs_res.scalars().all()
+
+    # login_challenge counts per platform, joined through the run.
+    ch_res = await db.execute(
+        select(AgentRun.platform, func.count())
+        .join(AgentLog, AgentLog.run_id == AgentRun.id)
+        .where(AgentLog.event_type == "login_challenge",
+               AgentRun.started_at >= cutoff)
+        .group_by(AgentRun.platform)
+    )
+    challenge_counts = {str(p or "unknown"): int(c) for p, c in ch_res.all()}
+
+    out = compute_metrics(runs, challenge_counts=challenge_counts)
+    out["window_days"] = days
+    return out
