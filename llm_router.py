@@ -162,27 +162,63 @@ def generate(
     order = tuple(order_str.split(",")) if order_str else DEFAULT_ORDER[role]
     models = MODELS[role]
 
+    import time as _time
+    started = _time.time()
+    user_id = config.get("user_id")
+
     for provider in order:
         if provider == "ollama":
             if not _ollama_reachable():
                 continue
             out = _call_ollama(models["ollama"], prompt, max_tokens, temperature)
-            if out:
-                return out
         elif provider == "groq":
             if not groq_key:
                 continue
             out = _call_groq(models["groq"], prompt, max_tokens, temperature, groq_key)
-            if out:
-                return out
         elif provider == "gemini":
             if not gemini_key:
                 continue
             out = _call_gemini(models["gemini"], prompt, gemini_key)
-            if out:
-                return out
+        else:
+            continue
+
+        if out:
+            # Observability: record token/cost estimates to ai_requests.
+            # Best-effort and isolated — a broken sink must never break the
+            # apply pipeline (see backend/services/llm_usage.py).
+            try:
+                _record_usage_safe(
+                    provider=provider,
+                    model=models[provider],
+                    role=role,
+                    prompt_tokens=_estimate_tokens(prompt),
+                    output_tokens=_estimate_tokens(out),
+                    latency_ms=int((_time.time() - started) * 1000),
+                    user_id=str(user_id) if user_id else None,
+                )
+            except Exception:
+                pass
+            return out
 
     return None
+
+
+def _estimate_tokens(text: Optional[str]) -> int:
+    """~4 chars/token; kept local so the CLI works without the backend package."""
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+def _record_usage_safe(**kwargs) -> bool:
+    """Forward to backend.services.llm_usage.record_usage when the backend
+    package is importable (server/worker/subprocess); silently no-op for the
+    standalone CLI. Module-level so tests can monkeypatch it."""
+    try:
+        from backend.services.llm_usage import record_usage
+        return record_usage(**kwargs)
+    except Exception:
+        return False
 
 
 def reset_clients() -> None:
