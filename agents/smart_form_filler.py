@@ -15,6 +15,16 @@ from selenium.common.exceptions import (
 )
 
 
+def _cover_note(config):
+    """The cover/why text to fill: JD-tailored note when available, else the
+    static one. Fail-open to the raw config value if the backend isn't on path."""
+    try:
+        from backend.services.cover_note import resolve_cover_note
+        return resolve_cover_note(config)
+    except Exception:
+        return (config or {}).get("cover_letter", "")
+
+
 def try_click(driver, element):
     """Try multiple methods to click an element."""
     try:
@@ -236,7 +246,7 @@ def _smart_text_answer(combined, config):
     # ── Motivation / Why questions — use saved cover letter or skip ──
     if any(w in c for w in ["why do you want", "why are you", "motivation", "interest in",
                              "why this", "why should we", "what excites"]):
-        return (config.get("cover_letter") or _p("cover_letter", "motivation", "why_this_role"))
+        return (_cover_note(config) or _p("cover_letter", "motivation", "why_this_role"))
 
     # ── Where did you hear about us ──
     if any(w in c for w in ["how did you hear", "where did you find", "source", "referral",
@@ -353,7 +363,7 @@ def _smart_textarea_answer(combined, config):
     profile name + current role rather than making up a fake bio.
     """
     profile = config.get("profile", {}) or {}
-    cover_letter = (config.get("cover_letter") or "").strip()
+    cover_letter = (_cover_note(config) or "").strip()
     bio = (profile.get("bio") or profile.get("about_me") or "").strip()
     c = (combined or "").lower()
 
@@ -527,7 +537,7 @@ def fill_textareas(driver, config, container=None):
     """Fill textarea fields — analyze what's being asked first."""
     filled = False
     root = container or driver
-    cover_letter = config.get("cover_letter", "")
+    cover_letter = _cover_note(config)
     profile = config.get("profile", {})
 
     try:
@@ -836,9 +846,26 @@ def _passes_fit_gate(driver, config):
         if not decision.apply:
             print(f"    ⏭ Skipping (fit {decision.score}/100): {decision.reasons[-1]}")
             return False
+        # We're going to apply — tailor the cover note ONCE for this job and
+        # stash it so every "why this role" field reuses it (fail-open inside).
+        _prepare_cover_note(config, jd)
         return True
     except Exception:
         return True
+
+
+def _prepare_cover_note(config, jd_text):
+    """Generate a JD-tailored cover note once per application → config[
+    '_tailored_cover_note']. Best-effort; leaves the static note in place on
+    any failure."""
+    try:
+        from backend.services.cover_note import generate
+        note = generate((config or {}).get("profile") or {}, jd_text=jd_text,
+                        config=config or {})
+        if note:
+            config["_tailored_cover_note"] = note
+    except Exception:
+        pass
 
 
 def upload_resume(driver, config, container=None):

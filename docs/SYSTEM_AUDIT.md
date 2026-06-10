@@ -448,6 +448,18 @@ keys (double-applies). Built a time-windowed dedup, TDD:
 Verified live: same job + different `utm` dedupes (one stamped key); unseen job not skipped; expired
 (>90d) jobs roll off → reposted roles become applyable again. Default cooldown 90 days.
 Suite: 115 → **136**, all green; compile + import gates pass.
+
+### JD-aware cover notes (2026-06-11, branch `cover-note`) — personalised outreach
+Every "why this role / motivation / cover letter" field was filled with the same static
+`config['cover_letter']` regardless of the job. Built per-JD tailoring, TDD:
+| Piece | What shipped |
+|---|---|
+| `backend/services/cover_note.py` | `generate(profile, jd_text, config, llm)` — one short paragraph via llm_router *writer* role; prompt constrains it to profile facts only (no invented experience); length-capped (700). STRICT fail-open: no JD / empty / error / garbage profile → static note (config → profile → ""). `resolve_cover_note(config)` = tailored-if-present-else-static. Pure, 10 tests. |
+| Wiring (end-to-end) | Generated ONCE per application when the fit gate captures the JD (smart_form_filler `_prepare_cover_note`; LinkedIn in its gate block). Every cover read now goes through `resolve_cover_note` (`_cover_note` in smart_form_filler ×3; LinkedIn textarea). Fail-open: backend not on path → raw static value. |
+
+Verified live: `resolve_cover_note` returns the tailored note when set, static otherwise. One generation
+per application reuses across all "why" fields → no extra LLM cost per field.
+Suite: 136 → **146**, all green; compile + import gates pass.
 | M8 | 📝 documented | localStorage JWT/refresh = XSS-exfil tradeoff; recommend httpOnly-cookie refresh + rotation (future) |
 | M9 | 📝 documented | WS token-in-URL → move to a post-connect auth message / single-use ticket (future, frontend+backend) |
 
