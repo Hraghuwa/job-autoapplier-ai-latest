@@ -114,3 +114,39 @@ def compute_metrics(
         b["login_challenges"] = int(challenge_counts.get(platform, 0))
 
     return {"platforms": per, "totals": totals}
+
+
+def compute_llm_metrics(ai_rows: Iterable[Any]) -> Dict[str, Any]:
+    """Aggregate ai_requests rows (type 'llm:*') into per-provider totals.
+
+    Pure, like compute_metrics. Token counts are estimates (see llm_usage);
+    cost_usd is approximate — trend lines and leak detection, not invoicing.
+    """
+    providers: Dict[str, Dict[str, Any]] = {}
+    totals = {"calls": 0, "tokens": 0, "cost_usd": 0.0}
+
+    for r in ai_rows:
+        meta = _get(r, "input_data") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        provider = str(meta.get("provider") or "unknown")
+        model = str(meta.get("model") or "unknown")
+        tokens = int(_get(r, "tokens_used") or 0)
+        cost = float(_get(r, "cost_estimate") or 0.0)
+
+        b = providers.setdefault(provider, {
+            "calls": 0, "tokens": 0, "cost_usd": 0.0, "models": {},
+        })
+        b["calls"] += 1
+        b["tokens"] += tokens
+        b["cost_usd"] += cost
+        m = b["models"].setdefault(model, {"calls": 0, "tokens": 0, "cost_usd": 0.0})
+        m["calls"] += 1
+        m["tokens"] += tokens
+        m["cost_usd"] += cost
+
+        totals["calls"] += 1
+        totals["tokens"] += tokens
+        totals["cost_usd"] += cost
+
+    return {"providers": providers, "totals": totals}

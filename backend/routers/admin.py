@@ -153,5 +153,14 @@ async def metrics(
     challenge_counts = {str(p or "unknown"): int(c) for p, c in ch_res.all()}
 
     out = compute_metrics(runs, challenge_counts=challenge_counts)
+
+    # LLM usage/cost (rows written by llm_router → llm_usage on every call).
+    from backend.models.resume import AIRequest
+    from backend.services.run_metrics import compute_llm_metrics
+    ai_res = await db.execute(
+        select(AIRequest).where(AIRequest.created_at >= cutoff,
+                                AIRequest.type.like("llm:%"))
+    )
+    out["llm"] = compute_llm_metrics(ai_res.scalars().all())
     out["window_days"] = days
     return out
