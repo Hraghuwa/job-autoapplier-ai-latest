@@ -1,0 +1,45 @@
+name: CI
+
+# Backend test + import gate. Vercel only builds the frontend, so before this
+# nothing caught Python syntax/import errors — a broken `else:` in
+# resume_parser.py shipped to main and made the whole API fail to import
+# (audit follow-up). This workflow makes that impossible to merge again.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Compile every backend + agent module (syntax gate)
+        # compileall does NOT import, so it catches syntax/indentation errors
+        # without needing the browser deps (selenium etc.) installed.
+        run: python -m compileall -q backend agents
+
+      - name: Import the FastAPI app (import gate)
+        run: python -c "import backend.main; print('backend.main imports OK')"
+
+      - name: Run tests
+        env:
+          # A throwaway Fernet key so crypto_service can initialise in CI.
+          # Generated per-run; never a real secret.
+          FERNET_KEY: ""
+        run: |
+          export FERNET_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+          python -m pytest tests/ -q
