@@ -46,10 +46,24 @@ def test_captcha_with_failure_marker_is_login_challenge():
     assert res["platform_hint"] == "naukri"
 
 
-def test_bare_captcha_without_failure_marker_is_not_classified():
-    # Documents a latent gap (out of scope for the C2 refactor, which preserves
-    # behaviour): a 🚨 CAPTCHA line with no failure marker emits no event.
-    assert classify_agent_line("🚨 CAPTCHA detected") is None
+def test_bare_captcha_without_failure_marker_is_login_challenge():
+    # Audit N2 fix: other_platforms.py prints 🚨-prefixed CAPTCHA lines with NO
+    # ❌/failed/error marker. Those must still surface as login_challenge so the
+    # user gets the "solve it manually" prompt instead of silence.
+    res = classify_agent_line("🚨 CAPTCHA detected on naukri")
+    assert res["category"] == "login_challenge"
+    assert res["platform_hint"] == "naukri"
+
+
+def test_bare_security_challenge_is_login_challenge():
+    res = classify_agent_line("Security challenge detected — solve it manually in the window")
+    assert res["category"] == "login_challenge"
+
+
+def test_plain_login_word_without_failure_is_not_challenge():
+    # "login" alone (e.g. "Logging in...") must NOT spam login_challenge —
+    # only explicit challenge markers or login+failure do.
+    assert classify_agent_line("[LinkedIn] 🔐 Initializing login...") is None
 
 
 def test_generic_error_without_login_context():

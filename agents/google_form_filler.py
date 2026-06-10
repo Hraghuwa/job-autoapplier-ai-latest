@@ -37,13 +37,19 @@ from selenium.common.exceptions import (
 )
 
 
-def _resolved_resume_path(config):
+def _resolved_resume_path(config, driver=None):
     """Return the JD-tailored PDF when we have JD context, else the static one
-    (audit M7). Never raises — falls back to config['resume_path']."""
+    (audit M7). JD context = explicit config['_current_jd'], or the visible
+    page text when a driver is supplied (we're on the application page at fill
+    time). Never raises — falls back to config['resume_path']."""
     static = config.get("resume_path", "")
     try:
         from backend.services.resume_resolver import resolve_resume_path
-        return resolve_resume_path(config, jd_text=config.get("_current_jd")) or static
+        jd_text = config.get("_current_jd")
+        if not jd_text and driver is not None:
+            from smart_form_filler import _capture_jd_text
+            jd_text = _capture_jd_text(driver, config)
+        return resolve_resume_path(config, jd_text=jd_text) or static
     except Exception:
         return static
 
@@ -248,7 +254,7 @@ def fill_google_form(driver, config):
     """Auto-fill a Google Form with profile data and upload resume."""
     print("    📝 [GoogleForm] Auto-filling...")
     filled_count = 0
-    resume_path = _resolved_resume_path(config)
+    resume_path = _resolved_resume_path(config, driver)
 
     try:
         time.sleep(2)
@@ -582,7 +588,7 @@ def fill_web_form(driver, config):
     print("    📝 [WebForm] Auto-filling...")
     filled_count = 0
     profile = config.get("profile", {})
-    resume_path = _resolved_resume_path(config)
+    resume_path = _resolved_resume_path(config, driver)
 
     # ── ATS-specific direct field mapping by name/id attribute ──
     # Values come STRICTLY from the logged-in user's profile. No hardcoded
