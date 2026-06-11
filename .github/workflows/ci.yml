@@ -21,6 +21,12 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # Chrome so the live-DOM tests (tests/browser/) actually run in CI, not
+      # just skip. The conftest skips gracefully if this ever fails, so CI stays
+      # green regardless.
+      - uses: browser-actions/setup-chrome@v1
+        continue-on-error: true
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
