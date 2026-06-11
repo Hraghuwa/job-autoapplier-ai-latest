@@ -40,65 +40,101 @@ def try_click(driver, element):
     return False
 
 
+def _kw_in_label(kw, combined):
+    """Match a rule keyword against a field label WITHOUT substring false
+    positives. The naive `kw in combined` filled the "Full Name" field with the
+    last name because the keyword 'lname' is a substring of 'fullname'. Now:
+    multi-word keywords match as a phrase; single-word keywords must match a
+    whole word/token. Underscores/hyphens are normalised to spaces on both sides.
+    """
+    k = re.sub(r"[_\-]+", " ", str(kw).lower()).strip()
+    if not k:
+        return False
+    c = re.sub(r"[_\-]+", " ", str(combined).lower())
+    if " " in k:
+        return k in c
+    return k in set(re.split(r"[^a-z0-9]+", c))
+
+
 def _get_field_label(driver, element):
-    """Extract the label/context for a form field from all available sources."""
-    parts = []
+    """Extract the label/context for a form field.
+
+    A field can carry an AUTHORITATIVE label (an explicit <label for>, aria-label,
+    placeholder, or wrapping <label>). When one exists we use ONLY those + the
+    field-local name/id — never the document-order fallbacks, which previously
+    leaked the *previous* field's label (e.g. `./preceding::label[1]`) and filled
+    email/phone with the candidate's name. The greedy fallbacks run only for
+    truly label-less forms, and even then stay scoped to the field's own
+    container.
+    """
+    strong = []   # authoritative, field-owned labels
+    weak = []     # name/id — safe local disambiguators
 
     # 1. Explicit <label for="id">
     inp_id = element.get_attribute("id") or ""
     if inp_id:
         try:
             label_el = driver.find_element(By.CSS_SELECTOR, f"label[for='{inp_id}']")
-            parts.append(label_el.text)
+            if label_el.text.strip():
+                strong.append(label_el.text)
         except NoSuchElementException:
             pass
 
-    # 2. aria-label
+    # 2. aria-label / aria-labelledby target
     aria = element.get_attribute("aria-label") or ""
     if aria:
-        parts.append(aria)
+        strong.append(aria)
 
     # 3. placeholder
     placeholder = element.get_attribute("placeholder") or ""
     if placeholder:
-        parts.append(placeholder)
+        strong.append(placeholder)
 
-    # 4. name attribute
-    name = element.get_attribute("name") or ""
-    if name:
-        parts.append(name.replace("_", " ").replace("-", " "))
-
-    # 5. Ancestor label text
+    # 4. Wrapping <label> ancestor (the field is INSIDE its own label)
     try:
         parent_label = element.find_element(By.XPATH, "./ancestor::label")
-        parts.append(parent_label.text)
-    except:
+        if parent_label.text.strip():
+            strong.append(parent_label.text)
+    except Exception:
         pass
 
-    # 6. Preceding label / sibling text
-    try:
-        prev = element.find_element(By.XPATH,
-            "./preceding-sibling::label | ./preceding::label[1] | "
-            "./ancestor::div[1]//label | ./ancestor::fieldset//legend")
-        parts.append(prev.text)
-    except:
-        pass
-
-    # 7. Parent div text (for label-less forms)
-    try:
-        parent_div = element.find_element(By.XPATH, "./ancestor::div[1]")
-        div_text = parent_div.text.split("\n")[0]  # first line only
-        if len(div_text) < 100:
-            parts.append(div_text)
-    except:
-        pass
-
-    # 8. ID itself
+    # name / id are always safe (field-owned attributes).
+    name = element.get_attribute("name") or ""
+    if name:
+        weak.append(name.replace("_", " ").replace("-", " "))
     if inp_id:
-        parts.append(inp_id.replace("_", " ").replace("-", " "))
+        weak.append(inp_id.replace("_", " ").replace("-", " "))
 
-    combined = " ".join(parts).lower().strip()
-    return combined
+    if strong:
+        return " ".join(strong + weak).lower().strip()
+
+    # ── Fallbacks ONLY for label-less forms — stay within the field's container
+    # so we cannot pick up a sibling field's label. NO global preceding::label.
+    fallback = []
+    try:
+        sib = element.find_element(By.XPATH, "./preceding-sibling::label[1]")
+        if sib.text.strip():
+            fallback.append(sib.text)
+    except Exception:
+        pass
+    if not fallback:
+        try:
+            container_label = element.find_element(
+                By.XPATH, "(./ancestor::div[1]//label | ./ancestor::fieldset[1]//legend)[1]")
+            if container_label.text.strip():
+                fallback.append(container_label.text)
+        except Exception:
+            pass
+    if not fallback:
+        try:
+            parent_div = element.find_element(By.XPATH, "./ancestor::div[1]")
+            div_text = parent_div.text.split("\n")[0]
+            if div_text and len(div_text) < 100:
+                fallback.append(div_text)
+        except Exception:
+            pass
+
+    return " ".join(fallback + weak).lower().strip()
 
 
 def _build_field_rules(config):
@@ -446,7 +482,7 @@ def fill_text_inputs(driver, config, container=None):
 
                 matched = False
                 for keywords, value in field_rules:
-                    if value and any(kw in combined for kw in keywords):
+                    if value and any(_kw_in_label(kw, combined) for kw in keywords):
                         inp.clear()
                         inp.send_keys(str(value))
                         filled = True
