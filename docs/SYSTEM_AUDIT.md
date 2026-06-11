@@ -473,6 +473,24 @@ platform gets the account flagged. Built adaptive pacing, TDD:
 Verified live: curve 6→10.8→19.4→35→63s by failure count, caps at 120s; `delay_for` after 3 real
 limiter failures → 35s. Ties the consecutive-failure signal (the rate limiter already tracks) to actual
 pacing. Suite: 146 → **155**, all green; compile + import gates pass.
+
+### Live-browser robustness (2026-06-11, branch `browser-robustness`) — found 2 real fill bugs
+Stood up a headless-Chrome harness (`tests/browser/`, skips fast if no Chrome) that runs the REAL
+`smart_form_filler` against local HTML fixtures. It immediately exposed two field-fill bugs that pure
+tests could never catch — both would put **wrong data in the wrong field** on real ATS forms:
+
+| Bug | Root cause | Fix |
+|---|---|---|
+| Email/phone/LinkedIn fields filled with the candidate's **name** | `_get_field_label` used a greedy `./preceding::label[1]` XPath that pulled the *previous* field's `<label>` into the current field's label text, so the "full name" rule matched first | Explicit labels (label-for / aria / placeholder / wrapping-label) are now authoritative; global preceding-label fallback removed; remaining fallbacks scoped to the field's own container |
+| "Full Name" field filled with just the **last name** | matcher used naive substring `kw in combined`, and keyword `'lname'` is a substring of `'fullname'` | `_kw_in_label`: phrases match as substrings, single tokens match on **word boundaries** (`_`/`-` normalised) |
+
+Coverage: 8 pure `_kw_in_label` tests (run in CI), 4 live-DOM tests (stacked-label form + label-less
+div form) that map every field correctly with no cross-field leakage. CI now installs Chrome
+(`setup-chrome`, continue-on-error) so the live tests execute on every PR, skipping gracefully if absent.
+Suite: 155 → **167**, all green; compile + import gates pass.
+
+> Lesson logged: pure tests proved the *logic*; only a real DOM proved the *behaviour*. Two shipping
+> bugs hid in the gap between them.
 | M8 | 📝 documented | localStorage JWT/refresh = XSS-exfil tradeoff; recommend httpOnly-cookie refresh + rotation (future) |
 | M9 | 📝 documented | WS token-in-URL → move to a post-connect auth message / single-use ticket (future, frontend+backend) |
 
