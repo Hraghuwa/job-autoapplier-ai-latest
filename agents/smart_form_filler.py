@@ -835,8 +835,25 @@ def fill_radio_buttons(driver, container=None):
     return filled
 
 
+# Checkboxes we must NOT auto-tick: marketing opt-ins and negative/decline boxes.
+# Blindly checking every box used to opt the user into promo email and tick
+# "I do NOT consent" boxes — actively harmful.
+_CHECKBOX_SKIP = (
+    "do not", "don't", "do n't", "opt out", "opt-out", "unsubscribe",
+    "newsletter", "promotional", "promotions", "marketing", "subscribe",
+    "third party", "third-party", "do you not", "decline",
+)
+# Boxes that are safe/required to tick so the form will submit.
+_CHECKBOX_ALLOW = (
+    "agree", "terms", "consent", "privacy", "policy", "acknowledge",
+    "confirm", "accept", "i have read", "authorize", "certify", "declare",
+)
+
+
 def fill_checkboxes(driver, container=None):
-    """Check any unchecked checkboxes (terms, agreements, etc.)."""
+    """Tick consent/terms checkboxes (needed to submit) but skip marketing
+    opt-ins and negative 'I do not...' boxes. Label-aware to avoid opting the
+    user into things they didn't ask for."""
     filled = False
     root = container or driver
 
@@ -844,13 +861,20 @@ def fill_checkboxes(driver, container=None):
         checkboxes = root.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
         for cb in checkboxes:
             try:
-                if not cb.is_displayed():
+                if not cb.is_displayed() or cb.is_selected():
                     continue
-                if not cb.is_selected():
+                label = _get_field_label(driver, cb)
+                if label and any(s in label for s in _CHECKBOX_SKIP):
+                    print(f"    [Skip] Checkbox (opt-in/negative): {label[:40]}")
+                    continue
+                # Tick when it's a clear consent/terms box, or when unlabeled
+                # (many required boxes have no readable label) — but never the
+                # skip-listed ones handled above.
+                if (not label) or any(a in label for a in _CHECKBOX_ALLOW):
                     try_click(driver, cb)
                     filled = True
-                    print("    [Fill] Checkbox checked")
-            except:
+                    print(f"    [Fill] Checkbox: {label[:40] or 'unlabeled'}")
+            except Exception:
                 continue
     except Exception:
         pass
