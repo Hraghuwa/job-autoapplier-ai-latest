@@ -56,6 +56,21 @@ def _kw_in_label(kw, combined):
     return k in set(re.split(r"[^a-z0-9]+", c))
 
 
+def _stem_in_label(stem, combined):
+    """Like _kw_in_label but matches a keyword as a word PREFIX — for intentional
+    stems where the suffix varies ('authoriz'→authorized/authorization,
+    'sponsor'→sponsorship, 'relocat'→relocate/relocation). Multi-word stems match
+    as a phrase. Use this for yes/no question detection, NOT for field rules
+    (a short stem like 'exp' must never prefix-match 'expected')."""
+    s = re.sub(r"[_\-]+", " ", str(stem).lower()).strip()
+    if not s:
+        return False
+    c = re.sub(r"[_\-]+", " ", str(combined).lower())
+    if " " in s:
+        return s in c
+    return any(w.startswith(s) for w in re.split(r"[^a-z0-9]+", c) if w)
+
+
 def _get_field_label(driver, element):
     """Extract the label/context for a form field.
 
@@ -628,7 +643,7 @@ def fill_dropdowns(driver, config, container=None):
                 # Smart match: try to select the right value based on field label
                 smart_selected = False
 
-                if any(w in combined for w in ["gender", "sex"]):
+                if _kw_in_label("gender", combined) or _kw_in_label("sex", combined):
                     for opt in options:
                         if profile.get("gender", "male").lower() in opt.text.strip().lower():
                             sel.select_by_visible_text(opt.text.strip())
@@ -636,7 +651,7 @@ def fill_dropdowns(driver, config, container=None):
                             print(f"    [Fill] Dropdown gender: {opt.text.strip()}")
                             break
 
-                elif any(w in combined for w in ["country", "nationality"]):
+                elif _kw_in_label("country", combined) or _kw_in_label("nationality", combined):
                     for opt in options:
                         if "india" in opt.text.strip().lower():
                             sel.select_by_visible_text(opt.text.strip())
@@ -644,7 +659,7 @@ def fill_dropdowns(driver, config, container=None):
                             print(f"    [Fill] Dropdown country: {opt.text.strip()}")
                             break
 
-                elif any(w in combined for w in ["degree", "qualification", "education"]):
+                elif any(_kw_in_label(w, combined) for w in ["degree", "qualification", "education"]):
                     for opt in options:
                         opt_text = opt.text.strip().lower()
                         if any(d in opt_text for d in ["mba", "post grad", "master", "pg"]):
@@ -653,7 +668,9 @@ def fill_dropdowns(driver, config, container=None):
                             print(f"    [Fill] Dropdown degree: {opt.text.strip()}")
                             break
 
-                elif any(w in combined for w in ["experience", "exp", "year"]):
+                # Whole-word "experience"/"years" only — never the substring 'exp'
+                # (which used to match 'expected salary' and fill it with a years range).
+                elif any(_kw_in_label(w, combined) for w in ["experience", "years"]):
                     for opt in options:
                         opt_text = opt.text.strip().lower()
                         if any(y in opt_text for y in ["3", "4", "3-5", "2-4", "1-3"]):
@@ -663,14 +680,14 @@ def fill_dropdowns(driver, config, container=None):
                             break
 
                 if not smart_selected:
-                    # Analyze the question to decide Yes vs No
-                    should_say_no = any(w in combined for w in [
-                        "sponsorship", "sponsor", "disability", "handicap",
-                        "veteran", "military", "criminal", "conviction",
+                    # Analyze the question to decide Yes vs No (stem-matched).
+                    should_say_no = any(_stem_in_label(w, combined) for w in [
+                        "sponsor", "disability", "handicap",
+                        "veteran", "military", "criminal", "convict",
                         "felony", "restrict", "non-compete",
                     ])
-                    should_say_yes = any(w in combined for w in [
-                        "authorized", "authorization", "eligible", "legally",
+                    should_say_yes = any(_stem_in_label(w, combined) for w in [
+                        "authoriz", "eligible", "legally",
                         "relocat", "willing", "agree", "consent", "confirm",
                         "available", "immediate", "right to work", "permit",
                     ])
@@ -783,11 +800,19 @@ def fill_radio_buttons(driver, container=None):
                     except:
                         continue
 
-                # Try to click the target answer
+                # Try to click the target answer.
+                # NOTE: the previous one-liner `x in A if C else B` parsed as
+                # `(x in A) if C else B` — so for a "no" answer the condition
+                # became the truthy list B and clicked the FIRST radio (Yes),
+                # i.e. "Yes" to sponsorship/disability/felony. Fixed below.
+                if target_answer == "yes":
+                    accept = {"yes", "true", "agree", "i agree", "y"}
+                else:
+                    accept = {"no", "false", "disagree", "n"}
                 clicked = False
                 for radio, label in radio_labels.items():
                     label_text = label.text.strip().lower()
-                    if label_text in [target_answer, "true", "agree", "i agree"] if target_answer == "yes" else [target_answer, "false", "disagree"]:
+                    if label_text in accept:
                         try_click(driver, label)
                         clicked = True
                         filled = True
