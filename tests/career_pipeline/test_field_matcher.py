@@ -49,3 +49,26 @@ def test_substring_word_not_matched():
     # 'cgpa' as its own word.
     assert _kw_in_label("cgpa", "cgpascore") is False
     assert _kw_in_label("cgpa", "your cgpa") is True
+
+
+# ── _stem_in_label (prefix/stem matching for yes/no detection) ────────────────
+from smart_form_filler import _stem_in_label  # noqa: E402
+
+
+def test_stem_matches_word_prefix():
+    assert _stem_in_label("authoriz", "are you legally authorized to work") is True
+    assert _stem_in_label("sponsor", "do you require visa sponsorship") is True
+    assert _stem_in_label("relocat", "are you willing to relocate") is True
+
+
+def test_stem_does_not_match_unrelated():
+    assert _stem_in_label("sponsor", "expected salary band") is False
+    assert _stem_in_label("authoriz", "years of experience") is False
+
+
+def test_stem_exp_does_not_eat_expected_for_short_generic():
+    # 'exp' would prefix-match 'expected' — that's exactly why fill_dropdowns uses
+    # whole-word 'experience'/'years' for the experience branch, NOT a stem. This
+    # test documents that 'exp' as a stem is greedy (so we must not use it there).
+    assert _stem_in_label("exp", "expected salary") is True  # greedy by design
+    assert _kw_in_label("exp", "expected salary") is False    # which is why rules use _kw_in_label
