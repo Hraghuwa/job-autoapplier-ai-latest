@@ -562,34 +562,50 @@ def _interleave_role_queries(config):
 
     Returns a flat list of (role_label, query) tuples in round-robin order.
     """
-    role_agents = config.get("role_agents", [])
-    fallback_keywords = config.get("keywords", [])
+    # Gather every distinct keyword across all role agents (order-preserving).
+    # We round-robin by KEYWORD, not by role agent: the backend merges all of a
+    # user's job titles into ONE role agent, so interleaving by agent did nothing
+    # and the query budget was spent entirely on the first keyword — the run
+    # "only focused on one role". Per-keyword round-robin guarantees every role
+    # gets its best query before any role gets a second.
+    keywords: list = []
+    for agent in config.get("role_agents", []) or []:
+        for kw in agent.get("keywords", []) or []:
+            if kw and kw not in keywords:
+                keywords.append(kw)
+    if not keywords:
+        keywords = [k for k in (config.get("keywords") or []) if k]
+    if not keywords:
+        return []
 
-    # Build a per-role query list
-    per_role_queries = []  # list of (role_label, [query, query, ...])
-    if role_agents:
-        for agent in role_agents:
-            role_label = agent.get("name") or ",".join(agent.get("keywords", []))[:40] or "role"
-            kws = agent.get("keywords", [])
-            if not kws:
-                continue
-            queries = job_finder.build_search_queries(kws, config)
-            per_role_queries.append((role_label, queries))
-    # Fallback: flat keyword list → single synthetic role
-    if not per_role_queries and fallback_keywords:
-        per_role_queries.append((
-            "default",
-            job_finder.build_search_queries(fallback_keywords, config),
-        ))
+    # Per-keyword query cap — without this, each keyword fans out into board ×
+    # ATS × broad queries (each yielding up to 10 tabs), exploding tab count.
+    web_cfg = config.get("web_search", {}) or {}
+    try:
+        per_kw_cap = int(web_cfg.get("max_queries_per_keyword", 6))
+    except (TypeError, ValueError):
+        per_kw_cap = 6
+    per_kw_cap = max(1, min(per_kw_cap, 20))
 
-    # Round-robin interleave so every role advances each cycle
+    per_kw_queries = []  # [(keyword, [q, ...]), ...]
+    for kw in keywords:
+        qs = job_finder.build_search_queries([kw], config)
+        if qs:
+            per_kw_queries.append((kw, qs[:per_kw_cap]))
+
+    # Round-robin by keyword so all roles advance together; dedupe queries.
     interleaved: list = []
-    if per_role_queries:
-        max_len = max(len(q) for _, q in per_role_queries)
+    seen: set = set()
+    if per_kw_queries:
+        max_len = max(len(qs) for _, qs in per_kw_queries)
         for i in range(max_len):
-            for role_label, qs in per_role_queries:
+            for kw, qs in per_kw_queries:
                 if i < len(qs):
-                    interleaved.append((role_label, qs[i]))
+                    q = qs[i]
+                    key = " ".join((q or "").lower().split())
+                    if key and key not in seen:
+                        seen.add(key)
+                        interleaved.append((kw, q))
     return interleaved
 
 
@@ -755,14 +771,19 @@ def search_and_apply(driver, config, applied_urls=None):
                 url_str = u.get("url") or ""
                 if not url_str:
                     continue
-                if url_str in applied_urls or url_str in url_set:
+                if url_str in applied_urls:
                     continue
-                # Canonicalise lightly (strip tracking query params) to avoid
-                # "same job, different utm_*" duplicates.
-                norm = url_str.split("#")[0].split("?")[0].rstrip("/")
+                # Canonicalise with the shared key: strips tracking params
+                # (utm_*, ref, fbclid…) but KEEPS meaningful job ids like gh_jid.
+                # The old `split("?")[0]` dropped gh_jid, so two DIFFERENT
+                # Greenhouse/Lever jobs collapsed to one and got skipped.
+                try:
+                    from backend.services.skiplist import normalize_job_key
+                    norm = normalize_job_key(url_str)
+                except Exception:
+                    norm = url_str.split("#")[0].rstrip("/")
                 if norm in url_set:
                     continue
-                url_set.add(url_str)
                 url_set.add(norm)
                 new_items.append(u)
 
