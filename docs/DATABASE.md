@@ -25,6 +25,10 @@ is **only** an env-var change — no code edits.
 
 ## Migrate (local-first, verify before deploying)
 1. Create a DB on the provider, copy its connection string.
+   - **You can paste the provider's URL as-is, including `?sslmode=require`.**
+     The app strips `sslmode` and passes it to asyncpg's `ssl=` arg automatically
+     (asyncpg rejects libpq's `sslmode`, which would otherwise fail the first
+     query). A bare `postgres://` is also auto-coerced to `postgresql+asyncpg://`.
 2. Put it in `backend/.env` as `DATABASE_URL=postgresql+asyncpg://…` (keep your
    existing `FERNET_KEY` so already-encrypted credentials still decrypt; if the
    old data is gone, users simply re-register).
