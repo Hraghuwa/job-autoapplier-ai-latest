@@ -85,3 +85,42 @@ def test_platforms_independent():
     # Other platforms unaffected
     assert rl.can_apply("u1", "internshala")[0]
     assert rl.can_apply("u1", "wellfound")[0]
+
+
+# ── Plan-level daily cap across platforms (mid-phase quota gap fix) ──────────
+def test_total_across_platforms_counts_all():
+    clock = FakeClock(datetime(2026, 1, 1, 9, 0))
+    rl = RateLimiter(now=clock)
+    rl.register_apply("u1", "linkedin")
+    rl.register_apply("u1", "internshala")
+    rl.register_apply("u1", "linkedin")
+    assert rl.applies_in_window_total("u1") == 3
+    assert rl.applies_in_window_total("other") == 0
+
+
+def test_total_cap_blocks_even_when_platform_under_its_cap():
+    clock = FakeClock(datetime(2026, 1, 1, 9, 0))
+    rl = RateLimiter(now=clock)
+    # 2 applies total, plan cap of 2 → next apply blocked though linkedin's own
+    # cap (50) is nowhere near.
+    rl.register_apply("u1", "linkedin")
+    rl.register_apply("u1", "internshala")
+    ok, reason = rl.can_apply("u1", "linkedin", total_cap=2)
+    assert not ok and ("plan" in reason.lower() or "limit" in reason.lower())
+
+
+def test_total_cap_none_means_no_plan_limit():
+    clock = FakeClock(datetime(2026, 1, 1, 9, 0))
+    rl = RateLimiter(now=clock)
+    for _ in range(40):
+        rl.register_apply("u1", "linkedin")
+    assert rl.can_apply("u1", "linkedin", total_cap=None)[0]  # only per-platform cap applies
+
+
+def test_lazy_limiter_supports_total_cap():
+    from backend.services.rate_limits import _LazyLimiter
+    L = _LazyLimiter()  # no redis locally → in-memory backend
+    L.register_apply("uX", "linkedin")
+    L.register_apply("uX", "wellfound")
+    ok, _ = L.can_apply("uX", "linkedin", total_cap=2)
+    assert not ok

@@ -413,6 +413,19 @@ def is_stopping(run_id: str) -> bool:
     return False
 
 
+def _plan_apply_limit(user) -> int:
+    """The user's account-wide daily apply cap from their plan (free=20,
+    pro/team effectively unlimited). Falls back to free on any surprise."""
+    try:
+        from backend.services.plan_gate import PLAN_LIMITS
+        plan = getattr(user, "plan", "free") or "free"
+        plan = str(plan).split(".")[-1].lower()  # handle PlanEnum.free
+        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+        return int(limits.get("apply_credits_daily", limits.get("applies_per_48hr", 20)))
+    except Exception:
+        return 20
+
+
 def _build_config(user, profile) -> dict:
     prefs = _ensure_dict(profile.job_preferences)
     autofill = _ensure_dict(profile.autofill_bank)
@@ -574,6 +587,11 @@ def _build_config(user, profile) -> dict:
 
         "profile": dict(rich_profile),
         "cover_letter": str(profile.cover_letter or ""),
+
+        # Account-wide daily apply cap from the user's plan — enforced per-apply
+        # by the rate limiter so a single phase can't exceed the plan (the DB
+        # quota is only checked at phase start). free=20, pro/team≈unlimited.
+        "plan_apply_limit": _plan_apply_limit(user),
 
         "max_jobs_per_day": int(prefs.get("max_jobs_per_day", 15)),
         "min_per_keyword": 3,

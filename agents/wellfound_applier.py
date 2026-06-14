@@ -493,7 +493,7 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
             # ── Rate limiter guard ───────────────────────────────────────────
             try:
                 from backend.services.rate_limits import default_limiter
-                _ok, _reason = default_limiter.can_apply(str(config.get("user_id", "")), "wellfound")
+                _ok, _reason = default_limiter.can_apply(str(config.get("user_id", "")), "wellfound", total_cap=config.get("plan_apply_limit"))
                 if not _ok:
                     print(f"  🛑 Rate limit: {_reason}")
                     return applied_count, new_urls
