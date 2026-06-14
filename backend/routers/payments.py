@@ -172,12 +172,14 @@ async def razorpay_verify(
 async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     body = await request.body()
     sig = request.headers.get("X-Razorpay-Signature", "")
-    if settings.razorpay_webhook_secret:
-        expected = hmac.new(
-            settings.razorpay_webhook_secret.encode(), body, hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(expected, sig):
-            raise HTTPException(400, "Invalid webhook signature")
+    # Fail closed: an unverifiable webhook must not mutate payment state.
+    if not settings.razorpay_webhook_secret:
+        raise HTTPException(503, "Razorpay webhook secret not configured — refusing unverified webhook")
+    expected = hmac.new(
+        settings.razorpay_webhook_secret.encode(), body, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        raise HTTPException(400, "Invalid webhook signature")
 
     event = json.loads(body)
     if event.get("event") == "payment.failed":
@@ -256,6 +258,12 @@ async def stripe_create_session(
 @router.post("/stripe/webhook")
 async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """Stripe sends checkout.session.completed on successful payment."""
+    # FAIL CLOSED: without the webhook secret we cannot verify authenticity, and
+    # this endpoint grants plan upgrades from the payload. Processing an
+    # unverified body would let anyone POST a forged "payment completed" and
+    # upgrade any account to Pro for free. Refuse rather than trust it.
+    if not settings.stripe_webhook_secret:
+        raise HTTPException(503, "Stripe webhook secret not configured — refusing unverified webhook")
     if not settings.stripe_secret_key:
         raise HTTPException(503, "Stripe not configured")
 
@@ -265,15 +273,12 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     body = await request.body()
     sig = request.headers.get("Stripe-Signature", "")
 
-    if settings.stripe_webhook_secret:
-        try:
-            event = stripe_lib.Webhook.construct_event(
-                body, sig, settings.stripe_webhook_secret
-            )
-        except Exception:
-            raise HTTPException(400, "Invalid Stripe webhook signature")
-    else:
-        event = json.loads(body)
+    try:
+        event = stripe_lib.Webhook.construct_event(
+            body, sig, settings.stripe_webhook_secret
+        )
+    except Exception:
+        raise HTTPException(400, "Invalid Stripe webhook signature")
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
