@@ -22,12 +22,46 @@ def _coerce_async_url(url: str) -> str:
     return url
 
 
+def _split_sslmode(url: str):
+    """Pull a libpq `sslmode` query param out of an asyncpg URL.
+
+    Neon/Supabase hand out `postgresql://…?sslmode=require`. asyncpg (unlike
+    psycopg/libpq) does NOT accept `sslmode` — SQLAlchemy passes it straight to
+    `asyncpg.connect()`, which raises `connect() got an unexpected keyword
+    argument 'sslmode'` on the FIRST query. So strip it from the URL and return
+    its value to be passed as asyncpg's `ssl=` connect arg instead. Returns
+    (clean_url, sslmode_value_or_None).
+    """
+    if "+asyncpg" not in url or "sslmode=" not in url:
+        return url, None
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    parts = urlsplit(url)
+    sslmode = None
+    kept = []
+    for k, v in parse_qsl(parts.query, keep_blank_values=True):
+        if k.lower() == "sslmode":
+            sslmode = v
+        else:
+            kept.append((k, v))
+    clean = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
+    return clean, sslmode
+
+
 _resolved_url = _coerce_async_url(settings.database_url)
 if _resolved_url != settings.database_url:
     logger.warning("Coerced DATABASE_URL to async driver: %s", _resolved_url.split("@")[0] + "@…")
 
-# SQLite needs check_same_thread=False; PostgreSQL ignores connect_args entirely
-_connect_args = {"check_same_thread": False} if _resolved_url.startswith("sqlite") else {}
+_resolved_url, _sslmode = _split_sslmode(_resolved_url)
+
+# SQLite needs check_same_thread=False. For asyncpg, translate libpq sslmode →
+# asyncpg's `ssl=` kwarg (managed Postgres like Neon/Supabase require SSL).
+if _resolved_url.startswith("sqlite"):
+    _connect_args = {"check_same_thread": False}
+elif _sslmode:
+    logger.warning("Translated DATABASE_URL sslmode=%s → asyncpg ssl arg", _sslmode)
+    _connect_args = {"ssl": False if _sslmode.lower() == "disable" else _sslmode}
+else:
+    _connect_args = {}
 
 engine = create_async_engine(
     _resolved_url,
