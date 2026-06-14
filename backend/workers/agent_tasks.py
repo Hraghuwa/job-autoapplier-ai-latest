@@ -597,6 +597,9 @@ def _build_config(user, profile) -> dict:
             # Both are clamped to sane bounds inside web_search_applier.
             "tab_limit": int(prefs.get("web_search_tab_limit", 50)),
             "max_queries": int(prefs.get("web_search_max_queries", 30)),
+            # Per-keyword query cap — keeps multi-role searches fair AND bounds
+            # the tab fan-out (each keyword × this many queries × ~10 links).
+            "max_queries_per_keyword": int(prefs.get("web_search_max_queries_per_keyword", 6)),
             "google_login_wait_sec": int(prefs.get("google_login_wait_sec", 120)),
             "extra_sites": list(prefs.get("web_search_extra_sites") or []),
         },
