@@ -1,0 +1,32 @@
+# Worker image — runs the Celery agent worker, which drives Chrome via Selenium.
+# Unlike the API image (backend/Dockerfile), the worker NEEDS the browser stack:
+#   • the Python deps in requirements-agents.txt (selenium, webdriver-manager,
+#     undetected-chromedriver) — the API image omits these, which is exactly why
+#     the worker failed with "No module named 'selenium'".
+#   • a real Chromium binary + matching chromedriver (slim Python has neither).
+FROM python:3.11-slim
+
+# System deps: build tools for cryptography/psycopg2 + Chromium and its driver.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc libpq-dev \
+        chromium chromium-driver \
+        fonts-liberation libnss3 libxss1 libasound2 libgbm1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Agent deps (includes -r requirements.txt + selenium/webdriver-manager/uc).
+COPY requirements.txt ./requirements.txt
+COPY requirements-agents.txt ./requirements-agents.txt
+RUN pip install --no-cache-dir -r requirements-agents.txt
+
+COPY . .
+
+ENV PYTHONPATH=/app \
+    JOBAGENT_SERVER_MODE=1 \
+    # Point Selenium at the distro Chromium + driver so create_driver does NOT
+    # need a runtime webdriver-manager download (no internet / version drift).
+    CHROME_BIN=/usr/bin/chromium \
+    CHROMEDRIVER_PATH=/usr/bin/chromedriver
+
+CMD ["celery", "-A", "backend.workers.celery_app", "worker", "--concurrency=4", "--loglevel=info", "-Q", "agents,default"]

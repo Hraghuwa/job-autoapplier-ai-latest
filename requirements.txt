@@ -22,3 +22,14 @@ pyotp
 python-dotenv
 croniter>=2.0.0  # accurate cron matching for scheduled agent runs (audit M4)
 reportlab>=4.0  # ATS-safe tailored-resume PDF rendering (backend/services/resume_pdf.py)
+
+# ── Agent browser stack ───────────────────────────────────────────────────────
+# The Celery worker (and the web-process in-thread fallback) import the appliers,
+# which import selenium — so these MUST be installed wherever a phase can run, not
+# just on a dev box. Omitting them is what caused "No module named 'selenium'".
+# NOTE: the worker ALSO needs a Chrome/Chromium BINARY — provided by
+# backend/Dockerfile.worker (chromium + chromium-driver). selenium alone is not
+# enough to launch a browser.
+selenium==4.18.1
+webdriver-manager==4.0.1
+undetected-chromedriver>=3.5.5

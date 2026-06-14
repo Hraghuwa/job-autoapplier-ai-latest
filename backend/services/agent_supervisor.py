@@ -277,15 +277,20 @@ def healthcheck() -> dict:
         "redis":           _redis_reachable(),
         "celery_worker":   _celery_worker_listening(),
         "chrome_binary":   _chrome_binary_present(),
+        "selenium":        _selenium_installed(),
         "ollama":          _ollama_reachable(),
         "supervisor_pid":  os.getpid(),
     }
-    out["ok"] = bool(out["chrome_binary"])   # the only HARD requirement
+    # HARD requirements to actually run a browser phase: selenium importable AND
+    # a Chrome binary present. (chrome_binary is checked in the API process; the
+    # worker is the env that truly must satisfy both.)
+    out["ok"] = bool(out["chrome_binary"] and out["selenium"])
     return out
 
 
 def _chrome_binary_present() -> bool:
     candidates = [
+        os.environ.get("CHROME_BIN"),   # worker image points this at chromium
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
@@ -295,6 +300,13 @@ def _chrome_binary_present() -> bool:
         shutil.which("chromium"),
     ]
     return any(c and os.path.exists(c) for c in candidates)
+
+
+def _selenium_installed() -> bool:
+    """The appliers import selenium; a worker without it fails every run with
+    'No module named selenium'. Probe it so readiness is visible up front."""
+    import importlib.util
+    return importlib.util.find_spec("selenium") is not None
 
 
 def _ollama_reachable() -> bool:
