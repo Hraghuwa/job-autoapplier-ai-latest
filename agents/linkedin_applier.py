@@ -1363,7 +1363,7 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             try:
                 from backend.services.rate_limits import default_limiter
                 _uid = str(config.get("user_id", ""))
-                _ok, _reason = default_limiter.can_apply(_uid, "linkedin")
+                _ok, _reason = default_limiter.can_apply(_uid, "linkedin", total_cap=config.get("plan_apply_limit"))
                 if not _ok:
                     print(f"  🛑 Rate limit reached: {_reason}")
                     return applied_count
