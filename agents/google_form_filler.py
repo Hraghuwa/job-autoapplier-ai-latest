@@ -145,8 +145,17 @@ def match_answer(label, config):
                 return v
         return None
 
-    # Name
-    if any(w in c for w in ["your name", "full name", "candidate name", "name"]):
+    # Company / organisation — MUST come before the generic name check, else
+    # 'Company Name' matches the bare 'name' below and gets the CANDIDATE's name.
+    if any(w in c for w in ["company name", "organisation", "organization",
+                            "employer", "current company", "company"]):
+        return _p("current_company", "company")
+
+    # Name — but not company/user/file/referral fields that merely contain "name".
+    _name_excl = ("company", "organis", "organiz", "employer", "user",
+                  "file", "referr", "where")
+    if any(w in c for w in ["your name", "full name", "candidate name", "name"]) \
+            and not any(x in c for x in _name_excl):
         return _p("full_name", "name")
 
     # LinkedIn
@@ -201,8 +210,10 @@ def match_answer(label, config):
     if any(w in c for w in ["expected stipend", "expected salary", "expected ctc"]):
         return _p("expected_salary", "expected_ctc")
 
-    # Location / city
-    if any(w in c for w in ["location", "city", "based", "where"]):
+    # Location / city — 'where' dropped: it caught "where did you hear about us?"
+    # and returned the candidate's city. Keep specific location cues only.
+    if any(w in c for w in ["location", "city", "based in", "current city",
+                            "where are you", "where do you live"]):
         return _p("location", "city", "current_city")
 
     # Join date / availability
