@@ -63,6 +63,21 @@ def _server_mode() -> bool:
     return os.environ.get("JOBAGENT_SERVER_MODE") == "1"
 
 
+def _resolve_chrome_paths():
+    """Return (chrome_binary, chromedriver_path) to use, from env when present.
+
+    The worker container sets CHROME_BIN / CHROMEDRIVER_PATH to the distro
+    Chromium so Selenium doesn't need a runtime webdriver-manager download.
+    Returns (None, None) for local dev → fall back to webdriver-manager.
+    Only returns a path if it actually exists on disk.
+    """
+    chrome_bin = os.environ.get("CHROME_BIN") or ""
+    driver_path = os.environ.get("CHROMEDRIVER_PATH") or ""
+    chrome_bin = chrome_bin if chrome_bin and os.path.exists(chrome_bin) else None
+    driver_path = driver_path if driver_path and os.path.exists(driver_path) else None
+    return chrome_bin, driver_path
+
+
 def _teardown(driver, phase_label: str = "") -> None:
     if driver is None:
         return
@@ -100,12 +115,25 @@ def create_driver(profile_suffix=""):
     # Incognito: ensures no cached login session bypasses credential-based login
     opts.add_argument("--incognito")
 
-    import glob as _glob
-    wdm_path = ChromeDriverManager().install()
-    driver_dir = os.path.dirname(wdm_path)
-    candidates = _glob.glob(os.path.join(driver_dir, "chromedriver*"))
-    binary = next((p for p in candidates if os.path.isfile(p) and "NOTICES" not in p), wdm_path)
-    os.chmod(binary, 0o755)
+    # In a container (worker image) use the distro Chromium + driver via env —
+    # avoids a runtime webdriver-manager download and Chrome/driver version
+    # drift. Falls back to webdriver-manager for local dev.
+    chrome_bin, driver_path = _resolve_chrome_paths()
+    if chrome_bin:
+        opts.binary_location = chrome_bin
+
+    if driver_path:
+        binary = driver_path
+    else:
+        import glob as _glob
+        wdm_path = ChromeDriverManager().install()
+        driver_dir = os.path.dirname(wdm_path)
+        candidates = _glob.glob(os.path.join(driver_dir, "chromedriver*"))
+        binary = next((p for p in candidates if os.path.isfile(p) and "NOTICES" not in p), wdm_path)
+        try:
+            os.chmod(binary, 0o755)
+        except OSError:
+            pass
 
     driver = webdriver.Chrome(service=Service(binary), options=opts)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")

@@ -56,7 +56,9 @@ services:
   worker:
     build:
       context: .
-      dockerfile: backend/Dockerfile
+      # Worker needs selenium + Chromium (the API image has neither) — that
+      # mismatch caused "No module named 'selenium'" / no browser.
+      dockerfile: backend/Dockerfile.worker
     restart: unless-stopped
     volumes:
       - ./backend:/app/backend
