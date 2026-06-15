@@ -157,6 +157,12 @@ else
   echo "  ✅ Redis is already running."
 fi
 
+# ── Ensure the agent browser deps are present ────────────
+# The worker (and the in-thread fallback) import selenium; without it every run
+# dies "No module named 'selenium'". Self-heal here so a restart always fixes it.
+echo "→ Ensuring agent deps (selenium, webdriver-manager)..."
+python3 -c "import selenium" 2>/dev/null || python3 -m pip install -q -r "$SCRIPT_DIR/requirements-agents.txt"
+
 # ── Start Backend ────────────────────────────────────────
 echo "→ Starting Backend (FastAPI on :3002)..."
 cd "$BACKEND_DIR"
