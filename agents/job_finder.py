@@ -105,6 +105,17 @@ def extract_google_links(driver, found_urls, applied_urls):
                 if len(href) < 20:
                     continue
 
+                # Unwrap Google redirect links (google.com/url?q=<real>) — many
+                # results are wrapped this way; without unwrapping they'd be
+                # dropped by the google-domain filter below and the job missed.
+                _p0 = urlparse(href)
+                if "google." in _p0.netloc.lower() and _p0.path.rstrip("/").endswith("/url"):
+                    from urllib.parse import parse_qs, unquote
+                    q = parse_qs(_p0.query)
+                    target = (q.get("q") or q.get("url") or [""])[0]
+                    if target:
+                        href = unquote(target)
+
                 parsed = urlparse(href)
                 domain = parsed.netloc.lower()
                 path = parsed.path.lower()
