@@ -1004,10 +1004,20 @@ def fill_all_form_fields(driver, config, container=None):
     Returns True if any field was filled.
     """
     filled = False
-    from utils.auth import google_login_flow
-    if google_login_flow(driver, "Form Automation", config.get("profile", {}).get("email", "")):
-        filled = True
-        print("    [SmartFill] 🔗 Google login automation triggered")
+    # Auto-clicking "Sign in with Google" opens an OAuth popup/redirect that
+    # DESTROYS the active window → "no such window" → the whole Chrome session
+    # dies and every subsequent job in the run fails. This wrecked phase-6
+    # (browser died after job #1). Forms fill fine without it, so it is OFF by
+    # default and only runs when a config explicitly opts in.
+    if config.get("auto_google_login", False):
+        try:
+            from utils.auth import google_login_flow
+            if google_login_flow(driver, "Form Automation",
+                                 config.get("profile", {}).get("email", "")):
+                filled = True
+                print("    [SmartFill] 🔗 Google login automation triggered")
+        except Exception as e:
+            print(f"    [SmartFill] ⚠️  Google login skipped: {str(e)[:80]}")
 
     filled |= upload_resume(driver, config, container)
     filled |= fill_text_inputs(driver, config, container)

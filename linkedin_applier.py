@@ -21,6 +21,7 @@ from selenium.common.exceptions import (
 import agent_vision
 import job_finder
 import google_form_filler
+from submit_gate import safety_gate
 
 # ─────────────────────────────────────────────
 #  GEMINI / GROQ AI for smart form filling
@@ -693,6 +694,9 @@ def process_easy_apply_modal(driver, config):
 
                     if (priority_text.lower() in btn_text.lower() or
                         priority_text.lower() in aria_label.lower()):
+                        if "submit" in priority_text.lower():
+                            if not safety_gate(config, label=f"LinkedIn Easy Apply: {btn_text}"):
+                                return "review"
                         print(f"    [Step {step+1}] Clicking: '{btn_text}' (aria: '{aria_label}')")
                         try_click(driver, btn)
                         time.sleep(2)
@@ -728,6 +732,9 @@ def process_easy_apply_modal(driver, config):
                         f"//button[contains(normalize-space(),'{btn_text}')]")
                     for btn in fallback_btns:
                         if btn.is_displayed() and btn.is_enabled():
+                            if "submit" in btn_text.lower():
+                                if not safety_gate(config, label=f"LinkedIn Easy Apply (fallback): {btn.text.strip()}"):
+                                    return "review"
                             print(f"    [Step {step+1}] Fallback click: '{btn.text.strip()}'")
                             try_click(driver, btn)
                             time.sleep(2)
@@ -939,6 +946,13 @@ def handle_external_application(driver, config, original_handles, linkedin_tab):
                         f"//a[contains(normalize-space(),'{btn_text}')]")
                     for btn in btns:
                         if btn.is_displayed() and btn.is_enabled():
+                            if any(w in btn_text.lower() for w in ["submit", "apply", "send"]):
+                                if not safety_gate(config, label=f"LinkedIn External Form: {btn.text.strip() or btn_text}"):
+                                    try:
+                                        driver.switch_to.window(linkedin_tab)
+                                    except Exception:
+                                        pass
+                                    return "review"
                             print(f"  👆 Clicking: '{btn.text.strip() or btn_text}'")
                             try_click(driver, btn)
                             time.sleep(3)

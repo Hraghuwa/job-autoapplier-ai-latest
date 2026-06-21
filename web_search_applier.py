@@ -41,6 +41,7 @@ import smart_form_filler
 import google_form_filler
 import agent_vision
 from agent_stop import should_stop
+from submit_gate import safety_gate
 
 
 # ─────────────────────────────────────────────
@@ -374,6 +375,8 @@ def handle_workday_apply(driver, config):
 
     # Workday forms are often multi-step
     result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=8)
+    if result == "review":
+        return "review"
     return result == "submitted"
 
 
@@ -400,6 +403,8 @@ def handle_generic_apply(driver, config):
 
     # Try multi-step form walk
     result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=6)
+    if result == "review":
+        return "review"
     if result == "submitted":
         return True
 
@@ -450,23 +455,24 @@ def _submit_application(driver, config):
             btns = driver.find_elements(By.XPATH, xpath)
             for btn in btns:
                 if btn.is_displayed() and btn.is_enabled():
-                    # btn_text = btn.text.strip() or btn.get_attribute("value") or "Submit"
-                    # print(f"    ✅ Clicking submit: '{btn_text[:30]}'")
-                    # try_click(driver, btn)
-                    print("    ✅ Check point reached. Skipping submit step as requested.")
-                    time.sleep(1)
+                    btn_text = btn.text.strip() or btn.get_attribute("value") or "Submit"
+                    if not safety_gate(config, label=f"Web Search: {btn_text}"):
+                        return "review"
+                    print(f"    🚀 Clicking submit: '{btn_text[:30]}'")
+                    try_click(driver, btn)
+                    time.sleep(3)
 
                     # Verify submission
-                    # try:
-                    #     body = driver.find_element(By.TAG_NAME, "body").text.lower()
-                    #     if any(t in body for t in [
-                    #         "success", "submitted", "thank you", "applied",
-                    #         "received", "congratulations", "confirmation"
-                    #     ]):
-                    #         print("    ✅ Application submitted successfully!")
-                    #         return True
-                    # except Exception:
-                    #     pass
+                    try:
+                        body = driver.find_element(By.TAG_NAME, "body").text.lower()
+                        if any(t in body for t in [
+                            "success", "submitted", "thank you", "applied",
+                            "received", "congratulations", "confirmation"
+                        ]):
+                            print("    ✅ Application submitted successfully!")
+                            return True
+                    except Exception:
+                        pass
                     # Assume submitted if button was clicked
                     return True
         except Exception:
@@ -474,7 +480,7 @@ def _submit_application(driver, config):
 
     # If no submit button found, try the multi-step form walker
     result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=5)
-    return result == "submitted"
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -523,7 +529,9 @@ def apply_to_job_url(driver, url, config, dry_run=False):
         handler = handlers.get(ats_type, handle_generic_apply)
         success = handler(driver, config)
 
-        if success:
+        if success == "review":
+            print(f"    ⏸️  Left tab open for user review ({ats_type})")
+        elif success:
             print(f"    ✅ Applied via {ats_type}")
         else:
             print(f"    ⚠️  Could not auto-apply ({ats_type}) — tab left open")
@@ -801,7 +809,10 @@ def search_and_apply(driver, config, applied_urls=None):
         try:
             success = apply_to_job_url(driver, url, config, dry_run)
 
-            if success:
+            if success == "review":
+                print("  ⏸️  Left tab open for user review.")
+                new_applied_urls.append(item)
+            elif success:
                 applied_count += 1
                 new_applied_urls.append(item)
                 print(f"  ✅ Total applied: {applied_count}")
