@@ -128,9 +128,7 @@ def match_answer(label, config):
                 return v
         return None
 
-    # Name
-    if any(w in c for w in ["your name", "full name", "candidate name", "name"]):
-        return _p("full_name", "name")
+    # Name checks are deferred to the end of this function as a fallback to avoid wrong mapping.
 
     # LinkedIn
     if any(w in c for w in ["linkedin", "linkedin id", "linkedin url"]):
@@ -175,6 +173,10 @@ def match_answer(label, config):
     # Current/Last role
     if any(w in c for w in ["current role", "last role", "current/last", "designation", "current title"]):
         return _p("current_role", "current_title", "designation")
+
+    # Current Company / Employer
+    if any(w in c for w in ["current company", "current organization", "employer", "company name", "organisation", "employer name"]):
+        return _p("current_company", "company")
 
     # Current stipend/salary
     if any(w in c for w in ["current stipend", "current salary", "current ctc", "present ctc"]):
@@ -226,6 +228,19 @@ def match_answer(label, config):
     # Skills
     if any(w in c for w in ["skill", "strength"]):
         return _p("skills", "skill_list", "strengths")
+
+    # Name Fallback
+    if any(w in c for w in ["your name", "full name", "candidate name", "first name", "last name", "fname", "lname"]):
+        return _p("full_name", "name")
+
+    if "name" in c:
+        exclude = ["company", "organization", "college", "university", "degree", "course", "project", 
+                   "father", "mother", "reference", "file", "school", "employer", "manager", "recruiter", 
+                   "friend", "spokesperson", "street", "city", "country", "state", "branch", 
+                   "specialization", "stream", "department", "major", "job", "position", "role", "title",
+                   "spouse", "child", "emergency", "contact", "referee", "professor", "teacher", "ref"]
+        if not any(e in c for e in exclude):
+            return _p("full_name", "name")
 
     return None
 

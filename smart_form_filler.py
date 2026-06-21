@@ -132,11 +132,6 @@ def _build_field_rules(config):
     _degree = profile.get("degree") or profile.get("course")
 
     raw_rules = [
-        # Name fields
-        (["first name", "given name", "fname", "first_name"], _first),
-        (["last name", "surname", "family name", "lname", "last_name"], _last),
-        (["full name", "your name", "candidate name", "applicant name", "fullname"], _full),
-        (["name"], _full),
 
         # Contact
         (["phone", "mobile", "contact number", "contact no", "tel", "whatsapp"], _phone),
@@ -197,6 +192,12 @@ def _build_field_rules(config):
         # Gender / DOB
         (["gender", "sex"], profile.get("gender")),
         (["age", "date of birth", "dob", "birth"], profile.get("age") or profile.get("date_of_birth")),
+
+        # Name fields (evaluated last to prevent wrong-field matching like college name matching name)
+        (["first name", "given name", "fname", "first_name"], _first),
+        (["last name", "surname", "family name", "lname", "last_name"], _last),
+        (["full name", "your name", "candidate name", "applicant name", "fullname"], _full),
+        (["name"], _full),
     ]
     # Drop rules whose value is empty so the caller doesn't write placeholder data.
     return [(keys, val) for (keys, val) in raw_rules if val not in (None, "", [])]
@@ -437,7 +438,22 @@ def fill_text_inputs(driver, config, container=None):
 
                 matched = False
                 for keywords, value in field_rules:
-                    if value and any(kw in combined for kw in keywords):
+                    if not value:
+                        continue
+                    found_kw = False
+                    for kw in keywords:
+                        if kw in combined:
+                            if kw == "name":
+                                exclude = ["company", "organization", "college", "university", "degree", "course", "project", 
+                                           "father", "mother", "reference", "file", "school", "employer", "manager", "recruiter", 
+                                           "friend", "spokesperson", "street", "city", "country", "state", "branch", 
+                                           "specialization", "stream", "department", "major", "job", "position", "role", "title",
+                                           "spouse", "child", "emergency", "contact", "referee", "professor", "teacher", "ref"]
+                                if any(e in combined for e in exclude):
+                                    continue
+                            found_kw = True
+                            break
+                    if found_kw:
                         inp.clear()
                         inp.send_keys(str(value))
                         filled = True
