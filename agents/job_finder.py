@@ -23,6 +23,8 @@ parallel rather than one role consuming the entire query budget.
 import time
 import random
 import traceback
+import re
+import json
 from urllib.parse import quote_plus, urlparse
 
 from selenium.webdriver.common.by import By
@@ -44,6 +46,36 @@ def is_driver_alive(driver):
         return True
     except Exception:
         return False
+
+
+def _ensure_live_window(driver, preferred=None):
+    """Return a usable window handle the driver is switched to, or None if the
+    browser has no live windows left.
+
+    The ATS auto-apply flow can close the active tab, leaving the driver
+    pointed at a dead window so the next execute_script raises "no such window"
+    and aborts everything. Calling this before each browser interaction makes
+    the loop self-healing: it switches to `preferred` if still open, else to
+    the first surviving handle.
+    """
+    try:
+        handles = driver.window_handles
+    except Exception:
+        return None
+    if not handles:
+        return None
+    target = preferred if preferred in handles else handles[0]
+    try:
+        driver.switch_to.window(target)
+        return target
+    except Exception:
+        for h in handles:
+            try:
+                driver.switch_to.window(h)
+                return h
+            except Exception:
+                continue
+    return None
 
 
 def open_in_new_tab(driver, url):
@@ -575,6 +607,106 @@ def crawl_career_pages(driver, applied_urls, found_urls, max_new_tabs=20):
 
 
 # ─────────────────────────────────────────────
+#  RELIABLE DISCOVERY — public ATS board JSON APIs
+#  (no Google, no CAPTCHA, no browser → survives a dead session)
+#
+#  Google-scraping (google_mega_search / search_and_apply) is blocked by
+#  CAPTCHA on automated Chrome, so it returns 0 jobs. Greenhouse and Lever
+#  expose public JSON endpoints that list every open role with its real
+#  apply URL — that's what makes "open each distinct job in its own tab"
+#  actually work. Slugs are derived from the curated career-page list plus
+#  a few verified-good ones; unknown slugs simply 404 and are skipped.
+# ─────────────────────────────────────────────
+_BOARD_GREENHOUSE_SLUGS = [
+    "groww", "phonepe", "zomato", "sharechat", "unacademy", "jupiter",
+    "gitlab", "figma", "postman", "airbnb", "discord", "anthropic",
+]
+_BOARD_LEVER_SLUGS = [
+    "cred", "razorpay", "swiggy", "meesho", "upgrad", "spotify", "netflix",
+]
+
+
+def _http_json(url, timeout=15):
+    """Fetch + parse JSON over HTTPS, tolerant of the LibreSSL cert quirk on
+    macOS Python. Returns the parsed object or None on any failure."""
+    import urllib.request
+    import ssl
+    try:
+        ctx = ssl.create_default_context(cafile=__import__("certifi").where())
+    except Exception:
+        ctx = ssl._create_unverified_context()
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def _keyword_matches(title, keywords):
+    """True if the job title plausibly matches any of the user's keywords.
+    Matches on significant tokens so 'UI/UX Designer' → any 'design*' title,
+    'Product Manager' → any 'product' title. Intern roles always pass when an
+    'intern' keyword is present."""
+    t = (title or "").lower()
+    if not keywords:
+        return True
+    STOP = {"the", "and", "of", "a", "an", "ii", "iii", "sr", "jr", "i"}
+    for kw in keywords:
+        toks = [w for w in re.split(r"[^a-z]+", (kw or "").lower())
+                if len(w) >= 3 and w not in STOP]
+        # designer/design, manager/management → match on the stem
+        for tok in toks:
+            stem = tok[:5]  # 'desig', 'produ', 'manag', 'inter'
+            if stem and stem in t:
+                return True
+    return False
+
+
+def fetch_board_api_jobs(keywords, applied_urls, max_jobs=40):
+    """Pull real, applyable job URLs from public Greenhouse/Lever board APIs.
+
+    Browser-independent (plain HTTPS) so it works even when Google is
+    CAPTCHA-blocked or the Selenium session has died. Returns a de-duplicated
+    list of absolute job URLs whose titles match the user's keywords.
+    """
+    found = []
+    seen = set(applied_urls or [])
+    print("\n  🔌 [Board APIs] Querying public Greenhouse/Lever boards (no Google)...")
+
+    for slug in _BOARD_GREENHOUSE_SLUGS:
+        if len(found) >= max_jobs:
+            break
+        data = _http_json(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs")
+        if not data:
+            continue
+        for job in data.get("jobs", []):
+            url = job.get("absolute_url")
+            if url and url not in seen and _keyword_matches(job.get("title"), keywords):
+                seen.add(url)
+                found.append(url)
+                if len(found) >= max_jobs:
+                    break
+
+    for slug in _BOARD_LEVER_SLUGS:
+        if len(found) >= max_jobs:
+            break
+        data = _http_json(f"https://api.lever.co/v0/postings/{slug}?mode=json")
+        if not isinstance(data, list):
+            continue
+        for job in data:
+            url = job.get("hostedUrl")
+            if url and url not in seen and _keyword_matches(job.get("text"), keywords):
+                seen.add(url)
+                found.append(url)
+                if len(found) >= max_jobs:
+                    break
+
+    print(f"  🔌 [Board APIs] {len(found)} real job(s) found via public APIs.")
+    return found
+
+
+# ─────────────────────────────────────────────
 #  MAIN: FIND ALL JOBS (v3 — MASSIVE SEARCH)
 # ─────────────────────────────────────────────
 def find_all_jobs(driver, config, applied_urls=None, max_tabs=20):
@@ -609,6 +741,44 @@ def find_all_jobs(driver, config, applied_urls=None, max_tabs=20):
     print(f"  📋 {len(all_keywords)} keywords | Every job → own tab")
     print(f"  📍 Location: {', '.join(locations)}")
     print(f"  {'━' * 55}")
+
+    # ── 0. RELIABLE: public ATS board APIs (no Google → always works) ──
+    # This runs FIRST because google_mega_search is CAPTCHA-blocked and returns
+    # 0 jobs. These are real, distinct, applyable postings — each opens in its
+    # own tab so the user can review/apply, exactly as requested.
+    #
+    # Resilience: the auto-apply form-fill can close/crash the active ATS tab
+    # ("no such window"), which previously killed the WHOLE run after job #1.
+    # So we (a) open every job tab FIRST — the user is guaranteed a tab to
+    # review regardless of apply outcome — and (b) re-anchor to a known-live
+    # window before each job and after any crash, so one bad tab can never abort
+    # the loop.
+    try:
+        home_tab = _ensure_live_window(driver)
+        api_urls = fetch_board_api_jobs(all_keywords, applied_urls,
+                                        max_jobs=max_tabs - len(all_found))
+        for url in api_urls:
+            if len(all_found) >= max_tabs:
+                break
+            # Re-anchor to a live window before touching the browser again.
+            home_tab = _ensure_live_window(driver, home_tab)
+            if home_tab is None:
+                print("  ⚠️  No live browser window left — leaving remaining tabs to the user.")
+                break
+            # Always open the job in its own tab FIRST so the user gets it even
+            # if the apply attempt below crashes that tab.
+            open_in_new_tab(driver, url)
+            all_found.append(url)
+            try:
+                driver.switch_to.window(home_tab)
+                web_search_applier.apply_to_job_url(
+                    driver, url, config, dry_run=config.get("dry_run", False))
+            except Exception as e:
+                print(f"    ⚠️  apply skipped (tab left open for review): {str(e)[:70]}")
+            finally:
+                home_tab = _ensure_live_window(driver, home_tab)
+    except Exception as e:
+        print(f"  ⚠️  Board API discovery error: {e}")
 
     # ── 1. GOOGLE MEGA SEARCH (finds jobs across ALL websites) ──
     try:

@@ -13,6 +13,7 @@ from selenium.common.exceptions import (
     NoSuchElementException, StaleElementReferenceException,
     ElementNotInteractableException, ElementClickInterceptedException
 )
+from submit_gate import safety_gate
 
 
 def try_click(driver, element):
@@ -902,6 +903,9 @@ def walk_multi_step_form(driver, config, max_steps=10):
                     try:
                         if btn.is_displayed() and btn.is_enabled():
                             btn_label = btn.text.strip() or btn.get_attribute("value") or btn_text
+                            if "submit" in btn_text.lower() or "apply" in btn_text.lower() or "send" in btn_text.lower():
+                                if not safety_gate(config, label=f"Smart Form: {btn_label}"):
+                                    return "review"
                             print(f"    🚀 [Step {step+1}] ACTION: Clicking '{btn_label}'")
                             try_click(driver, btn)
                             clicked = True
