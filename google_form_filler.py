@@ -453,6 +453,14 @@ def fill_google_form(driver, config):
                 file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
                 for fi in file_inputs:
                     try:
+                        label = get_form_field_label(driver, fi) or ""
+                        if label:
+                            label_lower = label.lower()
+                            non_resume_kws = ["photo", "picture", "image", "transcript", "cover letter", "portfolio", "certificate", "id card", "passport"]
+                            resume_kws = ["resume", "cv", "curriculum", "bio"]
+                            if any(nk in label_lower for nk in non_resume_kws) and not any(rk in label_lower for rk in resume_kws):
+                                print(f"      ⏭️  Skipping file input with label '{label[:40]}' (not a resume field)")
+                                continue
                         fi.send_keys(resume_path)
                         filled_count += 1
                         print(f"      📄 Resume uploaded: {os.path.basename(resume_path)}")
@@ -847,6 +855,14 @@ def fill_web_form(driver, config):
                 file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
                 for fi in file_inputs:
                     try:
+                        label = _combined_label(driver, fi) or ""
+                        if label:
+                            label_lower = label.lower()
+                            non_resume_kws = ["photo", "picture", "image", "transcript", "cover letter", "portfolio", "certificate", "id card", "passport"]
+                            resume_kws = ["resume", "cv", "curriculum", "bio"]
+                            if any(nk in label_lower for nk in non_resume_kws) and not any(rk in label_lower for rk in resume_kws):
+                                print(f"      ⏭️  Skipping file input with label '{label[:40]}' (not a resume field)")
+                                continue
                         driver.execute_script(
                             "arguments[0].style.display='block';"
                             "arguments[0].style.visibility='visible';"
