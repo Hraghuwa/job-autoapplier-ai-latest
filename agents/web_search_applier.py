@@ -298,13 +298,22 @@ def detect_ats_type(driver, url):
     if "ashbyhq" in domain: return "ashby"
     if "icims" in domain: return "icims"
     
-    # Content based detection (Vision fallback)
-    from config import CONFIG
-    ats_vision = agent_vision.detect_ats_type(driver, CONFIG)
-    if ats_vision and ats_vision != "generic":
-        print(f"    👁️ Vision detected ATS: {ats_vision}")
-        return ats_vision
-        
+    # Content-based detection (best-effort). agent_vision has no detect_ats_type
+    # — calling it raised AttributeError and aborted apply_to_job_url for EVERY
+    # non-obvious ATS page (LinkedIn, company sites, etc.) → 0 applications. Use
+    # the vision helper only if it actually exists, and never let it throw; the
+    # URL checks above already catch the known ATS platforms, so anything else
+    # falls through to the generic handler.
+    fn = getattr(agent_vision, "detect_ats_type", None)
+    if callable(fn):
+        try:
+            from config import CONFIG
+            ats_vision = fn(driver, CONFIG)
+            if ats_vision and ats_vision != "generic":
+                print(f"    👁️ Vision detected ATS: {ats_vision}")
+                return ats_vision
+        except Exception:
+            pass
     return "generic"
 
 
