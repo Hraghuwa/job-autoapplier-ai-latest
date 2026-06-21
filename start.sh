@@ -43,9 +43,15 @@ fi
 
 # ── Kill any existing processes ─────────────────────────
 echo "→ Cleaning up old processes..."
-pkill -9 -f "uvicorn backend.main" 2>/dev/null || true
-pkill -9 -f "next-server"          2>/dev/null || true
-pkill -9 -f "next dev"             2>/dev/null || true
+pkill -9 -f "uvicorn backend.main"           2>/dev/null || true
+pkill -9 -f "next-server"                    2>/dev/null || true
+pkill -9 -f "next dev"                        2>/dev/null || true
+# Kill stale Celery workers too — otherwise every ./start.sh leaves the old
+# worker(s) running. They pile up (24 seen in the wild), share one node name
+# (DuplicateNodename), and stale ones (old code / old DB) grab the run and can't
+# find it → the mission sits QUEUED forever with 0 output.
+pkill -9 -f "celery -A backend.workers.celery_app" 2>/dev/null || true
+pkill -9 -f "celery_app worker"               2>/dev/null || true
 sleep 1
 
 # ── Ensure DB directory ──────────────────────────────────
