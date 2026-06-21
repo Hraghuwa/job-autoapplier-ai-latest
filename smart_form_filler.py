@@ -826,6 +826,15 @@ def upload_resume(driver, config, container=None):
         file_inputs = root.find_elements(By.CSS_SELECTOR, "input[type='file']")
         for fi in file_inputs:
             try:
+                label = _get_field_label(driver, fi) or ""
+                if label:
+                    label_lower = label.lower()
+                    non_resume_kws = ["photo", "picture", "image", "transcript", "cover letter", "portfolio", "certificate", "id card", "passport"]
+                    resume_kws = ["resume", "cv", "curriculum", "bio"]
+                    if any(nk in label_lower for nk in non_resume_kws) and not any(rk in label_lower for rk in resume_kws):
+                        print(f"    [Resume] Skipping file input with label '{label[:40]}' (not a resume field)")
+                        continue
+
                 # Make visible if hidden
                 driver.execute_script(
                     "arguments[0].style.display='block'; "
