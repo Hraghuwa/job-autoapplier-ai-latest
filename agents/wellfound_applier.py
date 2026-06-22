@@ -28,6 +28,7 @@ from selenium.common.exceptions import (
 )
 import os
 import smart_form_filler
+from submit_gate import safety_gate
 
 # ─────────────────────────────────────────────
 #  GEMINI / GROQ AI for personalized cover notes
@@ -511,7 +512,13 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                 # Try to apply
                 applied = _apply_on_job_page(driver, config, job_title, company_name, default_note)
 
-                if applied:
+                if applied == "review":
+                    print(f"  ⏸️  Left tab open for user review.")
+                    try:
+                        driver.switch_to.window(driver.window_handles[0])
+                    except Exception:
+                        pass
+                elif applied:
                     print(f"  ✅ Applied successfully!")
                     applied_count += 1
                     keyword_applied += 1
@@ -522,6 +529,14 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                         default_limiter.register_apply(str(config.get("user_id", "")), "wellfound")
                     except Exception:
                         pass
+                    try:
+                        driver.close()
+                    except Exception:
+                        pass
+                    try:
+                        driver.switch_to.window(driver.window_handles[0])
+                    except Exception:
+                        pass
                 else:
                     print(f"  ⏭️  Could not apply — skipping")
                     try:
@@ -529,16 +544,14 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                         default_limiter.register_failure(str(config.get("user_id", "")), "wellfound")
                     except Exception:
                         pass
-
-                # Close tab and go back
-                try:
-                    driver.close()
-                except Exception:
-                    pass
-                try:
-                    driver.switch_to.window(driver.window_handles[0])
-                except Exception:
-                    pass
+                    try:
+                        driver.close()
+                    except Exception:
+                        pass
+                    try:
+                        driver.switch_to.window(driver.window_handles[0])
+                    except Exception:
+                        pass
 
             except Exception as e:
                 print(f"  ❌ Error: {e}")
@@ -729,7 +742,10 @@ def _apply_on_job_page(driver, config, job_title, company_name, default_note):
         pass
 
     # Step 5: Click Submit/Apply button (in modal)
-    submitted = _click_submit(driver)
+    submitted = _click_submit(driver, config)
+
+    if submitted == "review":
+        return "review"
 
     if submitted:
         time.sleep(2)
@@ -790,7 +806,7 @@ def _fill_cover_note(driver, config, job_title, company_name, default_note):
     return False
 
 
-def _click_submit(driver):
+def _click_submit(driver, config):
     """Click the Submit/Apply button inside the modal."""
     for sel in [
         "//button[contains(text(),'Apply')]",
@@ -807,12 +823,14 @@ def _click_submit(driver):
                     btn_text = btn.text.strip().lower()
                     # Don't re-click the initial apply button — only in-modal submit
                     if any(word in btn_text for word in ["apply", "submit", "send"]):
+                        if not safety_gate(config, label=f"Wellfound Modal: {btn.text.strip()}"):
+                            return "review"
                         print(f"    [Submit] Clicking: '{btn.text.strip()}'")
                         try_click(driver, btn)
                         time.sleep(3)
                         return True
         except:
-            continue
+            pass
 
     # CSS fallback
     for sel in [
@@ -823,10 +841,12 @@ def _click_submit(driver):
         try:
             btn = driver.find_element(By.CSS_SELECTOR, sel)
             if btn.is_displayed() and btn.is_enabled():
+                if not safety_gate(config, label=f"Wellfound Modal Fallback"):
+                    return "review"
                 try_click(driver, btn)
                 time.sleep(3)
                 return True
         except:
-            continue
+            pass
 
     return False

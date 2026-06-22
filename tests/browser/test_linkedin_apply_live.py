@@ -7,7 +7,7 @@ import linkedin_applier as la
 
 CONFIG = {"profile": {"full_name": "Asha Rao", "email": "asha@example.com",
                       "phone": "+91 90000 11111", "years_of_experience": "2"},
-          "email": "asha@example.com", "resume_path": ""}
+          "email": "asha@example.com", "resume_path": "", "auto_submit": True}
 
 def test_easy_apply_walks_to_submitted(load_fixture):
     driver = load_fixture("linkedin_easyapply.html")

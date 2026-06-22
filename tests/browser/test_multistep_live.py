@@ -7,7 +7,7 @@ PROFILE = {"profile": {"full_name": "Asha Rao", "skills": "python, fastapi",
            "cover_letter": "Keen to contribute."}
 
 def test_walk_completes_multistep(load_fixture):
-    cfg = dict(PROFILE, fit_gate_enabled=False)  # isolate the walk from the gate
+    cfg = dict(PROFILE, fit_gate_enabled=False, auto_submit=True)  # isolate the walk from the gate
     driver = load_fixture("multistep.html")
     result = sff.walk_multi_step_form(driver, cfg, max_steps=6)
     assert result == "submitted"

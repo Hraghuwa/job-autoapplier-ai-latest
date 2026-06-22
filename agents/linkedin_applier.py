@@ -18,6 +18,7 @@ from selenium.common.exceptions import (
     ElementClickInterceptedException, TimeoutException,
     StaleElementReferenceException, JavascriptException
 )
+from submit_gate import safety_gate
 import agent_vision
 import job_finder
 import google_form_filler
@@ -850,6 +851,9 @@ def process_easy_apply_modal(driver, config, dry_run=False):
         if action_btn:
             btn_text  = (action_btn.text or "").strip()
             aria_label = action_btn.get_attribute("aria-label") or ""
+            if action_type == "submit":
+                if not safety_gate(config, label=f"LinkedIn Easy Apply: {btn_text}"):
+                    return "review"
             print(f"    🚀 [Step {step+1}] ACTION: Clicking '{btn_text}' ({action_type})")
             try_click(driver, action_btn)
             time.sleep(2)
@@ -1061,6 +1065,13 @@ def handle_external_application(driver, config, original_handles, linkedin_tab):
                         f"//a[contains(normalize-space(),'{btn_text}')]")
                     for btn in btns:
                         if btn.is_displayed() and btn.is_enabled():
+                            if any(w in btn_text.lower() for w in ["submit", "apply", "send"]):
+                                if not safety_gate(config, label=f"LinkedIn External Form: {btn.text.strip() or btn_text}"):
+                                    try:
+                                        driver.switch_to.window(linkedin_tab)
+                                    except Exception:
+                                        pass
+                                    return "review"
                             print(f"  👆 Clicking: '{btn.text.strip() or btn_text}'")
                             try_click(driver, btn)
                             time.sleep(3)
@@ -1385,7 +1396,9 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 # No external tab — process LinkedIn Easy Apply modal
                 result = process_easy_apply_modal(driver, config, dry_run=dry_run)
 
-                if result == "submitted" or result == "closed":
+                if result == "review":
+                    print(f"  ⏸️  LinkedIn Easy Apply paused for review: {job_title}")
+                elif result == "submitted" or result == "closed":
                     applied_count += 1
                     print(f"  📊 Progress: {applied_count}/{max_jobs} applications\n")
                     try:
