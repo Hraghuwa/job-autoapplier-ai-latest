@@ -13,6 +13,8 @@ from selenium.common.exceptions import (
     NoSuchElementException, StaleElementReferenceException,
     ElementNotInteractableException, ElementClickInterceptedException
 )
+from submit_gate import safety_gate
+
 
 
 def _cover_note(config):
@@ -192,12 +194,6 @@ def _build_field_rules(config):
     _degree = profile.get("degree") or profile.get("course")
 
     raw_rules = [
-        # Name fields
-        (["first name", "given name", "fname", "first_name"], _first),
-        (["last name", "surname", "family name", "lname", "last_name"], _last),
-        (["full name", "your name", "candidate name", "applicant name", "fullname"], _full),
-        (["name"], _full),
-
         # Contact
         (["phone", "mobile", "contact number", "contact no", "tel", "whatsapp"], _phone),
         (["email", "e-mail", "mail id", "mail", "email id"], _email),
@@ -257,6 +253,12 @@ def _build_field_rules(config):
         # Gender / DOB
         (["gender", "sex"], profile.get("gender")),
         (["age", "date of birth", "dob", "birth"], profile.get("age") or profile.get("date_of_birth")),
+
+        # Name fields (evaluated last to prevent wrong-field matching like college name matching name)
+        (["first name", "given name", "fname", "first_name"], _first),
+        (["last name", "surname", "family name", "lname", "last_name"], _last),
+        (["full name", "your name", "candidate name", "applicant name", "fullname"], _full),
+        (["name"], _full),
     ]
     # Drop rules whose value is empty so the caller doesn't write placeholder data.
     return [(keys, val) for (keys, val) in raw_rules if val not in (None, "", [])]
@@ -497,7 +499,22 @@ def fill_text_inputs(driver, config, container=None):
 
                 matched = False
                 for keywords, value in field_rules:
-                    if value and any(_kw_in_label(kw, combined) for kw in keywords):
+                    if not value:
+                        continue
+                    found_kw = False
+                    for kw in keywords:
+                        if _kw_in_label(kw, combined):
+                            if kw == "name":
+                                exclude = ["company", "organization", "college", "university", "degree", "course", "project", 
+                                           "father", "mother", "reference", "file", "school", "employer", "manager", "recruiter", 
+                                           "friend", "spokesperson", "street", "city", "country", "state", "branch", 
+                                           "specialization", "stream", "department", "major", "job", "position", "role", "title",
+                                           "spouse", "child", "emergency", "contact", "referee", "professor", "teacher", "ref"]
+                                if any(e in combined for e in exclude):
+                                    continue
+                            found_kw = True
+                            break
+                    if found_kw:
                         inp.clear()
                         inp.send_keys(str(value))
                         filled = True
@@ -979,6 +996,15 @@ def upload_resume(driver, config, container=None):
         file_inputs = root.find_elements(By.CSS_SELECTOR, "input[type='file']")
         for fi in file_inputs:
             try:
+                label = _get_field_label(driver, fi) or ""
+                if label:
+                    label_lower = label.lower()
+                    non_resume_kws = ["photo", "picture", "image", "transcript", "cover letter", "portfolio", "certificate", "id card", "passport"]
+                    resume_kws = ["resume", "cv", "curriculum", "bio"]
+                    if any(nk in label_lower for nk in non_resume_kws) and not any(rk in label_lower for rk in resume_kws):
+                        print(f"    [Resume] Skipping file input with label '{label[:40]}' (not a resume field)")
+                        continue
+
                 # Make visible if hidden
                 driver.execute_script(
                     "arguments[0].style.display='block'; "
@@ -1088,6 +1114,9 @@ def walk_multi_step_form(driver, config, max_steps=10):
                     try:
                         if btn.is_displayed() and btn.is_enabled():
                             btn_label = btn.text.strip() or btn.get_attribute("value") or btn_text
+                            if "submit" in btn_text.lower() or "apply" in btn_text.lower() or "send" in btn_text.lower():
+                                if not safety_gate(config, label=f"Smart Form: {btn_label}"):
+                                    return "review"
                             print(f"    🚀 [Step {step+1}] ACTION: Clicking '{btn_label}'")
                             try_click(driver, btn)
                             clicked = True

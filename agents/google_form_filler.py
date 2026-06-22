@@ -148,15 +148,8 @@ def match_answer(label, config):
     # Company / organisation — MUST come before the generic name check, else
     # 'Company Name' matches the bare 'name' below and gets the CANDIDATE's name.
     if any(w in c for w in ["company name", "organisation", "organization",
-                            "employer", "current company", "company"]):
+                            "employer", "current company", "company", "employer name"]):
         return _p("current_company", "company")
-
-    # Name — but not company/user/file/referral fields that merely contain "name".
-    _name_excl = ("company", "organis", "organiz", "employer", "user",
-                  "file", "referr", "where")
-    if any(w in c for w in ["your name", "full name", "candidate name", "name"]) \
-            and not any(x in c for x in _name_excl):
-        return _p("full_name", "name")
 
     # LinkedIn
     if any(w in c for w in ["linkedin", "linkedin id", "linkedin url"]):
@@ -254,6 +247,19 @@ def match_answer(label, config):
     # Skills
     if any(w in c for w in ["skill", "strength"]):
         return _p("skills", "skill_list", "strengths")
+
+    # Name Fallback
+    if any(w in c for w in ["your name", "full name", "candidate name", "first name", "last name", "fname", "lname"]):
+        return _p("full_name", "name")
+
+    if "name" in c:
+        exclude = ["company", "organization", "college", "university", "degree", "course", "project", 
+                   "father", "mother", "reference", "file", "school", "employer", "manager", "recruiter", 
+                   "friend", "spokesperson", "street", "city", "country", "state", "branch", 
+                   "specialization", "stream", "department", "major", "job", "position", "role", "title",
+                   "spouse", "child", "emergency", "contact", "referee", "professor", "teacher", "ref"]
+        if not any(e in c for e in exclude):
+            return _p("full_name", "name")
 
     return None
 
@@ -461,6 +467,14 @@ def fill_google_form(driver, config):
                 file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
                 for fi in file_inputs:
                     try:
+                        label = get_form_field_label(driver, fi) or ""
+                        if label:
+                            label_lower = label.lower()
+                            non_resume_kws = ["photo", "picture", "image", "transcript", "cover letter", "portfolio", "certificate", "id card", "passport"]
+                            resume_kws = ["resume", "cv", "curriculum", "bio"]
+                            if any(nk in label_lower for nk in non_resume_kws) and not any(rk in label_lower for rk in resume_kws):
+                                print(f"      ⏭️  Skipping file input with label '{label[:40]}' (not a resume field)")
+                                continue
                         fi.send_keys(resume_path)
                         filled_count += 1
                         print(f"      📄 Resume uploaded: {os.path.basename(resume_path)}")
@@ -850,6 +864,14 @@ def fill_web_form(driver, config):
                 file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
                 for fi in file_inputs:
                     try:
+                        label = _combined_label(driver, fi) or ""
+                        if label:
+                            label_lower = label.lower()
+                            non_resume_kws = ["photo", "picture", "image", "transcript", "cover letter", "portfolio", "certificate", "id card", "passport"]
+                            resume_kws = ["resume", "cv", "curriculum", "bio"]
+                            if any(nk in label_lower for nk in non_resume_kws) and not any(rk in label_lower for rk in resume_kws):
+                                print(f"      ⏭️  Skipping file input with label '{label[:40]}' (not a resume field)")
+                                continue
                         driver.execute_script(
                             "arguments[0].style.display='block';"
                             "arguments[0].style.visibility='visible';"

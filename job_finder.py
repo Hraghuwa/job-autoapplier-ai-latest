@@ -24,6 +24,7 @@ import time
 import random
 import traceback
 from urllib.parse import quote_plus, urlparse
+from url_utils import normalize_url
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -98,6 +99,11 @@ def extract_google_links(driver, found_urls, applied_urls):
     """Extract all job-related links from the current Google results page."""
     new_urls = []
     try:
+        # Pre-normalize for O(1) lookups
+        found_norms = {normalize_url(u) for u in found_urls}
+        applied_norms = {normalize_url(u) for u in applied_urls}
+        new_norms = set()
+
         all_links = driver.find_elements(By.CSS_SELECTOR, "a[href]")
         for link in all_links:
             try:
@@ -124,8 +130,10 @@ def extract_google_links(driver, found_urls, applied_urls):
                     clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
                     if parsed.query:
                         clean += f"?{parsed.query}"
-                    if clean not in found_urls and clean not in applied_urls and clean not in new_urls:
+                    norm_clean = normalize_url(clean)
+                    if norm_clean not in found_norms and norm_clean not in applied_norms and norm_clean not in new_norms:
                         new_urls.append(clean)
+                        new_norms.add(norm_clean)
 
             except Exception:
                 continue
@@ -408,7 +416,7 @@ def google_mega_search(driver, keywords, config, applied_urls, max_tabs=20):
 # ─────────────────────────────────────────────
 #  DIRECT PLATFORM SEARCHES (new tab per job)
 # ─────────────────────────────────────────────
-def search_platform_open_tabs(driver, platform_name, search_urls, selectors, domain_filter, applied_urls, found_urls, max_new_tabs=20):
+def search_platform_open_tabs(driver, platform_name, search_urls, selectors, domain_filter, applied_urls, found_urls, config, max_new_tabs=20):
     """
     Search a specific platform and open every result in a new tab.
     The search page itself opens in a new tab, results open in more tabs.
@@ -416,6 +424,11 @@ def search_platform_open_tabs(driver, platform_name, search_urls, selectors, dom
     print(f"\n  🔍 [{platform_name}] Searching...")
     new_found = []
     search_tab = driver.current_window_handle
+
+    # Pre-normalize for O(1) lookups
+    applied_norms = {normalize_url(u) for u in applied_urls}
+    found_norms = {normalize_url(u) for u in found_urls}
+    new_norms = set()
 
     for search_url in search_urls[:8]:
         if not is_driver_alive(driver):
@@ -433,12 +446,14 @@ def search_platform_open_tabs(driver, platform_name, search_urls, selectors, dom
             for link in links:
                 try:
                     href = link.get_attribute("href") or ""
-                    if (href and domain_filter in href
-                            and href not in applied_urls
-                            and href not in found_urls
-                            and href not in new_found
-                            and len(new_found) < max_new_tabs):
-                        new_found.append(href)
+                    if href and domain_filter in href:
+                        norm_href = normalize_url(href)
+                        if (norm_href not in applied_norms
+                                and norm_href not in found_norms
+                                and norm_href not in new_norms
+                                and len(new_found) < max_new_tabs):
+                            new_found.append(href)
+                            new_norms.add(norm_href)
                 except:
                     continue
 
@@ -501,11 +516,16 @@ DIRECT_CAREER_URLS = [
 ]
 
 
-def crawl_career_pages(driver, applied_urls, found_urls, max_new_tabs=20):
-    """Visit direct career pages, find job links, open each in a new tab."""
+def crawl_career_pages(driver, applied_urls, found_urls, config, max_new_tabs=20):
+    """Visit direct career postings, find job links, open each in a new tab."""
     print(f"\n  🔍 [Career Pages] Crawling {len(DIRECT_CAREER_URLS)} company sites...")
     new_found = []
     search_tab = driver.current_window_handle
+
+    # Pre-normalize for O(1) lookups
+    applied_norms = {normalize_url(u) for u in applied_urls}
+    found_norms = {normalize_url(u) for u in found_urls}
+    new_norms = set()
 
     for career_url in DIRECT_CAREER_URLS:
         if not is_driver_alive(driver):
@@ -531,8 +551,14 @@ def crawl_career_pages(driver, applied_urls, found_urls, max_new_tabs=20):
                         "business", "founder", "growth", "strategy",
                         "/job/", "/apply/", "/position/", "/opening/",
                     ])
-                    if is_job and href not in applied_urls and href not in found_urls and href not in new_found and len(new_found) < max_new_tabs:
-                        new_found.append(href)
+                    if is_job:
+                        norm_href = normalize_url(href)
+                        if (norm_href not in applied_norms
+                                and norm_href not in found_norms
+                                and norm_href not in new_norms
+                                and len(new_found) < max_new_tabs):
+                            new_found.append(href)
+                            new_norms.add(norm_href)
                 except:
                     continue
 
@@ -621,7 +647,7 @@ def find_all_jobs(driver, config, applied_urls=None, max_tabs=20):
             new = search_platform_open_tabs(driver, f"Internshala:{kw[:20]}",
                 internshala_urls,
                 "a[href*='/internship/'], a.view_detail_button",
-                "internshala.com", applied_urls, all_found, max_new_tabs=max_tabs - len(all_found))
+                "internshala.com", applied_urls, all_found, config, max_new_tabs=max_tabs - len(all_found))
             all_found.extend(new)
         except:
             pass
@@ -637,7 +663,7 @@ def find_all_jobs(driver, config, applied_urls=None, max_tabs=20):
             new = search_platform_open_tabs(driver, f"Unstop:{kw[:20]}",
                 unstop_urls,
                 "a[href*='/internship/'], a[href*='/job/'], .opportunity-card a",
-                "unstop.com", applied_urls, all_found, max_new_tabs=max_tabs - len(all_found))
+                "unstop.com", applied_urls, all_found, config, max_new_tabs=max_tabs - len(all_found))
             all_found.extend(new)
         except:
             pass
@@ -652,7 +678,7 @@ def find_all_jobs(driver, config, applied_urls=None, max_tabs=20):
             new = search_platform_open_tabs(driver, f"Naukri:{kw[:20]}",
                 naukri_urls,
                 "a.title, a[href*='naukri.com/job/'], article a",
-                "naukri.com", applied_urls, all_found, max_new_tabs=max_tabs - len(all_found))
+                "naukri.com", applied_urls, all_found, config, max_new_tabs=max_tabs - len(all_found))
             all_found.extend(new)
         except:
             pass
@@ -662,7 +688,7 @@ def find_all_jobs(driver, config, applied_urls=None, max_tabs=20):
     # ── 3. Direct company career pages ──
     if len(all_found) < max_tabs:
         try:
-            urls = crawl_career_pages(driver, applied_urls, all_found, max_new_tabs=max_tabs - len(all_found))
+            urls = crawl_career_pages(driver, applied_urls, all_found, config, max_new_tabs=max_tabs - len(all_found))
             all_found.extend(urls)
         except Exception as e:
             print(f"  ❌ Career pages error: {e}")

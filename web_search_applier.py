@@ -42,6 +42,7 @@ import google_form_filler
 import agent_vision
 from agent_stop import should_stop
 from submit_gate import safety_gate
+from url_utils import normalize_url
 
 
 # ─────────────────────────────────────────────
@@ -615,6 +616,8 @@ def search_and_apply(driver, config, applied_urls=None):
     else:
         applied_urls = set(applied_urls)
 
+    applied_norms = {normalize_url(u) for u in applied_urls}
+
     # Defensive: agent_tasks._build_config() used to send a boolean here, which
     # then AttributeError'd on .get() and killed the whole phase silently.
     # Accept both shapes so legacy configs still work.
@@ -698,7 +701,7 @@ def search_and_apply(driver, config, applied_urls=None):
     )
 
     # ── Phase 1: Collect job URLs via interleaved Google searches ──
-    url_set = {u["url"] for u in all_job_urls}  # local dedup set (O(1) lookups)
+    url_set = {normalize_url(u["url"]) for u in all_job_urls}  # local dedup set (O(1) lookups)
 
     for i, (role_label, query) in enumerate(interleaved[:capped]):
         if should_stop():
@@ -750,22 +753,16 @@ def search_and_apply(driver, config, applied_urls=None):
                 except Exception:
                     pass
 
-            results = job_finder.extract_google_links(driver, all_job_urls, applied_urls)
+            results = job_finder.extract_google_links(driver, [u["url"] for u in all_job_urls], applied_urls)
             new_items = []
-            for u in results:
-                url_str = u.get("url") or ""
+            for url_str in results:
                 if not url_str:
                     continue
-                if url_str in applied_urls or url_str in url_set:
+                norm = normalize_url(url_str)
+                if norm in applied_norms or norm in url_set:
                     continue
-                # Canonicalise lightly (strip tracking query params) to avoid
-                # "same job, different utm_*" duplicates.
-                norm = url_str.split("#")[0].split("?")[0].rstrip("/")
-                if norm in url_set:
-                    continue
-                url_set.add(url_str)
                 url_set.add(norm)
-                new_items.append(u)
+                new_items.append({"url": url_str})
 
             print(f"  📋 Found {len(results)} results, {len(new_items)} new")
             all_job_urls.extend(new_items)

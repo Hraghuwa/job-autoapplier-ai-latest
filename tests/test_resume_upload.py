@@ -7,7 +7,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 # Ensure the root folder is in the Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "agents")))
 
 import google_form_filler
 import smart_form_filler

@@ -68,7 +68,7 @@ class TestSafetyGateUnit:
 # ─────────────────────────────────────────────
 
 # Root of the project — all applier modules live here.
-PROJECT_ROOT = os.path.join(os.path.dirname(__file__), "..")
+PROJECT_ROOT = os.path.join(os.path.dirname(__file__), "..", "agents")
 
 # Every file that contains a submit-click path MUST import and call
 # safety_gate before clicking.  This test greps the source to enforce it.
