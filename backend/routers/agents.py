@@ -439,7 +439,7 @@ async def analyze_run_logs(
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.system_gemini_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""You are an AI agent coach for a job auto-applier.
 
 The agent ran and produced these error log lines:

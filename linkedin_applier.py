@@ -648,6 +648,25 @@ def process_easy_apply_modal(driver, config):
             upload_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
             for upload_input in upload_inputs:
                 try:
+                    # Verify file input label to avoid uploading resume to other fields (photos, cover letters)
+                    inp_id = upload_input.get_attribute("id") or ""
+                    aria = upload_input.get_attribute("aria-label") or ""
+                    placeholder = upload_input.get_attribute("placeholder") or ""
+                    label_text = ""
+                    try:
+                        label_el = driver.find_element(By.CSS_SELECTOR, f"label[for='{inp_id}']")
+                        label_text = label_el.text
+                    except:
+                        pass
+                    combined = f"{label_text} {aria} {inp_id} {placeholder}".lower()
+
+                    if combined.strip():
+                        non_resume_kws = ["photo", "picture", "image", "transcript", "cover letter", "portfolio", "certificate", "id card", "passport"]
+                        resume_kws = ["resume", "cv", "curriculum", "bio"]
+                        if any(nk in combined for nk in non_resume_kws) and not any(rk in combined for rk in resume_kws):
+                            print(f"    [Resume] Skipping file input with label '{combined[:40]}' (not a resume field)")
+                            continue
+
                     driver.execute_script(
                         "arguments[0].style.display='block'; arguments[0].style.opacity='1';",
                         upload_input)
@@ -1134,14 +1153,12 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             # Look for Easy Apply button in the right panel / detail area
             easy_apply_btn = None
 
-            # Try multiple selectors for the Easy Apply button
+            # Try multiple selectors for the Easy Apply button, strictly filtering for Easy Apply text
             selectors = [
                 "//button[contains(@class,'jobs-apply-button')]",
                 "//button[contains(normalize-space(),'Easy Apply')]",
                 "//button[contains(@aria-label,'Easy Apply')]",
-                "//button[contains(@class,'jobs-apply-button') and contains(normalize-space(),'Apply')]",
-                "//div[contains(@class,'jobs-details')]//button[contains(normalize-space(),'Apply')]",
-                "//div[contains(@class,'job-details')]//button[contains(normalize-space(),'Apply')]",
+                "//button[contains(@class,'jobs-apply-button') and (contains(translate(., 'EASY', 'easy'), 'easy') or contains(translate(@aria-label, 'EASY', 'easy'), 'easy'))]",
             ]
 
             for sel in selectors:
@@ -1150,12 +1167,9 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                     for btn in btns:
                         if btn.is_displayed() and btn.is_enabled():
                             btn_text = btn.text.strip()
-                            # Skip if it's an "Apply" that redirects externally
-                            if "Easy" in btn_text or "Easy" in (btn.get_attribute("aria-label") or ""):
-                                easy_apply_btn = btn
-                                break
-                            elif "Apply" in btn_text:
-                                # Could be Easy Apply without the word "Easy" visible
+                            btn_aria = btn.get_attribute("aria-label") or ""
+                            # Strictly check that it is actually "Easy Apply"
+                            if "Easy" in btn_text or "Easy" in btn_aria:
                                 easy_apply_btn = btn
                                 break
                     if easy_apply_btn:
@@ -1167,11 +1181,11 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 # Last resort: wait and try one more time
                 time.sleep(3)
                 try:
-                    easy_apply_btn = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable(
-                            (By.XPATH, "//button[contains(normalize-space(),'Easy Apply') or contains(normalize-space(),'Apply')]")
-                        )
-                    )
+                    btns = driver.find_elements(By.XPATH, "//button[contains(normalize-space(),'Easy Apply') or contains(@aria-label,'Easy Apply')]")
+                    for btn in btns:
+                        if btn.is_displayed() and btn.is_enabled():
+                            easy_apply_btn = btn
+                            break
                 except:
                     pass
 

@@ -127,7 +127,7 @@ def recover_stuck_runs() -> int:
         n = 0
         for run in stuck:
             run.status = "failed"
-            run.completed_at = datetime.now()
+            run.completed_at = datetime.utcnow()
             n += 1
         if n:
             session.commit()
@@ -173,7 +173,18 @@ def ensure_worker_running() -> Optional[subprocess.Popen]:
         return _spawned_worker
 
     # Build the worker command. Use the same python that's running us.
-    py = sys.executable or shutil.which("python3") or "python3"
+    py = sys.executable
+    if sys.prefix != sys.base_prefix:
+        venv_py = os.path.join(sys.prefix, "bin", "python")
+        if os.path.exists(venv_py):
+            py = venv_py
+        else:
+            venv_py_win = os.path.join(sys.prefix, "Scripts", "python.exe")
+            if os.path.exists(venv_py_win):
+                py = venv_py_win
+    if not py:
+        py = shutil.which("python3") or "python3"
+
     log_path = os.environ.get("AGENT_WORKER_LOG", "/tmp/worker.log")
     cmd = [py, "-m", "celery", "-A", "backend.workers.celery_app",
            "worker", "--loglevel=info", "-Q", "agents,default",
@@ -221,7 +232,7 @@ def _fail_stale_runs() -> int:
 
     session = _sync_session()
     try:
-        cutoff = datetime.now() - STALE_RUN_TIMEOUT
+        cutoff = datetime.utcnow() - STALE_RUN_TIMEOUT
         running = session.query(AgentRun).filter(AgentRun.status == "running").all()
         n = 0
         for run in running:
@@ -233,7 +244,7 @@ def _fail_stale_runs() -> int:
             newest = last or run.started_at
             if newest and newest < cutoff:
                 run.status = "failed"
-                run.completed_at = datetime.now()
+                run.completed_at = datetime.utcnow()
                 run.error_count = (run.error_count or 0) + 1
                 # Best-effort log row so the UI shows the reason
                 try:

@@ -55,3 +55,15 @@ class LogResponse(BaseModel):
     created_at: datetime
     
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def model_validate(cls, obj, **kwargs):
+        if hasattr(obj, "__dict__"):
+            return cls(
+                id=str(obj.id),
+                event_type=obj.event_type,
+                message=obj.message,
+                created_at=obj.created_at,
+            )
+        return super().model_validate(obj, **kwargs)
+

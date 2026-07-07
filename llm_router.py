@@ -33,12 +33,12 @@ MODELS = {
     "form_fill": {
         "ollama": os.environ.get("OLLAMA_FORM_MODEL", "qwen2.5:7b-instruct"),
         "groq":   os.environ.get("GROQ_FORM_MODEL",   "llama-3.1-8b-instant"),
-        "gemini": os.environ.get("GEMINI_FORM_MODEL", "gemini-2.0-flash"),
+        "gemini": os.environ.get("GEMINI_FORM_MODEL", "gemini-2.5-flash"),
     },
     "writer": {
         "ollama": os.environ.get("OLLAMA_WRITER_MODEL", "qwen2.5:14b-instruct"),
         "groq":   os.environ.get("GROQ_WRITER_MODEL",   "llama-3.3-70b-versatile"),
-        "gemini": os.environ.get("GEMINI_WRITER_MODEL", "gemini-2.0-flash"),
+        "gemini": os.environ.get("GEMINI_WRITER_MODEL", "gemini-2.5-flash"),
     },
 }
 
