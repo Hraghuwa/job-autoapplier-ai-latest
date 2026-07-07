@@ -91,3 +91,62 @@ def test_smart_form_filler_resume_upload_checking(tmp_path):
     # Assert that resume was uploaded to fi_resume but NOT to fi_photo
     fi_resume.send_keys.assert_called_once_with(resume_path)
     fi_photo.send_keys.assert_not_called()
+
+
+def test_linkedin_applier_resume_upload_checking(tmp_path):
+    dummy_resume = tmp_path / "resume.pdf"
+    dummy_resume.write_text("dummy resume content")
+    resume_path = str(dummy_resume)
+
+    config = {
+        "resume_path": resume_path,
+        "profile": {}
+    }
+
+    driver = MagicMock()
+    
+    fi_resume = MagicMock()
+    fi_resume.get_attribute.side_effect = lambda attr: "resume_field" if attr == "id" else ""
+    
+    fi_photo = MagicMock()
+    fi_photo.get_attribute.side_effect = lambda attr: "photo_field" if attr == "id" else ""
+
+    # Mock elements returned by find_elements
+    def mock_find_elements(by, sel):
+        if "input[type='file']" in sel:
+            return [fi_resume, fi_photo]
+        return []
+
+    driver.find_elements.side_effect = mock_find_elements
+
+    # Mock label element finding
+    lbl_resume = MagicMock()
+    lbl_resume.text = "Resume/CV"
+    lbl_photo = MagicMock()
+    lbl_photo.text = "Upload Photo"
+
+    def mock_find_element(by, sel):
+        if "label[for='resume_field']" in sel:
+            return lbl_resume
+        if "label[for='photo_field']" in sel:
+            return lbl_photo
+        raise NoSuchElementException()
+
+    driver.find_element.side_effect = mock_find_element
+
+    # Import inside to make sure sys.path is applied
+    import agents.linkedin_applier as la
+
+    # We need process_easy_apply_modal to run but exit or mock other functions
+    # Let's mock time.sleep, _find_modal, _find_modal_action_button, safety_gate, etc.
+    with patch("agents.linkedin_applier._find_modal", return_value=MagicMock()), \
+         patch("agents.linkedin_applier._find_modal_action_button", return_value=(None, None)), \
+         patch("agents.linkedin_applier.fill_modal_fields"), \
+         patch("time.sleep"):
+        
+        la.process_easy_apply_modal(driver, config)
+
+    # Assert that resume was uploaded to fi_resume but NOT to fi_photo
+    assert fi_resume.send_keys.call_count >= 1
+    fi_photo.send_keys.assert_not_called()
+

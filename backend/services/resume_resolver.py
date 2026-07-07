@@ -41,6 +41,13 @@ def resolve_resume_path(config: Dict[str, Any], *, jd_text: Optional[str] = None
     if not jd_text or not user_id or not profile or session_factory is None:
         return static
 
+    if isinstance(user_id, str):
+        import uuid
+        try:
+            user_id = uuid.UUID(user_id)
+        except ValueError:
+            return static
+
     try:
         from backend.services import tailored_resume_store
         with session_factory() as session:

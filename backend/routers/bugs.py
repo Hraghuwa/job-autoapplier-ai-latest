@@ -81,7 +81,7 @@ def _analyze_bug_with_gemini(bug: dict) -> Optional[str]:
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.system_gemini_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""You are an AI agent coach for a job auto-applier app.
 
 A user filed this bug report:
