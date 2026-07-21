@@ -127,7 +127,7 @@ def recover_stuck_runs() -> int:
         n = 0
         for run in stuck:
             run.status = "failed"
-            run.completed_at = datetime.now()
+            run.completed_at = datetime.utcnow()
             n += 1
         if n:
             session.commit()
@@ -173,7 +173,18 @@ def ensure_worker_running() -> Optional[subprocess.Popen]:
         return _spawned_worker
 
     # Build the worker command. Use the same python that's running us.
-    py = sys.executable or shutil.which("python3") or "python3"
+    py = sys.executable
+    if sys.prefix != sys.base_prefix:
+        venv_py = os.path.join(sys.prefix, "bin", "python")
+        if os.path.exists(venv_py):
+            py = venv_py
+        else:
+            venv_py_win = os.path.join(sys.prefix, "Scripts", "python.exe")
+            if os.path.exists(venv_py_win):
+                py = venv_py_win
+    if not py:
+        py = shutil.which("python3") or "python3"
+
     log_path = os.environ.get("AGENT_WORKER_LOG", "/tmp/worker.log")
     cmd = [py, "-m", "celery", "-A", "backend.workers.celery_app",
            "worker", "--loglevel=info", "-Q", "agents,default",
@@ -221,7 +232,7 @@ def _fail_stale_runs() -> int:
 
     session = _sync_session()
     try:
-        cutoff = datetime.now() - STALE_RUN_TIMEOUT
+        cutoff = datetime.utcnow() - STALE_RUN_TIMEOUT
         running = session.query(AgentRun).filter(AgentRun.status == "running").all()
         n = 0
         for run in running:
@@ -233,7 +244,7 @@ def _fail_stale_runs() -> int:
             newest = last or run.started_at
             if newest and newest < cutoff:
                 run.status = "failed"
-                run.completed_at = datetime.now()
+                run.completed_at = datetime.utcnow()
                 run.error_count = (run.error_count or 0) + 1
                 # Best-effort log row so the UI shows the reason
                 try:
@@ -277,15 +288,20 @@ def healthcheck() -> dict:
         "redis":           _redis_reachable(),
         "celery_worker":   _celery_worker_listening(),
         "chrome_binary":   _chrome_binary_present(),
+        "selenium":        _selenium_installed(),
         "ollama":          _ollama_reachable(),
         "supervisor_pid":  os.getpid(),
     }
-    out["ok"] = bool(out["chrome_binary"])   # the only HARD requirement
+    # HARD requirements to actually run a browser phase: selenium importable AND
+    # a Chrome binary present. (chrome_binary is checked in the API process; the
+    # worker is the env that truly must satisfy both.)
+    out["ok"] = bool(out["chrome_binary"] and out["selenium"])
     return out
 
 
 def _chrome_binary_present() -> bool:
     candidates = [
+        os.environ.get("CHROME_BIN"),   # worker image points this at chromium
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
@@ -295,6 +311,13 @@ def _chrome_binary_present() -> bool:
         shutil.which("chromium"),
     ]
     return any(c and os.path.exists(c) for c in candidates)
+
+
+def _selenium_installed() -> bool:
+    """The appliers import selenium; a worker without it fails every run with
+    'No module named selenium'. Probe it so readiness is visible up front."""
+    import importlib.util
+    return importlib.util.find_spec("selenium") is not None
 
 
 def _ollama_reachable() -> bool:

@@ -28,6 +28,7 @@ from selenium.common.exceptions import (
     ElementClickInterceptedException, StaleElementReferenceException
 )
 import smart_form_filler
+from submit_gate import safety_gate
 from utils.auth import google_login_flow
 
 
@@ -312,7 +313,7 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                     # ── Rate limiter guard ───────────────────────────────────
                     try:
                         from backend.services.rate_limits import default_limiter
-                        _ok, _reason = default_limiter.can_apply(str(config.get("user_id", "")), "internshala")
+                        _ok, _reason = default_limiter.can_apply(str(config.get("user_id", "")), "internshala", total_cap=config.get("plan_apply_limit"))
                         if not _ok:
                             print(f"  🛑 Rate limit: {_reason}")
                             return applied_count, new_urls
@@ -336,7 +337,11 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                         except Exception:
                             pass
 
-                    if result == "submitted":
+                    is_review = False
+                    if result == "review":
+                        print(f"  ⏸️  Left tab open for user review.")
+                        is_review = True
+                    elif result == "submitted":
                         print(f"  ✅ SUCCESS: Applied successfully!")
                         applied_count += 1
                         keyword_applied += 1
@@ -346,8 +351,11 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                     elif result == "stuck":
                         # Fallback: fill everything and try submit
                         smart_form_filler.fill_all_form_fields(driver, config)
-                        submitted = _try_submit(driver)
-                        if submitted:
+                        submitted = _try_submit(driver, config)
+                        if submitted == "review":
+                            print(f"  ⏸️  Left tab open for user review.")
+                            is_review = True
+                        elif submitted:
                             print(f"  ✅ Applied (fallback submit)!")
                             applied_count += 1
                             keyword_applied += 1
@@ -371,10 +379,11 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
                         _register_success()
 
                     # Step 7: Close tab and go back to search results
-                    try:
-                        driver.close()
-                    except Exception:
-                        pass
+                    if not is_review:
+                        try:
+                            driver.close()
+                        except Exception:
+                            pass
                     try:
                         driver.switch_to.window(driver.window_handles[0])
                     except Exception:
@@ -402,7 +411,7 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
     return applied_count, new_urls
 
 
-def _try_submit(driver):
+def _try_submit(driver, config):
     """Try to submit the application form."""
     for by, sel in [
         (By.ID, "submit"),
@@ -416,6 +425,8 @@ def _try_submit(driver):
         try:
             btn = driver.find_element(by, sel)
             if btn.is_displayed():
+                if not safety_gate(config, label=f"Internshala: {sel}"):
+                    return "review"
                 smart_form_filler.try_click(driver, btn)
                 time.sleep(3)
 

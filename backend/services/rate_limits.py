@@ -63,14 +63,34 @@ class RateLimiter:
         while dq and dq[0] < cutoff:
             dq.popleft()
 
+    def applies_in_window_total(self, user_id) -> int:
+        """Total applies across ALL platforms for a user in the window — used to
+        enforce the account-wide PLAN apply limit (the per-platform cap alone let
+        a free user exceed their plan mid-phase)."""
+        uid = str(user_id)
+        total = 0
+        for (u, _plat), dq in self._applies.items():
+            if u != uid:
+                continue
+            cutoff = self._now() - WINDOW
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            total += len(dq)
+        return total
+
     # ── Public API ──────────────────────────────────────────────────────────
-    def can_apply(self, user_id, platform: str) -> Tuple[bool, str]:
+    def can_apply(self, user_id, platform: str, total_cap: Optional[int] = None) -> Tuple[bool, str]:
         key = (str(user_id), platform)
         # 1. Consecutive-failure pause has priority — surface the right reason.
         if self._failures[key] >= CONSECUTIVE_FAILURE_LIMIT:
             return False, (f"{CONSECUTIVE_FAILURE_LIMIT} consecutive failures on "
                            f"{platform}; paused until next success.")
-        # 2. Daily cap.
+        # 2. Account-wide PLAN cap (across platforms).
+        if total_cap is not None:
+            tot = self.applies_in_window_total(user_id)
+            if tot >= total_cap:
+                return False, f"plan daily apply limit reached ({tot}/{total_cap})"
+        # 3. Per-platform safety cap.
         self._prune(key)
         cap = PLATFORM_DAILY_CAP.get(platform, 50)
         used = len(self._applies[key])
@@ -128,11 +148,25 @@ class RedisRateLimiter:
     def _fkey(self, user_id, platform: str) -> str:
         return f"rl:fail:{user_id}:{platform}"
 
-    def can_apply(self, user_id, platform: str) -> Tuple[bool, str]:
+    def applies_in_window_total(self, user_id) -> int:
+        """Sum applies across all known platforms in the window (account-wide)."""
+        total = 0
+        cutoff = self._epoch() - WINDOW.total_seconds()
+        for plat in PLATFORM_DAILY_CAP:
+            akey = self._akey(user_id, plat)
+            self._r.zremrangebyscore(akey, 0, cutoff)
+            total += self._r.zcard(akey)
+        return total
+
+    def can_apply(self, user_id, platform: str, total_cap: Optional[int] = None) -> Tuple[bool, str]:
         fails = int(self._r.get(self._fkey(user_id, platform)) or 0)
         if fails >= CONSECUTIVE_FAILURE_LIMIT:
             return False, (f"{CONSECUTIVE_FAILURE_LIMIT} consecutive failures on "
                            f"{platform}; paused until next success.")
+        if total_cap is not None:
+            tot = self.applies_in_window_total(user_id)
+            if tot >= total_cap:
+                return False, f"plan daily apply limit reached ({tot}/{total_cap})"
         akey = self._akey(user_id, platform)
         cutoff = self._epoch() - WINDOW.total_seconds()
         self._r.zremrangebyscore(akey, 0, cutoff)
@@ -207,8 +241,11 @@ class _LazyLimiter:
             # Redis died mid-flight → fall back to in-memory for this call.
             return getattr(self._memory, method)(*args)
 
-    def can_apply(self, user_id, platform: str) -> Tuple[bool, str]:
-        return self._call("can_apply", user_id, platform)
+    def can_apply(self, user_id, platform: str, total_cap: Optional[int] = None) -> Tuple[bool, str]:
+        return self._call("can_apply", user_id, platform, total_cap)
+
+    def applies_in_window_total(self, user_id) -> int:
+        return self._call("applies_in_window_total", user_id)
 
     def register_apply(self, user_id, platform: str) -> None:
         self._call("register_apply", user_id, platform)

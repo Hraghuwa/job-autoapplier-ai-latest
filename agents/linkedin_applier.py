@@ -18,6 +18,7 @@ from selenium.common.exceptions import (
     ElementClickInterceptedException, TimeoutException,
     StaleElementReferenceException, JavascriptException
 )
+from submit_gate import safety_gate
 import agent_vision
 import job_finder
 import google_form_filler
@@ -829,6 +830,25 @@ def process_easy_apply_modal(driver, config, dry_run=False):
             upload_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
             for upload_input in upload_inputs:
                 try:
+                    # Verify file input label to avoid uploading resume to other fields (photos, cover letters)
+                    inp_id = upload_input.get_attribute("id") or ""
+                    aria = upload_input.get_attribute("aria-label") or ""
+                    placeholder = upload_input.get_attribute("placeholder") or ""
+                    label_text = ""
+                    try:
+                        label_el = driver.find_element(By.CSS_SELECTOR, f"label[for='{inp_id}']")
+                        label_text = label_el.text
+                    except:
+                        pass
+                    combined = f"{label_text} {aria} {inp_id} {placeholder}".lower()
+
+                    if combined.strip():
+                        non_resume_kws = ["photo", "picture", "image", "transcript", "cover letter", "portfolio", "certificate", "id card", "passport"]
+                        resume_kws = ["resume", "cv", "curriculum", "bio"]
+                        if any(nk in combined for nk in non_resume_kws) and not any(rk in combined for rk in resume_kws):
+                            print(f"    [Resume] Skipping file input with label '{combined[:40]}' (not a resume field)")
+                            continue
+
                     driver.execute_script(
                         "arguments[0].style.display='block'; arguments[0].style.opacity='1';",
                         upload_input)
@@ -850,6 +870,9 @@ def process_easy_apply_modal(driver, config, dry_run=False):
         if action_btn:
             btn_text  = (action_btn.text or "").strip()
             aria_label = action_btn.get_attribute("aria-label") or ""
+            if action_type == "submit":
+                if not safety_gate(config, label=f"LinkedIn Easy Apply: {btn_text}"):
+                    return "review"
             print(f"    🚀 [Step {step+1}] ACTION: Clicking '{btn_text}' ({action_type})")
             try_click(driver, action_btn)
             time.sleep(2)
@@ -1061,6 +1084,13 @@ def handle_external_application(driver, config, original_handles, linkedin_tab):
                         f"//a[contains(normalize-space(),'{btn_text}')]")
                     for btn in btns:
                         if btn.is_displayed() and btn.is_enabled():
+                            if any(w in btn_text.lower() for w in ["submit", "apply", "send"]):
+                                if not safety_gate(config, label=f"LinkedIn External Form: {btn.text.strip() or btn_text}"):
+                                    try:
+                                        driver.switch_to.window(linkedin_tab)
+                                    except Exception:
+                                        pass
+                                    return "review"
                             print(f"  👆 Clicking: '{btn.text.strip() or btn_text}'")
                             try_click(driver, btn)
                             time.sleep(3)
@@ -1282,45 +1312,42 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                     break
                 try:
                     panel = driver.find_element(By.CSS_SELECTOR, panel_sel)
-                    # Look for Easy Apply class button first
+                    # Look for Easy Apply class button first, strictly checking label/text
                     for btn in panel.find_elements(By.CSS_SELECTOR, "button.jobs-apply-button"):
                         if btn.is_displayed() and btn.is_enabled():
-                            easy_apply_btn = btn
-                            break
+                            btn_text = (btn.text or "").strip().lower()
+                            btn_aria = (btn.get_attribute("aria-label") or "").strip().lower()
+                            if "easy apply" in btn_text or "easy apply" in btn_aria:
+                                easy_apply_btn = btn
+                                break
                     if easy_apply_btn:
                         break
                     # Text / aria-label match within the panel
                     for btn in panel.find_elements(By.TAG_NAME, "button"):
                         if not btn.is_displayed() or not btn.is_enabled():
                             continue
-                        txt = btn.text.strip()
-                        aria = btn.get_attribute("aria-label") or ""
-                        if "Easy Apply" in txt or "Easy Apply" in aria:
-                            easy_apply_btn = btn
-                            break
-                        # Regular external Apply button (opens new tab)
-                        if "Apply" in txt and "Applied" not in txt:
+                        txt = btn.text.strip().lower()
+                        aria = (btn.get_attribute("aria-label") or "").strip().lower()
+                        if "easy apply" in txt or "easy apply" in aria:
                             easy_apply_btn = btn
                             break
                 except Exception:
                     continue
 
-            # Strategy 2 — page-wide fallback (scoped XPaths)
+            # Strategy 2 — page-wide fallback (scoped XPaths) strictly for Easy Apply
             if not easy_apply_btn:
                 FALLBACK_XPATHS = [
-                    "//button[contains(@class,'jobs-apply-button')]",
-                    "//button[contains(normalize-space(),'Easy Apply')]",
-                    "//button[contains(@aria-label,'Easy Apply')]",
-                    "//button[contains(@aria-label,'Apply') and not(contains(@aria-label,'Applied'))]",
+                    "//button[contains(@class,'jobs-apply-button') and (contains(translate(., 'EASY', 'easy'), 'easy') or contains(translate(@aria-label, 'EASY', 'easy'), 'easy'))]",
+                    "//button[contains(translate(normalize-space(), 'EASY APPLY', 'easy apply'), 'easy apply')]",
+                    "//button[contains(translate(@aria-label, 'EASY APPLY', 'easy apply'), 'easy apply')]",
                 ]
                 for sel in FALLBACK_XPATHS:
                     try:
                         btns = driver.find_elements(By.XPATH, sel)
                         for btn in btns:
                             if btn.is_displayed() and btn.is_enabled():
-                                if "Applied" not in (btn.text or ""):
-                                    easy_apply_btn = btn
-                                    break
+                                easy_apply_btn = btn
+                                break
                         if easy_apply_btn:
                             break
                     except Exception:
@@ -1363,7 +1390,7 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             try:
                 from backend.services.rate_limits import default_limiter
                 _uid = str(config.get("user_id", ""))
-                _ok, _reason = default_limiter.can_apply(_uid, "linkedin")
+                _ok, _reason = default_limiter.can_apply(_uid, "linkedin", total_cap=config.get("plan_apply_limit"))
                 if not _ok:
                     print(f"  🛑 Rate limit reached: {_reason}")
                     return applied_count
@@ -1385,7 +1412,9 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 # No external tab — process LinkedIn Easy Apply modal
                 result = process_easy_apply_modal(driver, config, dry_run=dry_run)
 
-                if result == "submitted" or result == "closed":
+                if result == "review":
+                    print(f"  ⏸️  LinkedIn Easy Apply paused for review: {job_title}")
+                elif result == "submitted" or result == "closed":
                     applied_count += 1
                     print(f"  📊 Progress: {applied_count}/{max_jobs} applications\n")
                     try:

@@ -69,9 +69,9 @@ def _resolve_keys(user: Optional[User]) -> tuple[Optional[str], Optional[str]]:
 # Model fallback list: newest first. `gemini-1.5-flash` was deprecated on
 # v1beta in 2025 for some keys/regions — we no longer rely on it being available.
 _GEMINI_MODELS = [
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-flash-latest",
-    "gemini-2.5-flash",
     "gemini-2.0-flash-exp",
     "gemini-1.5-flash",
     "gemini-1.5-flash-8b",
