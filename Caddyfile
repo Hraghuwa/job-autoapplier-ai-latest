@@ -1,0 +1,6 @@
+# Automatic HTTPS reverse proxy. Caddy fetches + renews a Let's Encrypt cert
+# for $DOMAIN on its own, as long as $DOMAIN's DNS points at this VM and ports
+# 80/443 are open. Everything under the domain proxies to the FastAPI backend.
+{$DOMAIN} {
+	reverse_proxy backend:8000
+}

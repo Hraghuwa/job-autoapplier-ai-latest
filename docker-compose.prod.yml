@@ -1,0 +1,93 @@
+# Production stack for a single VM (e.g. Oracle Cloud Always Free ARM).
+# Runs: Postgres + Redis (internal) + FastAPI backend + Celery browser worker,
+# fronted by Caddy for automatic HTTPS. Frontend stays on Vercel.
+#
+#   Start:  docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#   Logs:   docker compose -f docker-compose.prod.yml logs -f backend worker
+#   Stop:   docker compose -f docker-compose.prod.yml down
+#
+# Only Caddy publishes ports (80/443). Postgres/Redis/backend are reachable
+# only on the internal compose network — never exposed to the internet.
+
+services:
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobagent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}
+      POSTGRES_DB: ${POSTGRES_DB:-jobagent}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobagent}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      # Point at the internal service names, not localhost. These override
+      # anything in .env.prod so the app always finds the compose DB/Redis.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobagent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-jobagent}
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    command: sh -c "uvicorn backend.main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.worker
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobagent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-jobagent}
+      REDIS_URL: redis://redis:6379/0
+    shm_size: "2gb"          # Chrome needs shared memory
+    security_opt:
+      - seccomp:unconfined   # allows Chrome sandbox
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    command: celery -A backend.workers.celery_app worker --concurrency=4 --loglevel=info -Q agents,default
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env.prod (public hostname pointing at this VM)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  uploads:
+  caddy_data:
+  caddy_config:
