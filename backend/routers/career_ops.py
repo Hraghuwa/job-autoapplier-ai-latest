@@ -38,6 +38,7 @@ from backend.database import get_db
 from backend.dependencies import get_current_user
 from backend.models.user import User
 from backend.models.profile import UserProfile
+from backend.services.plan_gate import consume_ai_token
 
 router = APIRouter()
 
@@ -136,6 +137,7 @@ def _ai(prompt: str, user: Optional[User]) -> str:
     Falls back to the in-file Gemini/Groq direct calls only if `llm_router`
     is unimportable (defensive — should not happen in normal deploys).
     """
+    consume_ai_token(user)
     import sys, os as _os
     _root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
     if _root not in sys.path:

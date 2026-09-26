@@ -205,7 +205,8 @@ async def health():
     return {
         "status": "ok",
         "database": "ok" if db_ok else "unreachable",
-        "ws_connections": {k: len(v) for k, v in manager.connections.items()},
+        # Aggregate only — this endpoint is unauthenticated, so never list user IDs.
+        "ws_connections": sum(len(v) for v in manager.connections.values()),
     }
 
 

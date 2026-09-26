@@ -40,6 +40,7 @@ PLATFORM_DAILY_CAP: Dict[str, int] = {
     "web_search":  60,
     "form_fill":   30,
     "analyze":     20,   # /agents/runs/{id}/analyze — caps operator LLM spend per user/day
+    "login_fail":  10,   # failed logins per (email, IP) per 24h — brute-force brake
 }
 
 WINDOW = timedelta(hours=24)
