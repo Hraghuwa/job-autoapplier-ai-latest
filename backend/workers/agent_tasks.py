@@ -413,6 +413,10 @@ def is_stopping(run_id: str) -> bool:
     return False
 
 
+def _plan_name(user) -> str:
+    return str(getattr(user, "plan", "free") or "free").split(".")[-1].lower()
+
+
 def _plan_apply_limit(user) -> int:
     """The user's account-wide daily apply cap from their plan (free=20,
     pro/team effectively unlimited). Falls back to free on any surprise."""
@@ -904,6 +908,15 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
 
         platform = PHASE_PLATFORM_MAP.get(phase, "unknown")
 
+        # Plan gate at the chokepoint every run passes through (API, scheduler,
+        # anything added later): free = LinkedIn only, mirroring
+        # routers/agents._allowed_phases. The API filter alone was bypassable
+        # via a schedule saved through PATCH /users/profile.
+        if _plan_name(user) == "free" and phase != 1:
+            _update_run(session, run_id, status="failed", completed_at=datetime.utcnow())
+            _log_event(session, run_id, "error", f"Phase {phase} ({platform}) requires a Pro plan.")
+            return
+
         # Quota check
         if not _check_quota(session, user_id, platform, user.plan):
             _update_run(session, run_id, status="limit_reached", completed_at=datetime.utcnow())
@@ -1020,8 +1033,13 @@ def check_schedules():
             if not profile or not profile.job_preferences:
                 continue
             
-            schedule = profile.job_preferences.get("schedule", {})
+            schedule = _ensure_dict(profile.job_preferences).get("schedule", {})
             if not schedule or not schedule.get("enabled"):
+                continue
+            # Scheduling is a paid feature; the schedule JSON is user-writable
+            # via PATCH /users/profile, so enforce the plan here too.
+            from backend.services.plan_gate import check_plan_access
+            if not check_plan_access(_plan_name(user), "scheduling"):
                 continue
                 
             # Audit M4: use croniter for correct cron matching when available;

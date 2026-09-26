@@ -18,6 +18,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from backend.config import settings
 from backend.dependencies import get_current_user, require_plan
 from backend.models.user import User
+from backend.services.plan_gate import consume_ai_token
 
 router = APIRouter()
 
@@ -110,6 +111,7 @@ def _groq_generate(api_key: str, prompt: str) -> str:
 
 def _generate(prompt: str, user: User) -> str:
     """Try Gemini first, fall back to Groq. Raise HTTPException if both fail."""
+    consume_ai_token(user)
     gemini_key, groq_key = _resolve_keys(user)
     errors = []
 
@@ -140,6 +142,7 @@ def _generate(prompt: str, user: User) -> str:
 @router.get("/health")
 async def ai_health(user: User = Depends(get_current_user)):
     """Reports which AI providers are reachable for the current user."""
+    consume_ai_token(user)
     gemini_key, groq_key = _resolve_keys(user)
     out = {
         "gemini": {"configured": bool(gemini_key), "ok": False, "error": None},

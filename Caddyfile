@@ -2,5 +2,17 @@
 # for $DOMAIN on its own, as long as $DOMAIN's DNS points at this VM and ports
 # 80/443 are open. Everything under the domain proxies to the FastAPI backend.
 {$DOMAIN} {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	# Resume uploads cap at 10MB in-app; reject anything far larger at the edge
+	# so a huge body is never buffered into the API process.
+	request_body {
+		max_size 12MB
+	}
 	reverse_proxy backend:8000
 }

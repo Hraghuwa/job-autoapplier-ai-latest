@@ -22,6 +22,11 @@ RUN pip install --no-cache-dir -r requirements-agents.txt
 
 COPY . .
 
+# Run unprivileged. /app/uploads is pre-created so a fresh named volume
+# inherits this ownership (an existing root-owned volume needs a one-time chown).
+RUN useradd --create-home --uid 10001 app && mkdir -p /app/uploads && chown -R app:app /app
+USER app
+
 ENV PYTHONPATH=/app \
     JOBAGENT_SERVER_MODE=1 \
     # Point Selenium at the distro Chromium + driver so create_driver does NOT
