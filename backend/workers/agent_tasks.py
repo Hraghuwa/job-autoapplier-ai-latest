@@ -572,6 +572,7 @@ def _build_config(user, profile) -> dict:
         "phone": str(rich_profile.get("phone") or ""),
         "email": str(autofill.get("email") or extracted.get("email") or user.email or ""),
         "resume_path": str(profile.resume_url or ""),
+        "resume_filename": str(profile.resume_filename or ""),
         
         "linkedin": linkedin_creds,
         "linkedin_cookies": linkedin_cookies_json,    # raw JSON string for _try_cookie_login
@@ -673,7 +674,8 @@ def classify_agent_line(line: str):
     is_login_blocked = has_challenge_marker or (has_failure and is_login_msg)
     is_error = has_failure and not is_login_msg
 
-    if "External form filled" in line or "✅ Applied" in line:
+    if ("External form filled" in line or "External form submitted" in line
+            or "✅ Applied" in line or "✅ SUCCESS" in line):
         return {"category": "applied", "event": {"event": "applied", "message": line}}
     if "⏭" in line or "Already applied" in line or "Skipping" in line:
         return {"category": "skipped", "event": {"event": "skipped", "message": line}}
@@ -686,7 +688,7 @@ def classify_agent_line(line: str):
         }}
     if is_error:
         return {"category": "error", "event": {"event": "error", "message": line}}
-    if "🎯 KEYWORD" in line or "LINKEDIN AGENT" in line or "Phase" in line:
+    if "🎯 KEYWORD" in line or "LINKEDIN AGENT" in line or "Phase" in line or "🚀 APPLYING" in line:
         return {"category": "ping", "event": {"event": "ping", "message": line}}
     return None
 
@@ -894,7 +896,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
     skipped = 0
     errors = 0
     error_reasons: list = []  # collect error messages for post-run summary
-    stats = {"skipped": 0, "errors": 0}
+    stats = {"applied": 0, "skipped": 0, "errors": 0}
 
     # Create a stop event for this run — used by the in-process path; the
     # subprocess path honours stop via the Redis pause:{run_id} key.
@@ -940,6 +942,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
             event = dict(res["event"])
             event["run_id"] = run_id
             if cat == "applied":
+                stats["applied"] += 1
                 _log_event(session, run_id, "applied", line)
             elif cat == "skipped":
                 stats["skipped"] += 1
@@ -954,6 +957,11 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
                 error_reasons.append(line[:200])
             elif cat == "ping":
                 _log_event(session, run_id, "info", line)
+            if cat in ("applied", "skipped", "error", "login_challenge"):
+                # Live counts — run cards read agent_runs, which was only
+                # written when the run finished.
+                _update_run(session, run_id, applied_count=stats["applied"],
+                            skipped_count=stats["skipped"], error_count=stats["errors"])
             publish(user_id, event)
 
         config = _build_config(user, profile)
@@ -966,6 +974,9 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
         else:
             applied = _execute_subprocess(user_id, phase, run_id, config, dry_run, _handle_line)
 
+        # A crashed/closed browser leaves no result file (applied=0) even
+        # though applies were streamed — never report fewer than we saw.
+        applied = max(applied or 0, stats["applied"])
         skipped = stats["skipped"]
         errors = stats["errors"]
         _increment_quota(session, user_id, platform, applied)
