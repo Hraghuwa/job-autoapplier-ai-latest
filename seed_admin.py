@@ -16,11 +16,13 @@ import json
 sys.path.insert(0, os.path.dirname(__file__))
 
 # --- Credentials for the admin web account ---
-ADMIN_EMAIL    = "hraghuwanshi3110@gmail.com"
-ADMIN_PASSWORD = "admin"          # change after first login if desired
+ADMIN_EMAIL    = os.environ.get("SEED_ADMIN_EMAIL", "")
+ADMIN_PASSWORD = os.environ.get("SEED_ADMIN_PASSWORD", "")
 ADMIN_NAME     = "Harsh Raghuwanshi"
 
 async def main():
+    if not (ADMIN_EMAIL and ADMIN_PASSWORD):
+        sys.exit("Set SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD (secrets are no longer hardcoded here).")
     from backend.config import settings
     from backend.database import engine, Base, AsyncSessionLocal
     from backend.models.user import User, PlanEnum
@@ -227,13 +229,13 @@ MBA TECH | TAPMI Bengaluru
 
         # ── 8. Platform credentials (Fernet-encrypted) ────────────────────────
         profile.platform_passwords = {
-            "linkedin":     {"email": enc("hraghuwanshi3110@gmail.com"), "password": enc("Harsh@420")},
-            "wellfound":    {"email": enc("hraghu3110@outlook.com"),    "password": enc("Harsh@rag7710")},
-            "internshala":  {"email": enc("hraghuwanshi59@gmail.com"),  "password": enc("YOUR_INTERNSHALA_PASSWORD")},
+            "linkedin":     {"email": enc(os.environ.get("SEED_LINKEDIN_EMAIL", "")), "password": enc(os.environ.get("SEED_LINKEDIN_PASSWORD", ""))},
+            "wellfound":    {"email": enc(os.environ.get("SEED_WELLFOUND_EMAIL", "")),    "password": enc(os.environ.get("SEED_WELLFOUND_PASSWORD", ""))},
+            "internshala":  {"email": enc(os.environ.get("SEED_INTERNSHALA_EMAIL", "")),  "password": enc(os.environ.get("SEED_INTERNSHALA_PASSWORD", ""))},
         }
 
         # ── 9. Gemini key on the user row ────────────────────────────────────
-        user.gemini_key_encrypted = enc("AIzaSyAfN5DAZhXhEkSDHEs4JzmWHi5QwLnXtz8")
+        user.gemini_key_encrypted = enc(os.environ.get("SEED_GEMINI_KEY", "")) or None
 
         await db.commit()
 
