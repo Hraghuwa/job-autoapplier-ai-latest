@@ -240,7 +240,7 @@ def _learn_from_run_logs(session, user_id: str, run_id: str) -> Optional[str]:
         try:
             import google.generativeai as genai
             genai.configure(api_key=settings.system_gemini_key)
-            model = genai.GenerativeModel("gemini-2.0-flash")
+            model = genai.GenerativeModel("gemini-2.5-flash")
             response = model.generate_content(f"""You are improving a browser job auto-applier.
 
 These are real failure logs from one run:
@@ -413,6 +413,19 @@ def is_stopping(run_id: str) -> bool:
     return False
 
 
+def _plan_apply_limit(user) -> int:
+    """The user's account-wide daily apply cap from their plan (free=20,
+    pro/team effectively unlimited). Falls back to free on any surprise."""
+    try:
+        from backend.services.plan_gate import PLAN_LIMITS
+        plan = getattr(user, "plan", "free") or "free"
+        plan = str(plan).split(".")[-1].lower()  # handle PlanEnum.free
+        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+        return int(limits.get("apply_credits_daily", limits.get("applies_per_48hr", 20)))
+    except Exception:
+        return 20
+
+
 def _build_config(user, profile) -> dict:
     prefs = _ensure_dict(profile.job_preferences)
     autofill = _ensure_dict(profile.autofill_bank)
@@ -444,12 +457,14 @@ def _build_config(user, profile) -> dict:
         if isinstance(edu, dict):
             d = edu.get("degree", "")
             inst = edu.get("institution", "")
-            yr = edu.get("year", "")
-            cgpa = edu.get("cgpa", "")
+            yr = edu.get("year", "") or ""
+            cgpa = edu.get("cgpa") or ""
+            if cgpa:
+                cgpa = str(cgpa)
             if d and inst:
-                edu_summary_parts.append(f"{d} from {inst}{' (' + yr + ')' if yr else ''}{' CGPA: ' + cgpa if cgpa else ''}")
+                edu_summary_parts.append(f"{d} from {inst}{' (' + str(yr) + ')' if yr else ''}{' CGPA: ' + cgpa if cgpa else ''}")
             if not grad_cgpa and cgpa:
-                grad_cgpa = cgpa
+                grad_cgpa = str(cgpa)
             if not university and inst:
                 university = inst
             if not degree and d:
@@ -575,6 +590,11 @@ def _build_config(user, profile) -> dict:
         "profile": dict(rich_profile),
         "cover_letter": str(profile.cover_letter or ""),
 
+        # Account-wide daily apply cap from the user's plan — enforced per-apply
+        # by the rate limiter so a single phase can't exceed the plan (the DB
+        # quota is only checked at phase start). free=20, pro/team≈unlimited.
+        "plan_apply_limit": _plan_apply_limit(user),
+
         "max_jobs_per_day": int(prefs.get("max_jobs_per_day", 15)),
         "min_per_keyword": 3,
         "delay_between_applies_sec": [10, 25],
@@ -597,6 +617,9 @@ def _build_config(user, profile) -> dict:
             # Both are clamped to sane bounds inside web_search_applier.
             "tab_limit": int(prefs.get("web_search_tab_limit", 50)),
             "max_queries": int(prefs.get("web_search_max_queries", 30)),
+            # Per-keyword query cap — keeps multi-role searches fair AND bounds
+            # the tab fan-out (each keyword × this many queries × ~10 links).
+            "max_queries_per_keyword": int(prefs.get("web_search_max_queries_per_keyword", 6)),
             "google_login_wait_sec": int(prefs.get("google_login_wait_sec", 120)),
             "extra_sites": list(prefs.get("web_search_extra_sites") or []),
         },
@@ -806,6 +829,19 @@ def _persist_autofill_bank(session, user_id, agent_config_mod) -> None:
         logger.warning("Could not persist autofill bank: %s", _e)
 
 
+def _get_python_executable() -> str:
+    """Resolve correct virtualenv python binary on macOS / Windows."""
+    py_exe = sys.executable
+    if sys.prefix != sys.base_prefix:
+        venv_py = os.path.join(sys.prefix, "bin", "python")
+        if os.path.exists(venv_py):
+            return venv_py
+        venv_py_win = os.path.join(sys.prefix, "Scripts", "python.exe")
+        if os.path.exists(venv_py_win):
+            return venv_py_win
+    return py_exe
+
+
 # ── Subprocess executor (default) — full isolation, no globals, no lock ──────
 def _execute_subprocess(user_id, phase, run_id, config, dry_run, on_line) -> int:
     import subprocess
@@ -826,8 +862,9 @@ def _execute_subprocess(user_id, phase, run_id, config, dry_run, on_line) -> int
             json.dump(cfg, f, default=str)
 
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "JOBAGENT_SERVER_MODE": "1"}
+        py_exe = _get_python_executable()
         proc = subprocess.Popen(
-            [sys.executable, script, cfg_path, str(phase), run_id, res_path],
+            [py_exe, script, cfg_path, str(phase), run_id, res_path],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, cwd=repo_root, env=env,
         )
@@ -862,19 +899,19 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
     try:
         user, profile = _load_user_and_profile(session, user_id)
         if not user or not profile:
-            _update_run(session, run_id, status="failed", completed_at=datetime.now())
+            _update_run(session, run_id, status="failed", completed_at=datetime.utcnow())
             return
 
         platform = PHASE_PLATFORM_MAP.get(phase, "unknown")
 
         # Quota check
         if not _check_quota(session, user_id, platform, user.plan):
-            _update_run(session, run_id, status="limit_reached", completed_at=datetime.now())
+            _update_run(session, run_id, status="limit_reached", completed_at=datetime.utcnow())
             publish(user_id, {"type": "run_complete", "message": "Daily limit reached."})
             return
 
         celery_task_id = task_self.request.id if task_self else None
-        _update_run(session, run_id, status="running", started_at=datetime.now(),
+        _update_run(session, run_id, status="running", started_at=datetime.utcnow(),
                     celery_task_id=celery_task_id)
         _log_event(session, run_id, "info", f"Phase {phase} ({platform}) started.")
         publish(user_id, {"type": "phase_started", "phase": phase, "platform": platform,
@@ -928,7 +965,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
                 logger.info("Self-learning rules for run %s:\n%s", run_id, learned)
         except Exception as _learn_err:
             logger.warning("Self-learning skipped for run %s: %s", run_id, _learn_err)
-        _update_run(session, run_id, status=final_status, completed_at=datetime.now(),
+        _update_run(session, run_id, status=final_status, completed_at=datetime.utcnow(),
                     applied_count=applied, skipped_count=skipped, error_count=errors)
         publish(user_id, {
             "type": "run_complete",
@@ -949,7 +986,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
             _learn_from_run_logs(session, user_id, run_id)
         except Exception as _learn_err:
             logger.warning("Self-learning skipped for failed run %s: %s", run_id, _learn_err)
-        _update_run(session, run_id, status="failed", completed_at=datetime.now(),
+        _update_run(session, run_id, status="failed", completed_at=datetime.utcnow(),
                     error_count=1)
         publish(user_id, {
             "type": "agent_error",

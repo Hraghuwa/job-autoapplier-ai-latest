@@ -41,6 +41,8 @@ import smart_form_filler
 import google_form_filler
 import agent_vision
 from agent_stop import should_stop
+from submit_gate import safety_gate
+from url_utils import normalize_url
 
 
 # ─────────────────────────────────────────────
@@ -298,13 +300,22 @@ def detect_ats_type(driver, url):
     if "ashbyhq" in domain: return "ashby"
     if "icims" in domain: return "icims"
     
-    # Content based detection (Vision fallback)
-    from config import CONFIG
-    ats_vision = agent_vision.detect_ats_type(driver, CONFIG)
-    if ats_vision and ats_vision != "generic":
-        print(f"    👁️ Vision detected ATS: {ats_vision}")
-        return ats_vision
-        
+    # Content-based detection (best-effort). agent_vision has no detect_ats_type
+    # — calling it raised AttributeError and aborted apply_to_job_url for EVERY
+    # non-obvious ATS page (LinkedIn, company sites, etc.) → 0 applications. Use
+    # the vision helper only if it actually exists, and never let it throw; the
+    # URL checks above already catch the known ATS platforms, so anything else
+    # falls through to the generic handler.
+    fn = getattr(agent_vision, "detect_ats_type", None)
+    if callable(fn):
+        try:
+            from config import CONFIG
+            ats_vision = fn(driver, CONFIG)
+            if ats_vision and ats_vision != "generic":
+                print(f"    👁️ Vision detected ATS: {ats_vision}")
+                return ats_vision
+        except Exception:
+            pass
     return "generic"
 
 
@@ -381,6 +392,8 @@ def handle_workday_apply(driver, config):
 
     # Workday forms are often multi-step
     result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=8)
+    if result == "review":
+        return "review"
     return result == "submitted"
 
 
@@ -407,6 +420,8 @@ def handle_generic_apply(driver, config):
 
     # Try multi-step form walk
     result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=6)
+    if result == "review":
+        return "review"
     if result == "submitted":
         return True
 
@@ -457,23 +472,24 @@ def _submit_application(driver, config):
             btns = driver.find_elements(By.XPATH, xpath)
             for btn in btns:
                 if btn.is_displayed() and btn.is_enabled():
-                    # btn_text = btn.text.strip() or btn.get_attribute("value") or "Submit"
-                    # print(f"    ✅ Clicking submit: '{btn_text[:30]}'")
-                    # try_click(driver, btn)
-                    print("    ✅ Check point reached. Skipping submit step as requested.")
-                    time.sleep(1)
+                    btn_text = btn.text.strip() or btn.get_attribute("value") or "Submit"
+                    if not safety_gate(config, label=f"Web Search: {btn_text}"):
+                        return "review"
+                    print(f"    🚀 Clicking submit: '{btn_text[:30]}'")
+                    try_click(driver, btn)
+                    time.sleep(3)
 
                     # Verify submission
-                    # try:
-                    #     body = driver.find_element(By.TAG_NAME, "body").text.lower()
-                    #     if any(t in body for t in [
-                    #         "success", "submitted", "thank you", "applied",
-                    #         "received", "congratulations", "confirmation"
-                    #     ]):
-                    #         print("    ✅ Application submitted successfully!")
-                    #         return True
-                    # except Exception:
-                    #     pass
+                    try:
+                        body = driver.find_element(By.TAG_NAME, "body").text.lower()
+                        if any(t in body for t in [
+                            "success", "submitted", "thank you", "applied",
+                            "received", "congratulations", "confirmation"
+                        ]):
+                            print("    ✅ Application submitted successfully!")
+                            return True
+                    except Exception:
+                        pass
                     # Assume submitted if button was clicked
                     return True
         except Exception:
@@ -481,7 +497,7 @@ def _submit_application(driver, config):
 
     # If no submit button found, try the multi-step form walker
     result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=5)
-    return result == "submitted"
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -530,7 +546,9 @@ def apply_to_job_url(driver, url, config, dry_run=False):
         handler = handlers.get(ats_type, handle_generic_apply)
         success = handler(driver, config)
 
-        if success:
+        if success == "review":
+            print(f"    ⏸️  Left tab open for user review ({ats_type})")
+        elif success:
             print(f"    ✅ Applied via {ats_type}")
         else:
             print(f"    ⚠️  Could not auto-apply ({ats_type}) — tab left open")
@@ -562,34 +580,50 @@ def _interleave_role_queries(config):
 
     Returns a flat list of (role_label, query) tuples in round-robin order.
     """
-    role_agents = config.get("role_agents", [])
-    fallback_keywords = config.get("keywords", [])
+    # Gather every distinct keyword across all role agents (order-preserving).
+    # We round-robin by KEYWORD, not by role agent: the backend merges all of a
+    # user's job titles into ONE role agent, so interleaving by agent did nothing
+    # and the query budget was spent entirely on the first keyword — the run
+    # "only focused on one role". Per-keyword round-robin guarantees every role
+    # gets its best query before any role gets a second.
+    keywords: list = []
+    for agent in config.get("role_agents", []) or []:
+        for kw in agent.get("keywords", []) or []:
+            if kw and kw not in keywords:
+                keywords.append(kw)
+    if not keywords:
+        keywords = [k for k in (config.get("keywords") or []) if k]
+    if not keywords:
+        return []
 
-    # Build a per-role query list
-    per_role_queries = []  # list of (role_label, [query, query, ...])
-    if role_agents:
-        for agent in role_agents:
-            role_label = agent.get("name") or ",".join(agent.get("keywords", []))[:40] or "role"
-            kws = agent.get("keywords", [])
-            if not kws:
-                continue
-            queries = job_finder.build_search_queries(kws, config)
-            per_role_queries.append((role_label, queries))
-    # Fallback: flat keyword list → single synthetic role
-    if not per_role_queries and fallback_keywords:
-        per_role_queries.append((
-            "default",
-            job_finder.build_search_queries(fallback_keywords, config),
-        ))
+    # Per-keyword query cap — without this, each keyword fans out into board ×
+    # ATS × broad queries (each yielding up to 10 tabs), exploding tab count.
+    web_cfg = config.get("web_search", {}) or {}
+    try:
+        per_kw_cap = int(web_cfg.get("max_queries_per_keyword", 6))
+    except (TypeError, ValueError):
+        per_kw_cap = 6
+    per_kw_cap = max(1, min(per_kw_cap, 20))
 
-    # Round-robin interleave so every role advances each cycle
+    per_kw_queries = []  # [(keyword, [q, ...]), ...]
+    for kw in keywords:
+        qs = job_finder.build_search_queries([kw], config)
+        if qs:
+            per_kw_queries.append((kw, qs[:per_kw_cap]))
+
+    # Round-robin by keyword so all roles advance together; dedupe queries.
     interleaved: list = []
-    if per_role_queries:
-        max_len = max(len(q) for _, q in per_role_queries)
+    seen: set = set()
+    if per_kw_queries:
+        max_len = max(len(qs) for _, qs in per_kw_queries)
         for i in range(max_len):
-            for role_label, qs in per_role_queries:
+            for kw, qs in per_kw_queries:
                 if i < len(qs):
-                    interleaved.append((role_label, qs[i]))
+                    q = qs[i]
+                    key = " ".join((q or "").lower().split())
+                    if key and key not in seen:
+                        seen.add(key)
+                        interleaved.append((kw, q))
     return interleaved
 
 
@@ -613,6 +647,8 @@ def search_and_apply(driver, config, applied_urls=None):
         applied_urls = set()
     else:
         applied_urls = set(applied_urls)
+
+    applied_norms = {normalize_url(u) for u in applied_urls}
 
     # Defensive: agent_tasks._build_config() used to send a boolean here, which
     # then AttributeError'd on .get() and killed the whole phase silently.
@@ -697,7 +733,7 @@ def search_and_apply(driver, config, applied_urls=None):
     )
 
     # ── Phase 1: Collect job URLs via interleaved Google searches ──
-    url_set = {u["url"] for u in all_job_urls}  # local dedup set (O(1) lookups)
+    url_set = {normalize_url(u["url"]) for u in all_job_urls}  # local dedup set (O(1) lookups)
 
     for i, (role_label, query) in enumerate(interleaved[:capped]):
         if should_stop():
@@ -749,22 +785,16 @@ def search_and_apply(driver, config, applied_urls=None):
                 except Exception:
                     pass
 
-            results = job_finder.extract_google_links(driver, all_job_urls, applied_urls)
+            results = job_finder.extract_google_links(driver, [u["url"] for u in all_job_urls], applied_urls)
             new_items = []
-            for u in results:
-                url_str = u.get("url") or ""
+            for url_str in results:
                 if not url_str:
                     continue
-                if url_str in applied_urls or url_str in url_set:
+                norm = normalize_url(url_str)
+                if norm in applied_norms or norm in url_set:
                     continue
-                # Canonicalise lightly (strip tracking query params) to avoid
-                # "same job, different utm_*" duplicates.
-                norm = url_str.split("#")[0].split("?")[0].rstrip("/")
-                if norm in url_set:
-                    continue
-                url_set.add(url_str)
                 url_set.add(norm)
-                new_items.append(u)
+                new_items.append({"url": url_str})
 
             print(f"  📋 Found {len(results)} results, {len(new_items)} new")
             all_job_urls.extend(new_items)
@@ -808,7 +838,10 @@ def search_and_apply(driver, config, applied_urls=None):
         try:
             success = apply_to_job_url(driver, url, config, dry_run)
 
-            if success:
+            if success == "review":
+                print("  ⏸️  Left tab open for user review.")
+                new_applied_urls.append(item)
+            elif success:
                 applied_count += 1
                 new_applied_urls.append(item)
                 print(f"  ✅ Total applied: {applied_count}")

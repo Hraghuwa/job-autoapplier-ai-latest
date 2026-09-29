@@ -48,7 +48,7 @@ def take_screenshot(driver):
         return None
 
 
-def _call_vision(client, prompt, image_bytes, model="gemini-2.0-flash"):
+def _call_vision(client, prompt, image_bytes, model="gemini-2.5-flash"):
     """Send image + prompt to Gemini vision model with retry."""
     for attempt in range(2):
         try:

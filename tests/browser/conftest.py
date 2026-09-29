@@ -11,8 +11,11 @@ import sys
 
 import pytest
 
-# Make the agents/ appliers importable.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "agents")))
+# Make the agents/ appliers importable, and also repo root for imports like submit_gate/backend.
+agents_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "agents"))
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, agents_dir)
+sys.path.insert(1, root_dir)
 
 
 def _build_driver():
@@ -27,6 +30,8 @@ def _build_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1280,900")
+    opts.add_argument("--allow-file-access-from-files")
+    opts.add_argument("--disable-web-security")
     wdm = ChromeDriverManager().install()
     d = os.path.dirname(wdm)
     binary = next((p for p in glob.glob(os.path.join(d, "chromedriver*"))
@@ -66,14 +71,43 @@ def chrome_driver():
         pass
 
 
-@pytest.fixture()
-def load_fixture(chrome_driver):
-    """Return a loader: load_fixture('name.html') → driver on that page."""
-    base = os.path.join(os.path.dirname(__file__), "fixtures")
+@pytest.fixture(scope="session")
+def http_server():
+    import socket
+    import threading
+    import http.server
+    from functools import partial
 
+    # Find a free port
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    fixtures_dir = os.path.join(os.path.dirname(__file__), "fixtures")
+
+    class SilentSimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+    handler = partial(SilentSimpleHTTPRequestHandler, directory=fixtures_dir)
+    server = http.server.HTTPServer(('127.0.0.1', port), handler)
+    
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    
+    yield f"http://127.0.0.1:{port}"
+    
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture()
+def load_fixture(chrome_driver, http_server):
+    """Return a loader: load_fixture('name.html') → driver on that page."""
     def _load(name):
-        path = os.path.join(base, name)
-        chrome_driver.get("file://" + path)
+        chrome_driver.get(f"{http_server}/{name}")
         return chrome_driver
 
     return _load
+

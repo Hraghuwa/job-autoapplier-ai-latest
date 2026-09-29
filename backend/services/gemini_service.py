@@ -23,7 +23,7 @@ def _get_client(user_key: Optional[str] = None):
     import google.generativeai as genai
     key = user_key or settings.system_gemini_key
     genai.configure(api_key=key)
-    return genai.GenerativeModel("gemini-1.5-flash")
+    return genai.GenerativeModel("gemini-2.5-flash")
 
 
 def _friendly_gemini_error(exc: Exception) -> str:
@@ -57,7 +57,7 @@ def parse_resume(pdf_bytes: bytes, user_key: Optional[str] = None) -> Dict[str, 
     import google.generativeai as genai
     key = user_key or settings.system_gemini_key
     genai.configure(api_key=key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.5-flash")
 
     prompt = """Extract the following fields from this resume and return ONLY valid JSON.
 Fields: name, email, phone, linkedin_url, location, skills (array),
