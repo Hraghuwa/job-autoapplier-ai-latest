@@ -4,7 +4,8 @@ from typing import Optional
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError as JWTError  # PyJWT (python-jose dropped: unfixed ecdsa CVE)
 from passlib.context import CryptContext
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
