@@ -3,7 +3,6 @@
 @tailwind utilities;
 
 /* ── Premium Font Imports ─────────────────────────────────────── */
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;0,9..144,800;1,9..144,400;1,9..144,500&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 @layer utilities {
   .text-balance {
@@ -96,9 +95,9 @@
     --shadow-hover: 0 12px 20px -4px rgba(26, 26, 46, 0.1), 0 4px 8px -4px rgba(26, 26, 46, 0.06);
 
     /* ── Typography ──────────────────────────── */
-    --font-display: 'Fraunces', Georgia, serif;
-    --font-body: 'DM Sans', system-ui, -apple-system, sans-serif;
-    --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+    --font-display: var(--font-fraunces), 'Fraunces', Georgia, serif;
+    --font-body: var(--font-dm-sans), 'DM Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: var(--font-jetbrains-mono), 'JetBrains Mono', 'Fira Code', monospace;
   }
 
   .dark {
