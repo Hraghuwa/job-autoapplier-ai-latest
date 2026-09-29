@@ -3,7 +3,8 @@ import uuid
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError as JWTError  # PyJWT (python-jose dropped: unfixed ecdsa CVE)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 

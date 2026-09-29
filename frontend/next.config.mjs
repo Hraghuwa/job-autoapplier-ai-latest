@@ -1,3 +1,31 @@
+const isDev = process.env.NODE_ENV !== 'production'
+
+// Origins the browser talks to directly (only set in "direct" mode; the
+// default /api proxy is same-origin and covered by 'self').
+const origin = (u) => { try { return new URL(u).origin } catch { return '' } }
+const apiOrigin = origin(process.env.NEXT_PUBLIC_API_URL)
+const wsOrigin = origin(process.env.NEXT_PUBLIC_WS_URL)
+
+// Static CSP. Scripts keep 'unsafe-inline' because App Router injects inline
+// bootstrap scripts; a nonce-based policy would force every page to render
+// dynamically. This still blocks third-party scripts, eval (prod), plugins,
+// <base> hijacking, framing and cross-origin form posts.
+const csp = [
+  "default-src 'self'",
+  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ''} https://checkout.razorpay.com`,
+  "style-src 'self' 'unsafe-inline'",
+  "font-src 'self' data:",
+  "img-src 'self' data: blob: https:",
+  ['connect-src', "'self'", apiOrigin, wsOrigin, 'https://*.razorpay.com',
+    ...(isDev ? ['http://localhost:*', 'ws://localhost:*'] : [])].filter(Boolean).join(' '),
+  'frame-src https://api.razorpay.com https://checkout.razorpay.com',
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+  ...(isDev ? [] : ['upgrade-insecure-requests']),
+].join('; ')
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // Server-side proxy: /api/* → Railway backend
@@ -26,13 +54,13 @@ const nextConfig = {
       },
     ]
   },
-  // Baseline hardening headers. CSP deliberately not set yet — needs a
-  // nonce/hash pass so it doesn't break Next's inline scripts.
+  // Baseline hardening headers + CSP (see `csp` above).
   async headers() {
     return [
       {
         source: '/:path*',
         headers: [
+          { key: 'Content-Security-Policy', value: csp },
           { key: 'X-Frame-Options', value: 'DENY' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
@@ -41,12 +69,6 @@ const nextConfig = {
         ],
       },
     ]
-  },
-  // Silence the "Module not found" noise for optional server-only packages
-  // that aren't used in the frontend bundle
-  webpack(config) {
-    config.resolve.fallback = { ...config.resolve.fallback, fs: false }
-    return config
   },
 }
 
