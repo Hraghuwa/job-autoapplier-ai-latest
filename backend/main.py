@@ -5,7 +5,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError as JWTError  # PyJWT (python-jose dropped: unfixed ecdsa CVE)
 
 from backend.config import settings
 from backend.database import engine
