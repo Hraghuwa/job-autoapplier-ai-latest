@@ -81,3 +81,15 @@ def test_event_has_no_run_id_caller_adds_it():
     # The pure classifier must NOT bake in run_id — the caller injects it.
     res = classify_agent_line("✅ Applied to Acme")
     assert "run_id" not in res["event"]
+
+
+def test_applying_line_is_visible_ping():
+    # Long Easy Apply flows used to look frozen: nothing was logged until done.
+    assert _cat("  🚀 APPLYING: Sr Client Services Consultant...") == "ping"
+
+
+def test_linkedin_success_lines_count_as_applied():
+    # Frontend showed 0 applied: these LinkedIn lines were never classified.
+    assert _cat("    ✅ SUCCESS: Application sent!") == "applied"
+    assert _cat("    ✅ SUCCESS: Application submitted!") == "applied"
+    assert _cat("  📊 External form submitted: 3/15") == "applied"
