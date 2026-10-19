@@ -37,8 +37,11 @@ from backend.config import settings
 from backend.database import get_db
 from backend.dependencies import get_current_user
 from backend.models.user import User
+from backend.models.application import Application, ApplicationStatus
 from backend.models.profile import UserProfile
+from backend.services import followthrough
 from backend.services.plan_gate import consume_ai_token
+from backend.services.tracking_service import tracking_service
 
 router = APIRouter()
 
@@ -189,7 +192,6 @@ def _parse_json(text: str) -> Dict[str, Any]:
 # In-memory caches (per-user). Survives process lifetime only — DB migration in v2.
 _STORY_BANK: Dict[str, List[Dict[str, Any]]] = {}
 _EVALUATIONS: Dict[str, List[Dict[str, Any]]] = {}
-_FOLLOWUP_LOG: Dict[str, List[Dict[str, Any]]] = {}
 
 
 async def _cv_summary(db: AsyncSession, user: User) -> str:
@@ -285,6 +287,7 @@ class FollowupBody(BaseModel):
     status: str = Field(..., description="applied | responded | interview")
     days_since_action: int
     last_message: Optional[str] = ""
+    application_id: Optional[str] = None  # saves the draft on that application
 
 
 class ContactBody(BaseModel):
@@ -727,7 +730,13 @@ Tone: professional, concise, never desperate. No corporate-speak.
 
 
 @router.post("/followup")
-async def followup(body: FollowupBody, user: User = Depends(get_current_user)):
+async def followup(body: FollowupBody, user: User = Depends(get_current_user),
+                   db: AsyncSession = Depends(get_db)):
+    app = await _own_app(db, user, body.application_id) if body.application_id else None
+    if app is not None and sum(1 for h in (app.history or [])
+                               if h.get("type") == followthrough.FOLLOWUP_EVENT) >= followthrough.MAX_FOLLOWUPS:
+        raise HTTPException(409, f"Already {followthrough.MAX_FOLLOWUPS} follow-ups on this "
+                                 "application — more reads as pestering. Move on or record the outcome.")
     raw = _ai(
         FOLLOWUP_PROMPT.format(
             company=body.company, role=body.role, status=body.status,
@@ -739,11 +748,144 @@ async def followup(body: FollowupBody, user: User = Depends(get_current_user)):
         out = _parse_json(raw)
     except Exception as e:
         raise HTTPException(500, f"Followup parse failed: {e}")
-    _FOLLOWUP_LOG.setdefault(str(user.id), []).insert(0, {
-        "id": str(uuid.uuid4()), "created_at": datetime.utcnow().isoformat(),
-        "company": body.company, "role": body.role, **out,
-    })
+    if app is not None:
+        # Persisted on the application (was an in-memory dict lost on restart);
+        # followups_due() counts these to cap follow-ups at MAX_FOLLOWUPS.
+        await tracking_service.log_event(db, app, followthrough.FOLLOWUP_EVENT,
+                                         f"Follow-up drafted ({out.get('urgency', '')})", out)
+        await db.commit()
     return out
+
+
+# ── After applying: quiet applications, skill gaps, outcomes from Gmail ──────
+
+async def _own_app(db: AsyncSession, user: User, app_id: str) -> Application:
+    try:
+        aid = uuid.UUID(str(app_id))
+    except ValueError:
+        raise HTTPException(400, "Bad application_id")
+    app = (await db.execute(select(Application).where(
+        Application.id == aid, Application.user_id == user.id))).scalar_one_or_none()
+    if not app:
+        raise HTTPException(404, "Application not found")
+    return app
+
+
+async def _app_dicts(db: AsyncSession, user: User) -> List[Dict[str, Any]]:
+    rows = (await db.execute(select(Application).where(Application.user_id == user.id))).scalars().all()
+    return [{"id": a.id, "company": a.company, "job_title": a.job_title, "status": a.status,
+             "applied_at": a.applied_at, "history": a.history, "missing_skills": a.missing_skills}
+            for a in rows]
+
+
+@router.get("/followups/due")
+async def followups_due(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Applications gone quiet past their cadence — draft one via POST /followup
+    with application_id. Drafts only; nothing is ever sent."""
+    return followthrough.followups_due(await _app_dicts(db, user))
+
+
+@router.get("/followups/{app_id}")
+async def followup_drafts(app_id: str, user: User = Depends(get_current_user),
+                          db: AsyncSession = Depends(get_db)):
+    app = await _own_app(db, user, app_id)
+    return [{"created_at": h.get("timestamp"), **(h.get("data") or {})}
+            for h in (app.history or []) if h.get("type") == followthrough.FOLLOWUP_EVENT]
+
+
+@router.get("/skill-gaps")
+async def skill_gaps(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return followthrough.skill_gaps(await _app_dicts(db, user))
+
+
+UPSKILL_PROMPT = """Build a learning plan for a job seeker from the skill gaps
+their own job applications revealed (weight = how often employers asked for it;
+roles that reached interview count double).
+
+CANDIDATE: {cv}
+GAPS (skill, weight): {gaps}
+HOURS PER WEEK AVAILABLE: {hours}
+
+Prioritise by weight and by how quickly each gap can be closed. Prefer free,
+well-known resources (official docs, freeCodeCamp, Coursera audit, YouTube
+courses from established channels) and name them specifically. Skip any gap
+the candidate already covers. Return ONLY JSON:
+{{
+  "plan": [{{"skill": "", "why": "", "resources": [""], "hours": 0, "proof_project": ""}}],
+  "total_weeks": 0,
+  "quick_wins": [""]
+}}"""
+
+
+class UpskillBody(BaseModel):
+    hours_per_week: int = Field(6, ge=1, le=60)
+
+
+@router.post("/skill-gaps/plan")
+async def skill_gap_plan(body: UpskillBody, user: User = Depends(get_current_user),
+                         db: AsyncSession = Depends(get_db)):
+    gaps = followthrough.skill_gaps(await _app_dicts(db, user))
+    if not gaps:
+        raise HTTPException(400, "No skill gaps recorded yet — apply to a few jobs first.")
+    raw = _ai(UPSKILL_PROMPT.format(cv=(await _cv_summary(db, user))[:2500] or "(none)",
+                                    gaps=json.dumps(gaps), hours=body.hours_per_week), user)
+    try:
+        return {"gaps": gaps, **_parse_json(raw)}
+    except Exception as e:
+        raise HTTPException(500, f"Plan parse failed: {e}")
+
+
+class GmailScanBody(BaseModel):
+    email: str
+    app_password: str = Field(..., min_length=16, max_length=32,
+                              description="Gmail app password; used for this scan only, never stored")
+    days: int = Field(30, ge=1, le=120)
+
+
+@router.post("/outcomes/gmail-scan")
+async def gmail_scan(body: GmailScanBody, user: User = Depends(get_current_user),
+                     db: AsyncSession = Depends(get_db)):
+    """Read recent Gmail (read-only IMAP) and PROPOSE status changes, citing the
+    source email. Nothing is written — approve via POST /outcomes/apply."""
+    import asyncio
+    import imaplib
+    try:
+        mails = await asyncio.to_thread(followthrough.fetch_gmail, body.email,
+                                        body.app_password.replace(" ", ""), body.days)
+    except imaplib.IMAP4.error:
+        raise HTTPException(401, "Gmail rejected the login — use an app password "
+                                 "(Google Account → Security → App passwords) with IMAP enabled.")
+    except OSError as e:
+        raise HTTPException(502, f"Could not reach Gmail: {type(e).__name__}")
+    return {"scanned": len(mails),
+            "proposals": followthrough.propose_outcomes(mails, await _app_dicts(db, user))}
+
+
+class OutcomeUpdate(BaseModel):
+    application_id: str
+    status: str
+    evidence: Optional[str] = ""
+
+
+class ApplyOutcomesBody(BaseModel):
+    updates: List[OutcomeUpdate] = Field(..., max_length=200)
+
+
+@router.post("/outcomes/apply")
+async def apply_outcomes(body: ApplyOutcomesBody, user: User = Depends(get_current_user),
+                         db: AsyncSession = Depends(get_db)):
+    """Apply the proposals the user approved."""
+    done = []
+    for u in body.updates:
+        try:
+            status = ApplicationStatus(u.status)
+        except ValueError:
+            raise HTTPException(400, f"Invalid status: {u.status}")
+        app = await _own_app(db, user, u.application_id)
+        await tracking_service.update_status(db, app, status, reason=f"From email: {u.evidence}"[:500])
+        done.append(u.application_id)
+    await db.commit()
+    return {"updated": done}
 
 
 # ── LinkedIn Outreach (contacto.md) ──────────────────────────────────────────

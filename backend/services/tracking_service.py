@@ -52,5 +52,17 @@ class TrackingService:
             f"Status changed from {old_status} to {new_status}",
             {"old_status": str(old_status), "new_status": str(new_status), "reason": reason}
         )
+        # response_rates (and the fit scorer's outcome learning) read
+        # job_outcomes, so every status change must land there too.
+        from sqlalchemy import select
+        from backend.models.application import JobOutcome
+        status = getattr(new_status, "value", str(new_status))
+        row = (await db.execute(select(JobOutcome).where(
+            JobOutcome.application_id == application.id))).scalar_one_or_none()
+        if row is None:
+            db.add(JobOutcome(application_id=application.id, outcome=status,
+                              outcome_updated_at=datetime.utcnow()))
+        else:
+            row.outcome, row.outcome_updated_at = status, datetime.utcnow()
 
 tracking_service = TrackingService()

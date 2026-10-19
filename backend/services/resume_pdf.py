@@ -133,6 +133,26 @@ def render_to_path(resume: TailoredResume, path: str) -> str:
     return path
 
 
+def parse_problems(path: str, must_contain=()) -> list:
+    """ATS parseability check: extract the PDF's text the way an applicant
+    tracking system would and list what's wrong. [] means it reads cleanly.
+    Checks there is real text, and that each `must_contain` string (name,
+    email…) survives extraction — those are what ATS parsers key on."""
+    try:
+        from pypdf import PdfReader
+        text = " ".join((p.extract_text() or "") for p in PdfReader(path).pages)
+    except Exception as e:
+        return [f"text extraction failed: {type(e).__name__}"]
+    flat = " ".join(text.split()).lower()
+    problems = []
+    if len(flat) < 50:  # image-only or garbled PDF
+        problems.append(f"only {len(flat)} characters of text extracted")
+    for s in must_contain:
+        if s and " ".join(str(s).split()).lower() not in flat:
+            problems.append(f"'{s}' not found in extracted text")
+    return problems
+
+
 def _escape(s: Optional[str]) -> str:
     """ReportLab's mini-HTML interprets <>& — escape so user text is literal."""
     if s is None:

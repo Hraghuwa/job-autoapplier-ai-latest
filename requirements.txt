@@ -22,6 +22,7 @@ pyotp
 python-dotenv
 croniter>=2.0.0  # accurate cron matching for scheduled agent runs (audit M4)
 reportlab>=4.0  # ATS-safe tailored-resume PDF rendering (backend/services/resume_pdf.py)
+pypdf>=4.0  # resume text extraction (gemini_service) + tailored-PDF parseability check
 
 # ── Agent browser stack ───────────────────────────────────────────────────────
 # The Celery worker (and the web-process in-thread fallback) import the appliers,

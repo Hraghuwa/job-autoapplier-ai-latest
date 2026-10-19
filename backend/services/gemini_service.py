@@ -124,9 +124,13 @@ def generate_interview_prep(resume_summary: str, jd_text: str, company: str,
                              n_questions: int = 10,
                              user_key: Optional[str] = None) -> Dict[str, Any]:
     """Generate interview questions + answers + company brief."""
+    from backend.services.untrusted import DATA_RULE, fence
     prompt = f"""Generate interview preparation for this candidate applying to {company}.
-Candidate: {resume_summary[:1500]}
-Job: {jd_text[:1500]}
+Base model answers on the candidate material below — when it includes the
+submitted resume/cover note, stay consistent with exactly what was sent.
+{DATA_RULE.format(tag="job_posting")}
+Candidate: {resume_summary[:4000]}
+Job: {fence(jd_text[:3000])}
 
 Return ONLY valid JSON with:
 - questions: array of {{"question": string, "model_answer": string}} ({n_questions} items)

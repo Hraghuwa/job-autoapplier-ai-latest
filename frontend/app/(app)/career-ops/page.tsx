@@ -5,13 +5,13 @@ import { Button } from '@/components/ui/button'
 import {
   Sparkles, Target, BookOpen, Handshake, Radar, Loader2, CheckCircle2,
   AlertTriangle, ChevronRight, GitCompare, Lightbulb, GraduationCap,
-  Search, BarChart3, Mail, Users, Info,
+  Search, BarChart3, Mail, Users, Info, Inbox,
 } from 'lucide-react'
 
 type Tab =
   | 'evaluate' | 'compare' | 'tailor' | 'scan'
   | 'stories' | 'negotiate' | 'project' | 'training'
-  | 'deep' | 'patterns' | 'followup' | 'contact'
+  | 'deep' | 'patterns' | 'followup' | 'contact' | 'skills' | 'outcomes'
 
 const TABS: { id: Tab; label: string; icon: any; tagline: string }[] = [
   { id: 'evaluate',  label: 'Evaluate Offer',  icon: Target,        tagline: 'A–G scoring of a single JD' },
@@ -26,6 +26,8 @@ const TABS: { id: Tab; label: string; icon: any; tagline: string }[] = [
   { id: 'patterns',  label: 'Patterns',        icon: BarChart3,     tagline: 'Rejection-pattern detector across applications' },
   { id: 'followup',  label: 'Follow-up',       icon: Mail,          tagline: 'Cadence + tailored draft generator' },
   { id: 'contact',   label: 'Outreach',        icon: Users,         tagline: 'LinkedIn 3-sentence opener' },
+  { id: 'skills',    label: 'Skill Gaps',      icon: GraduationCap, tagline: 'Study plan from what your applications lacked' },
+  { id: 'outcomes',  label: 'Email Outcomes',  icon: Inbox,         tagline: 'Read Gmail, approve status updates' },
 ]
 
 const DESCRIPTIONS: Record<Tab, { title: string; what: string; how: string; out: string }> = {
@@ -70,13 +72,21 @@ const DESCRIPTIONS: Record<Tab, { title: string; what: string; how: string; out:
     how: 'Paste a JSON list of at least 5 applications with status + score + blockers. (Auto-loaded from your tracker in v2.)',
     out: 'Funnel, archetype performance, top blockers, tech-stack gaps, score threshold, and ranked recommendations.' },
   followup:  { title: 'Follow-up Cadence',
-    what: 'Generates a follow-up draft tuned to the cadence stage (applied = 7d, responded = 3d, interview = 1d).',
-    how: 'Enter company, role, current status, days since last action, and optionally the last message they sent.',
-    out: 'Urgency tag, email + LinkedIn drafts, suggested next-followup date, and close-loop advice.' },
+    what: 'Lists your applications that have gone quiet (applied 7d, viewed/shortlisted 3d, interview 1d) and drafts a follow-up for each. At most 2 per application. Drafts only — nothing is sent.',
+    how: 'Click "Draft" on a quiet application, or fill the form by hand for one that isn\'t tracked.',
+    out: 'Urgency tag, email + LinkedIn drafts, suggested next-followup date, and close-loop advice. Drafts are saved on the application.' },
   contact:   { title: 'LinkedIn Outreach',
     what: 'Three-sentence opener for cold outreach. Different framing for recruiter / hiring manager / peer / interviewer.',
     how: 'Enter the company, role, contact type, and optionally a specific signal about them (a talk, blog post, hire).',
     out: 'A ≤300-char primary message, two alternates, and the rationale for the framing.' },
+  skills:    { title: 'Skill Gaps → Study Plan',
+    what: 'Counts the skills employers asked for that your profile lacked, across every job you applied to (roles that reached interview count double), then builds a learning plan.',
+    how: 'Check the gap list, set hours per week, and click "Build study plan".',
+    out: 'Prioritised skills with specific free resources, hours, and a small project to prove each one.' },
+  outcomes:  { title: 'Outcomes from Gmail',
+    what: 'Reads your recent Gmail (read-only, nothing marked as read) for interview invites, assessments, offers and rejections, and matches them to your applications.',
+    how: 'Create a Gmail app password (Google Account → Security → App passwords; needs 2-step verification) and paste it with your address. It is used for this scan only and never stored.',
+    out: 'Proposed status changes, each citing the email it came from. Nothing changes until you approve.' },
 }
 
 export default function CareerOpsPage() {
@@ -88,7 +98,7 @@ export default function CareerOpsPage() {
         <h1 className="text-3xl font-bold tracking-tight">Career-Ops</h1>
         <p className="text-sm text-muted-foreground mt-1">
           Full AI filter + tailoring + outreach layer ported from the career-ops CLI.
-          12 modes covering every stage from offer-discovery to follow-up.
+          14 modes covering every stage from offer-discovery to follow-up and outcomes.
         </p>
       </header>
 
@@ -137,6 +147,8 @@ export default function CareerOpsPage() {
       {tab === 'patterns'  && <PatternsPanel />}
       {tab === 'followup'  && <FollowupPanel />}
       {tab === 'contact'   && <ContactPanel />}
+      {tab === 'skills'    && <SkillGapsPanel />}
+      {tab === 'outcomes'  && <OutcomesPanel />}
     </div>
   )
 }
@@ -749,20 +761,44 @@ function PatternsPanel() {
 
 // ── Follow-up ────────────────────────────────────────────────────────────────
 function FollowupPanel() {
-  const [form, setForm] = useState({ company: '', role: '', status: 'applied', days_since_action: 7, last_message: '' })
+  const [form, setForm] = useState<any>({ company: '', role: '', status: 'applied', days_since_action: 7, last_message: '', application_id: null })
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<any>(null)
   const [err, setErr] = useState('')
-  const run = async () => {
+  const [due, setDue] = useState<any[]>([])
+  const loadDue = () => api.get('/career-ops/followups/due').then(r => setDue(r.data)).catch(() => {})
+  useEffect(() => { loadDue() }, [])
+  const run = async (body = form) => {
     setLoading(true); setErr(''); setResult(null)
     try {
-      const { data } = await api.post('/career-ops/followup', form)
+      const { data } = await api.post('/career-ops/followup', body)
       setResult(data)
+      if (body.application_id) loadDue()
     } catch (e: any) { setErr(e?.response?.data?.detail || e.message) }
     finally { setLoading(false) }
   }
+  const draftFor = (d: any) => {
+    const body = { company: d.company, role: d.role, last_message: '', application_id: d.application_id,
+      status: d.status === 'interview' ? 'interview' : d.status === 'applied' ? 'applied' : 'responded',
+      days_since_action: d.days_quiet }
+    setForm(body); run(body)
+  }
   return (
     <div className="space-y-3">
+      {due.length > 0 && (
+        <div className="border border-border rounded-xl p-4 bg-card space-y-2">
+          <h4 className="font-semibold text-sm">Gone quiet ({due.length})</h4>
+          {due.map(d => (
+            <div key={d.application_id} className="flex items-center justify-between gap-3 text-sm">
+              <span className="min-w-0 truncate">
+                <span className="font-medium">{d.company}</span> · {d.role}
+                <span className="text-muted-foreground"> — {d.status}, {d.days_quiet}d quiet{d.followups_sent ? `, ${d.followups_sent} sent` : ''}</span>
+              </span>
+              <Button size="sm" variant="outline" disabled={loading} onClick={() => draftFor(d)}>Draft</Button>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="grid md:grid-cols-2 gap-3">
         <input className="rounded border border-border bg-background px-3 py-2 text-sm" placeholder="Company" value={form.company} onChange={e => setForm({ ...form, company: e.target.value })} />
         <input className="rounded border border-border bg-background px-3 py-2 text-sm" placeholder="Role" value={form.role} onChange={e => setForm({ ...form, role: e.target.value })} />
@@ -774,7 +810,7 @@ function FollowupPanel() {
         <input type="number" className="rounded border border-border bg-background px-3 py-2 text-sm" placeholder="Days since last action" value={form.days_since_action} onChange={e => setForm({ ...form, days_since_action: parseInt(e.target.value || '0') })} />
       </div>
       <textarea className="w-full min-h-24 rounded border border-border bg-background px-3 py-2 text-sm" placeholder="Last message they sent (optional)" value={form.last_message} onChange={e => setForm({ ...form, last_message: e.target.value })} />
-      <Button onClick={run} disabled={loading || !form.company}>
+      <Button onClick={() => run()} disabled={loading || !form.company}>
         {loading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Mail className="w-4 h-4 mr-2" />}
         Draft follow-up
       </Button>
@@ -802,6 +838,132 @@ function FollowupPanel() {
           )}
           {result.next_followup_in_days != null && (
             <p className="text-xs text-muted-foreground">Next follow-up in {result.next_followup_in_days} days · {result.close_loop_advice}</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Skill gaps → study plan ──────────────────────────────────────────────────
+function SkillGapsPanel() {
+  const [gaps, setGaps] = useState<any[] | null>(null)
+  const [hours, setHours] = useState(6)
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<any>(null)
+  const [err, setErr] = useState('')
+  useEffect(() => { api.get('/career-ops/skill-gaps').then(r => setGaps(r.data)).catch(() => setGaps([])) }, [])
+  const run = async () => {
+    setLoading(true); setErr(''); setResult(null)
+    try {
+      const { data } = await api.post('/career-ops/skill-gaps/plan', { hours_per_week: hours })
+      setResult(data)
+    } catch (e: any) { setErr(e?.response?.data?.detail || e.message) }
+    finally { setLoading(false) }
+  }
+  return (
+    <div className="space-y-3">
+      {gaps === null ? <Loader2 className="w-4 h-4 animate-spin" /> : gaps.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No gaps recorded yet. They appear as the agents apply and score jobs.</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {gaps.map(g => (
+            <span key={g.skill} className="px-2.5 py-1 rounded-full text-xs bg-muted">{g.skill} <span className="text-muted-foreground">×{g.weight}</span></span>
+          ))}
+        </div>
+      )}
+      <label className="flex items-center gap-2 text-sm">
+        Hours per week
+        <input type="number" min={1} max={60} className="w-20 rounded border border-border bg-background px-2 py-1 text-sm" value={hours} onChange={e => setHours(parseInt(e.target.value || '1'))} />
+      </label>
+      <Button onClick={run} disabled={loading || !gaps?.length}>
+        {loading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <GraduationCap className="w-4 h-4 mr-2" />}
+        Build study plan
+      </Button>
+      <Err msg={err} />
+      {result?.plan && (
+        <div className="border border-border rounded-xl p-5 bg-card space-y-4">
+          {result.total_weeks ? <p className="text-sm font-medium">About {result.total_weeks} weeks at {hours} h/week</p> : null}
+          {result.plan.map((p: any, i: number) => (
+            <div key={i} className="space-y-1">
+              <h4 className="font-semibold text-sm">{i + 1}. {p.skill} <span className="text-muted-foreground font-normal">· ~{p.hours}h</span></h4>
+              <p className="text-sm text-muted-foreground">{p.why}</p>
+              <ul className="list-disc list-inside text-sm">{(p.resources || []).map((r: string, j: number) => <li key={j}>{r}</li>)}</ul>
+              {p.proof_project && <p className="text-sm"><span className="font-medium">Prove it:</span> {p.proof_project}</p>}
+            </div>
+          ))}
+          {(result.quick_wins || []).length > 0 && (
+            <p className="text-sm"><span className="font-medium">Quick wins:</span> {result.quick_wins.join(' · ')}</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Outcomes from Gmail ──────────────────────────────────────────────────────
+function OutcomesPanel() {
+  const [email, setEmail] = useState('')
+  const [pw, setPw] = useState('')
+  const [days, setDays] = useState(30)
+  const [loading, setLoading] = useState(false)
+  const [scan, setScan] = useState<any>(null)
+  const [picked, setPicked] = useState<Record<string, boolean>>({})
+  const [done, setDone] = useState('')
+  const [err, setErr] = useState('')
+  const run = async () => {
+    setLoading(true); setErr(''); setScan(null); setDone('')
+    try {
+      const { data } = await api.post('/career-ops/outcomes/gmail-scan', { email, app_password: pw, days })
+      setScan(data)
+      setPicked(Object.fromEntries(data.proposals.map((p: any) => [p.application_id, true])))
+    } catch (e: any) { setErr(e?.response?.data?.detail || e.message) }
+    finally { setLoading(false); setPw('') }  // never keep the password around
+  }
+  const apply = async () => {
+    setLoading(true); setErr('')
+    try {
+      const updates = scan.proposals.filter((p: any) => picked[p.application_id]).map((p: any) => ({
+        application_id: p.application_id, status: p.proposed_status,
+        evidence: `${p.evidence.from}: ${p.evidence.subject}`,
+      }))
+      const { data } = await api.post('/career-ops/outcomes/apply', { updates })
+      setDone(`Updated ${data.updated.length} application${data.updated.length === 1 ? '' : 's'}.`)
+      setScan(null)
+    } catch (e: any) { setErr(e?.response?.data?.detail || e.message) }
+    finally { setLoading(false) }
+  }
+  return (
+    <div className="space-y-3">
+      <div className="grid md:grid-cols-3 gap-3">
+        <input className="rounded border border-border bg-background px-3 py-2 text-sm" placeholder="you@gmail.com" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} />
+        <input type="password" className="rounded border border-border bg-background px-3 py-2 text-sm" placeholder="Gmail app password (16 letters)" autoComplete="off" value={pw} onChange={e => setPw(e.target.value)} />
+        <select className="rounded border border-border bg-background px-3 py-2 text-sm" value={days} onChange={e => setDays(parseInt(e.target.value))}>
+          <option value={14}>Last 14 days</option>
+          <option value={30}>Last 30 days</option>
+          <option value={60}>Last 60 days</option>
+        </select>
+      </div>
+      <Button onClick={run} disabled={loading || !email || pw.replace(/\s/g, '').length < 16}>
+        {loading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Inbox className="w-4 h-4 mr-2" />}
+        Scan inbox
+      </Button>
+      <Err msg={err} />
+      {done && <p className="text-sm text-green-600 flex items-center gap-1"><CheckCircle2 className="w-4 h-4" />{done}</p>}
+      {scan && (
+        <div className="border border-border rounded-xl p-5 bg-card space-y-3">
+          <p className="text-sm text-muted-foreground">Scanned {scan.scanned} emails · {scan.proposals.length} proposed update{scan.proposals.length === 1 ? '' : 's'}</p>
+          {scan.proposals.map((p: any) => (
+            <label key={p.application_id} className="flex items-start gap-3 text-sm">
+              <input type="checkbox" className="mt-1" checked={!!picked[p.application_id]} onChange={e => setPicked({ ...picked, [p.application_id]: e.target.checked })} />
+              <span>
+                <span className="font-medium">{p.company}</span> · {p.role}: {p.current_status} → <span className="font-semibold">{p.proposed_status}</span>
+                <span className="block text-xs text-muted-foreground">From {p.evidence.from} — “{p.evidence.subject}” {p.evidence.date?.slice(0, 10)}</span>
+              </span>
+            </label>
+          ))}
+          {scan.proposals.length > 0 && (
+            <Button onClick={apply} disabled={loading || !Object.values(picked).some(Boolean)}>Apply selected</Button>
           )}
         </div>
       )}
