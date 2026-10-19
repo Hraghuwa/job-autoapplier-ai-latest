@@ -25,6 +25,7 @@ import random
 import traceback
 import re
 import json
+import os
 from urllib.parse import quote_plus, urlparse
 from url_utils import normalize_url
 
@@ -687,6 +688,31 @@ def _keyword_matches(title, keywords):
             if stem and stem in t:
                 return True
     return False
+
+
+def fetch_jobspy_jobs(keywords, locations, sites, per_search=25, timeout=300):
+    """LinkedIn/Indeed/Naukri/Google Jobs postings via JobSpy, same shape as _board_postings.
+    JobSpy needs Python >= 3.10 and the agent runs on 3.9, so it runs in a separate
+    interpreter (JOBSPY_PYTHON, else the newest python3.x on PATH). Never raises."""
+    import shutil
+    import subprocess
+    py = os.environ.get("JOBSPY_PYTHON") or next(
+        filter(None, (shutil.which(f"python3.{v}") for v in range(14, 9, -1))), None)
+    if not py:
+        print("  ⚠️  [JobSpy] No Python >= 3.10 found — set JOBSPY_PYTHON. Skipping.")
+        return []
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobspy_fetch.py")
+    args = {"keywords": keywords, "locations": locations, "sites": sites, "per_search": per_search}
+    try:
+        r = subprocess.run([py, script], input=json.dumps(args), capture_output=True,
+                           text=True, timeout=timeout)
+        if r.returncode:
+            print(f"  ⚠️  [JobSpy] failed: {r.stderr.strip()[-200:]}")
+            return []
+        return json.loads(r.stdout or "[]")
+    except Exception as e:
+        print(f"  ⚠️  [JobSpy] error: {str(e)[:120]}")
+        return []
 
 
 def fetch_board_api_jobs(keywords, applied_urls, max_jobs=40):
