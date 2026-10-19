@@ -103,7 +103,7 @@ export DATABASE_URL="sqlite+aiosqlite:///$DB_DIR/jobagent.db"
 python3 -m uvicorn backend.main:app --host 127.0.0.1 --port 3002 > "$BACKEND_LOG" 2>&1 &
 
 echo "→ Starting Celery Worker..."
-python3 -m celery -A backend.workers.celery_app worker --loglevel=info -Q agents,default > /tmp/worker.log 2>&1 &
+python3 -m celery -A backend.workers.celery_app worker -B -s /tmp/celerybeat-schedule --loglevel=info -Q agents,default > /tmp/worker.log 2>&1 &
 
 BPID=$!
 

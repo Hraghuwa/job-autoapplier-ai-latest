@@ -13,4 +13,4 @@ echo "🔥 Starting JobAgent Celery Worker..."
 echo "Broker: redis://localhost:6379/0"
 echo "Queues: agents, default"
 
-python3 -m celery -A backend.workers.celery_app worker --loglevel=info -Q agents,default
+python3 -m celery -A backend.workers.celery_app worker -B -s /tmp/celerybeat-schedule --loglevel=info -Q agents,default

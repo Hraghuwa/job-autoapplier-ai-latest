@@ -73,7 +73,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A backend.workers.celery_app worker --concurrency=4 --loglevel=info
+    command: celery -A backend.workers.celery_app worker -B -s /tmp/celerybeat-schedule --concurrency=4 --loglevel=info -Q agents,default
 
   # ── Next.js frontend ──────────────────────────────────────────────────────
   frontend:

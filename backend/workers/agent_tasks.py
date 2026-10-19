@@ -16,7 +16,7 @@ import uuid
 import json
 import traceback
 import threading
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 from celery import Task
 from celery.utils.log import get_task_logger
@@ -1040,6 +1040,26 @@ def run_phase_task(self: Task, user_id: str, phase: int, run_id: str, dry_run: b
     _run_phase_logic(user_id, phase, run_id, task_self=self, dry_run=dry_run)
 
 
+def _last_cron_slot(cron, now):
+    """Most recent time `cron` fired at or before `now` (naive local), or None if unparseable.
+    croniter when installed; otherwise only daily "M H * * *" is understood."""
+    try:
+        from croniter import croniter
+        return croniter(cron, now).get_prev(datetime)
+    except ImportError:
+        pass
+    except Exception:
+        return None
+    try:
+        m, h, *rest = cron.split()
+        if rest != ["*", "*", "*"]:
+            return None
+        slot = now.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+    except ValueError:
+        return None
+    return slot if slot <= now else slot - timedelta(days=1)
+
+
 @celery_app.task(name="backend.workers.agent_tasks.check_schedules")
 def check_schedules():
     from backend.models.user import User
@@ -1063,37 +1083,21 @@ def check_schedules():
             if not check_plan_access(_plan_name(user), "scheduling"):
                 continue
                 
-            # Audit M4: use croniter for correct cron matching when available;
-            # fall back to the legacy hour-only check otherwise. Beat is assumed
-            # to call this ~hourly, so we match the cron against the current hour
-            # window. The per-day dedup below prevents double-fires either way.
-            cron = schedule.get("cron", "0 9 * * *")
-            now = datetime.now()
-            should_fire = None
-            try:
-                from croniter import croniter as _croniter
-                # True iff the cron's most-recent scheduled time falls within this hour.
-                prev = _croniter(cron, now).get_prev(datetime)
-                should_fire = (now - prev) < timedelta(hours=1)
-            except Exception:
-                should_fire = None  # croniter unavailable / bad expr → use fallback
-
-            if should_fire is None:
-                parts = cron.split(" ")
-                if len(parts) >= 2:
-                    target_hour = parts[1]
-                    if target_hour != "*" and str(now.hour) != target_hour:
-                        continue  # not time yet
-            elif not should_fire:
+            # Fire when the cron's latest slot (server local time) is < 1h old and
+            # no run was created since that slot. Beat ticks every 5 min, so a
+            # worker restart can't skip the slot; the dedup stops double-fires.
+            prev = _last_cron_slot(schedule.get("cron", "0 9 * * *"), datetime.now())
+            if prev is None or datetime.now() - prev > timedelta(hours=1):
                 continue
+            # created_at is naive UTC and set on insert (started_at stays NULL while queued).
+            since = prev.astimezone(timezone.utc).replace(tzinfo=None)
 
             phases = schedule.get("phases", [])
             for phase in phases:
-                # To prevent running multiple times an hour, check if already ran today
                 run = session.query(AgentRun).filter(
                     AgentRun.user_id == user.id,
                     AgentRun.phase == phase,
-                    AgentRun.started_at >= date.today()
+                    AgentRun.created_at >= since,
                 ).first()
                 
                 if not run:

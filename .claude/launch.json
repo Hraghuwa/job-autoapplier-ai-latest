@@ -16,7 +16,7 @@
     {
       "name": "Celery Worker",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "celery", "-A", "backend.workers.celery_app", "worker", "--loglevel=info", "-Q", "agents,default"],
+      "runtimeArgs": ["-m", "celery", "-A", "backend.workers.celery_app", "worker", "-B", "-s", "/tmp/celerybeat-schedule", "--loglevel=info", "-Q", "agents,default"],
       "port": null
     },
     {
