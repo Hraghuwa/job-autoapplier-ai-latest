@@ -690,6 +690,53 @@ def _keyword_matches(title, keywords):
     return False
 
 
+def _strip_html(s):
+    import html
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(s or ""))).strip()
+
+
+def _board_postings(kind, slug):
+    """All postings of one company board as dicts {url, title, location, company, jd}."""
+    if kind == "greenhouse":
+        # List without content (fast); fetch_jd() pulls the JD only for jobs that pass targeting.
+        data = _http_json(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs") or {}
+        return [{"url": j.get("absolute_url"), "title": j.get("title") or "",
+                 "location": (j.get("location") or {}).get("name") or "", "company": slug,
+                 "jd": "", "jd_api": f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs/{j.get('id')}"}
+                for j in data.get("jobs", [])]
+    data = _http_json(f"https://api.lever.co/v0/postings/{slug}?mode=json")
+    if not isinstance(data, list):
+        return []
+    return [{"url": j.get("hostedUrl"), "title": j.get("text") or "",
+             "location": (j.get("categories") or {}).get("location") or "", "company": slug,
+             "jd": (j.get("descriptionPlain") or "")[:8000]} for j in data]
+
+
+def fetch_jd(jobs):
+    """Fill in missing JD text (Greenhouse) for the given postings, in parallel."""
+    from concurrent.futures import ThreadPoolExecutor
+    def one(p):
+        if not p.get("jd") and p.get("jd_api"):
+            p["jd"] = _strip_html((_http_json(p["jd_api"]) or {}).get("content"))[:8000]
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        list(ex.map(one, jobs))
+    return jobs
+
+
+def fetch_board_jobs(extra_boards=()):
+    """Every posting from the configured Greenhouse/Lever boards, fetched in parallel.
+    `extra_boards` are the user's saved Portal Scan targets ({kind, slug}) and
+    come first, so their postings win the tab budget."""
+    from concurrent.futures import ThreadPoolExecutor
+    user = [(b["kind"], b["slug"]) for b in extra_boards or ()
+            if isinstance(b, dict) and b.get("kind") in ("greenhouse", "lever") and b.get("slug")]
+    boards = list(dict.fromkeys(user + [("greenhouse", s) for s in _BOARD_GREENHOUSE_SLUGS]
+                                + [("lever", s) for s in _BOARD_LEVER_SLUGS]))
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        results = ex.map(lambda b: _board_postings(*b), boards)
+    return [p for ps in results for p in ps if p.get("url")]
+
+
 def fetch_jobspy_jobs(keywords, locations, sites, per_search=25, timeout=300):
     """LinkedIn/Indeed/Naukri/Google Jobs postings via JobSpy, same shape as _board_postings.
     JobSpy needs Python >= 3.10 and the agent runs on 3.9, so it runs in a separate

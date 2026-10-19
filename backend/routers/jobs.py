@@ -22,7 +22,8 @@ async def list_jobs(
     status: Optional[str] = None,
     min_score: Optional[int] = Query(None, ge=0, le=100),
     max_score: Optional[int] = Query(None, ge=0, le=100),
-    limit: int = Query(50, le=200),
+    search: Optional[str] = Query(None, max_length=100),
+    limit: int = Query(50, ge=1, le=5000),
     offset: int = 0,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -36,6 +37,9 @@ async def list_jobs(
         q = q.where(Application.match_score >= min_score)
     if max_score is not None:
         q = q.where(Application.match_score <= max_score)
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        q = q.where(Application.job_title.ilike(like) | Application.company.ilike(like))
     q = q.order_by(desc(Application.applied_at)).offset(offset).limit(limit)
     result = await db.execute(q)
     apps = result.scalars().all()

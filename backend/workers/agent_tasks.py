@@ -14,6 +14,7 @@ import sys
 import os
 import uuid
 import json
+import re
 import traceback
 import threading
 from datetime import datetime, date, timedelta, timezone
@@ -236,21 +237,29 @@ def _learn_from_run_logs(session, user_id: str, run_id: str) -> Optional[str]:
 
     errors_text = "\n".join(f"- {log.message[:500]}" for log in logs)
     advice = ""
-    if settings.system_gemini_key:
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=settings.system_gemini_key)
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            response = model.generate_content(f"""You are improving a browser job auto-applier.
+    # Route through llm_router (Ollama → Groq → Gemini) with the user's own keys.
+    # Calling Gemini directly with SYSTEM_GEMINI_KEY failed outright once that
+    # key went invalid, so self-learning silently never produced rules.
+    try:
+        from backend.models.user import User
+        import llm_router
+        user = session.query(User).filter(User.id == uuid.UUID(user_id)).first()
+        groq_enc = getattr(user, "groq_key_encrypted", None) if user else None
+        llm_config = {"user_id": user_id,
+                      "groq_api_key": _decrypt(groq_enc) if groq_enc else "",
+                      "gemini_api_key": settings.system_gemini_key or ""}
+        advice = (llm_router.generate(f"""You are improving a browser job auto-applier.
 
 These are real failure logs from one run:
 {errors_text}
 
 Produce 1-3 concrete future rules. Each rule must be a single imperative sentence.
-Return only the rules, one per line.""")
-            advice = (response.text or "").strip()
-        except Exception as e:
-            logger.warning("Self-learning analysis failed for run %s: %s", run_id, e)
+Return only the rules, one per line.""", role="writer", config=llm_config) or "").strip()
+        if not advice:
+            logger.warning("Self-learning: no LLM provider answered for run %s (%s)",
+                           run_id, llm_router.LAST_ERROR)
+    except Exception as e:
+        logger.warning("Self-learning analysis failed for run %s: %s", run_id, e)
 
     if not advice:
         lowered = errors_text.lower()
@@ -630,6 +639,12 @@ def _build_config(user, profile) -> dict:
             "google_login_wait_sec": int(prefs.get("google_login_wait_sec", 120)),
             "extra_sites": list(prefs.get("web_search_extra_sites") or []),
         },
+        # ADR-001 web-search targeting + ContextFill. Highest seniority to apply
+        # for (intern|entry|associate|mid|senior); "entry" also allows associate.
+        "target_seniority": str(prefs.get("target_seniority", "entry")),
+        # Off by default: the safety gate leaves filled forms for the user to submit.
+        "auto_submit": bool(prefs.get("auto_submit", False)),
+        "contextfill_dir": str(prefs.get("contextfill_dir", "")),
         "custom_instructions": str(prefs.get("agent_custom_instructions", "")),
     }
     return config
@@ -651,6 +666,59 @@ PHASE_PLATFORM_MAP = {
     1: "linkedin", 2: "internshala", 3: "wellfound", 4: "naukri",
     5: "unstop", 6: "web_search", 7: "form_fill",
 }
+
+# Lines that announce which job the applier is about to work on. The "✅" success
+# lines carry no title/company, so the parent remembers the last context seen
+# and attaches it to the Application row when the success line arrives.
+# ponytail: stdout scraping; switch to a structured marker line if appliers change format.
+_JOB_CTX_PATTERNS = (
+    re.compile(r"(?:APPLYING|ANALYZING):\s*(?P<title>.+?)(?:\.\.\.)?$"),
+    re.compile(r"📋 \[\d+\]\s*(?P<title>.+?)(?:\s+@\s+(?P<company>.+))?$"),
+    re.compile(r"(?:Applying to:|\[\d+/\d+\])\s*(?P<url>https?://\S+)$"),
+)
+
+
+def parse_job_context(line: str) -> Optional[dict]:
+    """Return {"title", "company", "url"} if the line announces a job, else None."""
+    line = (line or "").strip()
+    for pat in _JOB_CTX_PATTERNS:
+        m = pat.search(line)
+        if m:
+            d = m.groupdict()
+            return {"title": (d.get("title") or "").strip(),
+                    "company": (d.get("company") or "").strip(),
+                    "url": (d.get("url") or "").strip()}
+    return None
+
+
+def _save_application(session, user_id: str, platform: str, ctx: Optional[dict]) -> Optional[str]:
+    """Persist one applied job so /jobs and /jobs/analytics (the dashboard) see it."""
+    import hashlib
+    from backend.models.application import Application
+    ctx = ctx or {}
+    title = (ctx.get("title") or ctx.get("url") or "Unknown role")[:255]
+    company = (ctx.get("company") or "")[:255]
+    url = ctx.get("url") or None
+    job_hash = hashlib.sha256(f"{platform}|{url or ''}|{title}|{company}".lower().encode()).hexdigest()
+    try:
+        uid = uuid.UUID(user_id)
+        existing = session.query(Application).filter(
+            Application.user_id == uid, Application.job_hash == job_hash).first()
+        # Only dedup real identities; "Unknown role" lines must not collapse together.
+        if existing and (url or ctx.get("title")):
+            return str(existing.id)
+        app = Application(user_id=uid, platform=platform, job_title=title,
+                          company=company, job_url=url, job_hash=job_hash)
+        session.add(app)
+        session.commit()
+        return str(app.id)
+    except Exception as e:
+        logger.warning("Could not save application for user %s: %s", user_id, e)
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return None
 
 
 def classify_agent_line(line: str):
@@ -840,6 +908,11 @@ def _persist_autofill_bank(session, user_id, agent_config_mod) -> None:
 def _get_python_executable() -> str:
     """Resolve correct virtualenv python binary on macOS / Windows."""
     py_exe = sys.executable
+    # Worker may be launched with a system python that lacks selenium etc.
+    # (seen: every run failed "No module named 'selenium'"); prefer the repo venv.
+    repo_venv = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".venv", "bin", "python"))
+    if os.path.exists(repo_venv):
+        return repo_venv
     if sys.prefix != sys.base_prefix:
         venv_py = os.path.join(sys.prefix, "bin", "python")
         if os.path.exists(venv_py):
@@ -936,7 +1009,13 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
 
         # Per-line handler: classify → log + publish + accumulate stats. Shared
         # by both executors so behaviour is identical regardless of path.
+        job_ctx: dict = {}
+
         def _handle_line(line):
+            ctx = parse_job_context(line)
+            if ctx:
+                job_ctx.clear()
+                job_ctx.update(ctx)
             res = classify_agent_line(line)
             if not res:
                 return
@@ -945,7 +1024,11 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
             event["run_id"] = run_id
             if cat == "applied":
                 stats["applied"] += 1
-                _log_event(session, run_id, "applied", line)
+                app_id = None if dry_run else _save_application(session, user_id, platform, job_ctx)
+                event["job_title"] = job_ctx.get("title", "")
+                event["company"] = job_ctx.get("company", "")
+                job_ctx.clear()
+                _log_event(session, run_id, "applied", line, app_id)
             elif cat == "skipped":
                 stats["skipped"] += 1
                 _log_event(session, run_id, "skipped", line)

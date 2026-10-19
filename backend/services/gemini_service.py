@@ -52,36 +52,38 @@ def _call(prompt: str, user_key: Optional[str] = None, role: str = "writer") -> 
         return f"__ERROR__:{e}"
 
 
-def parse_resume(pdf_bytes: bytes, user_key: Optional[str] = None) -> Dict[str, Any]:
-    """Extract structured data from resume PDF bytes."""
-    import google.generativeai as genai
-    key = user_key or settings.system_gemini_key
-    genai.configure(api_key=key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
+def parse_resume(pdf_bytes: bytes, user_key: Optional[str] = None,
+                 groq_key: Optional[str] = None) -> Dict[str, Any]:
+    """Extract structured data from resume PDF bytes.
 
+    Text is extracted locally (pypdf) and sent through llm_router (Ollama →
+    Groq → Gemini). Uploading the PDF straight to Gemini meant one dead
+    SYSTEM_GEMINI_KEY left every profile empty, so no form could be filled.
+    """
     prompt = """Extract the following fields from this resume and return ONLY valid JSON.
 Fields: name, email, phone, linkedin_url, location, skills (array),
 education (array of {degree, institution, year, cgpa}),
 experience (array of {company, role, duration, description}),
 certifications (array), summary (2 sentences max).
-Return only the JSON object, no markdown."""
+Return only the JSON object, no markdown.
 
+Resume text:
+"""
     try:
-        import tempfile, os
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-            f.write(pdf_bytes)
-            tmp = f.name
-
-        uploaded = genai.upload_file(tmp, mime_type="application/pdf")
-        response = model.generate_content([prompt, uploaded])
-        os.unlink(tmp)
-
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return json.loads(text)
+        import io
+        from pypdf import PdfReader
+        text = "\n".join((p.extract_text() or "") for p in PdfReader(io.BytesIO(pdf_bytes)).pages[:10])
+        if not text.strip():
+            return {"error": "Could not read text from this PDF (is it a scanned image?).",
+                    "name": "", "email": "", "phone": "", "skills": []}
+        import llm_router
+        out = llm_router.generate(prompt + text[:20000], role="writer", max_tokens=2500, temperature=0.1,
+                                  config={"groq_api_key": groq_key or "",
+                                          "gemini_api_key": user_key or settings.system_gemini_key or ""})
+        if not out:
+            return {"error": f"Resume uploaded, but no AI provider could parse it ({llm_router.LAST_ERROR}).",
+                    "name": "", "email": "", "phone": "", "skills": []}
+        return json.loads(out[out.index("{"):out.rindex("}") + 1])
     except Exception as e:
         return {"error": _friendly_gemini_error(e), "name": "", "email": "", "phone": "", "skills": []}
 

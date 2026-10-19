@@ -93,3 +93,15 @@ def test_linkedin_success_lines_count_as_applied():
     assert _cat("    ✅ SUCCESS: Application sent!") == "applied"
     assert _cat("    ✅ SUCCESS: Application submitted!") == "applied"
     assert _cat("  📊 External form submitted: 3/15") == "applied"
+
+
+def test_job_context_is_parsed_for_application_rows():
+    # Dashboard showed 0 jobs: no Application row was ever written because the
+    # success line has no title — the preceding context line supplies it.
+    from backend.workers.agent_tasks import parse_job_context as p
+    assert p("  🚀 APPLYING: Product Intern...")["title"] == "Product Intern"
+    assert p("  [3/10] 🔍 ANALYZING: Growth Intern")["title"] == "Growth Intern"
+    wf = p("  📋 [2] PM Intern @ Acme")
+    assert (wf["title"], wf["company"]) == ("PM Intern", "Acme")
+    assert p("  [1/5] Applying to: https://jobs.lever.co/x/1")["url"] == "https://jobs.lever.co/x/1"
+    assert p("    ✅ SUCCESS: Application sent!") is None

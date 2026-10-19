@@ -27,7 +27,8 @@ class PerformanceTracker:
             m["status"] = "Error" if error else "Success"
             
             status_icon = "❌" if error else "✅"
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {status_icon} Finished Agent Phase: {phase_name} | Duration: {m['duration']:.2f}s | Applied: {jobs_applied}")
+            err = f" | Error: {str(error)[:300]}" if error else ""
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {status_icon} Finished Agent Phase: {phase_name} | Duration: {m['duration']:.2f}s | Applied: {jobs_applied}{err}")
 
     def summary(self):
         print("\n" + "="*60)

@@ -133,8 +133,11 @@ def _seniority_fit(jd_seniority: str, profile: Dict[str, Any]) -> float:
         years = float(profile.get("years_of_experience") or 0)
     except (TypeError, ValueError):
         years = 0.0
-    # Map candidate years → an approximate rank.
+    # Map candidate years → an approximate rank, unless the user set the level
+    # they're targeting (e.g. a career switcher aiming at entry roles, ADR-001).
     cand_rank = 0 if years < 1 else 1 if years < 3 else 2 if years < 6 else 3
+    target = str(profile.get("_target_seniority") or "").lower()
+    cand_rank = {"intern": 0, "entry": 1, "associate": 1, "junior": 1, "mid": 2, "senior": 3}.get(target, cand_rank)
     gap = abs(jd_rank - cand_rank)
     return max(0.0, 1.0 - 0.34 * gap)  # 0 gap=1.0, 1=0.66, 2=0.32, 3=0.0
 

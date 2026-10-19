@@ -94,12 +94,11 @@ def _is_google_login_page(driver) -> bool:
         url = (driver.current_url or "").lower()
         if "accounts.google.com" in url or "servicelogin" in url:
             return True
-        if "google.com/signin" in url:
+        if "google.com/signin" in url or "/sorry/" in url:
             return True
-        # Interstitial "unusual traffic" page is ALSO a login/challenge signal —
-        # Google shows a checkbox that looks like a CAPTCHA.
+        # Interstitial "unusual traffic" / reCAPTCHA page is ALSO a wall.
         page_src = (driver.page_source or "").lower()[:5000]
-        if "unusual traffic" in page_src and "sign in" in page_src:
+        if "unusual traffic" in page_src or "recaptcha" in page_src:
             return True
     except Exception:
         pass
@@ -180,6 +179,7 @@ SKIP_DOMAINS = [
 
 
 import job_finder
+import job_targeting
 
 def _build_search_queries(config):
     """Bridge to job_finder's superior query engine."""
@@ -870,3 +870,220 @@ def search_and_apply(driver, config, applied_urls=None):
     print(f"[Web Search] 📊 URLs processed: {len(all_job_urls)} — all tabs remain open.")
 
     return applied_count, new_applied_urls
+
+
+# ─────────────────────────────────────────────
+#  PIPELINE (ADR-001): discover → target → fill with ContextFill → close
+# ─────────────────────────────────────────────
+
+_CONFIRM_WORDS = ("thank you", "application submitted", "application received",
+                  "successfully submitted", "we have received", "applied successfully")
+
+
+def _google_urls(driver, config, seen_norms, limit, applied_urls=()):
+    """Secondary discovery. The first CAPTCHA / sign-in wall ends Google for this run."""
+    web_cfg = config.get("web_search") or {}
+    out = []
+    for i, (_, query) in enumerate(_interleave_role_queries(config)[: int(web_cfg.get("max_queries", 30))]):
+        if should_stop() or len(out) >= limit:
+            break
+        try:
+            driver.get(f"https://www.google.com/search?q={quote_plus(query)}&num=10")
+            time.sleep(random.uniform(2, 3))
+            if _is_google_login_page(driver):
+                print("  [Web Search] 🚧 Google CAPTCHA — skipping Google for this run (board APIs still used).")
+                break
+            for u in job_finder.extract_google_links(driver, [], []):
+                n = normalize_url(u)
+                if n not in seen_norms and u not in applied_urls:
+                    seen_norms.add(n)
+                    out.append({"url": u, "title": "", "location": "", "jd": ""})
+        except Exception as e:
+            print(f"  ⚠️  Google query error: {type(e).__name__}: {str(e)[:100]}")
+    return out[:limit]
+
+
+def _fit_ok(config, title, jd):
+    """LLM fit gate (jd_analyser + fit_scorer). Fail-open when the backend isn't importable."""
+    try:
+        from backend.services.apply_decision import should_apply
+    except Exception:
+        return True, ""
+    d = should_apply(config, jd_text=jd, title=title or None)
+    return d.apply, f"fit {d.score}/100: {d.reasons[-1] if d.reasons else ''}"
+
+
+def _confirmed(driver):
+    try:
+        body = driver.find_element(By.TAG_NAME, "body").text.lower()
+        return any(w in body for w in _CONFIRM_WORDS)
+    except Exception:
+        return False
+
+
+def _close_tabs(driver, handles, home):
+    for h in handles:
+        try:
+            driver.switch_to.window(h)
+            driver.close()
+        except Exception:
+            pass
+    try:
+        driver.switch_to.window(home if home in driver.window_handles else driver.window_handles[0])
+    except Exception:
+        pass
+
+
+def process_job(driver, job, config, ctx, cf=None, home=None):
+    """One job, end to end, in its own tab. Returns 'applied' | 'review' | 'skipped' | 'failed'.
+
+    The tab is closed afterwards unless the user has to act on it ('review').
+    """
+    url = job["url"]
+    before = set(driver.window_handles)
+    tab_id = None
+    if cf:
+        _, tab_id = cf.open(url)
+    else:
+        driver.execute_script("window.open(arguments[0], '_blank');", url)
+        time.sleep(random.uniform(2, 3))
+    opened = [h for h in driver.window_handles if h not in before]
+    if opened:
+        driver.switch_to.window(opened[0])
+    result = "failed"
+    try:
+        title = job.get("title") or driver.title or ""
+        if not job.get("title"):  # Google result — rules run now that we know the title
+            ok, why = job_targeting.check(title, job.get("location"), ctx)
+            if not ok:
+                print(f"    ⏭ Skipping '{title[:50]}': {why}")
+                result = "skipped"
+                return result
+        jd = job.get("jd") or smart_form_filler._capture_jd_text(driver, {}) or ""
+        ok, why = _fit_ok(config, title, jd)
+        if not ok:
+            print(f"    ⏭ Skipping '{title[:50]}' ({why})")
+            result = "skipped"
+            return result
+        config["_current_jd"], config["_current_title"] = jd, title
+        print(f"    🎯 {title[:60]} @ {job.get('company') or urlparse(url).netloc}")
+
+        n = len(driver.window_handles)
+        detect_and_click_apply(driver)
+        if len(driver.window_handles) > n:  # Apply opened the form in a new tab
+            new = driver.window_handles[-1]
+            opened.append(new)
+            driver.switch_to.window(new)
+            time.sleep(2)
+            if cf:
+                tab_id = cf.active_tab_id(new)
+
+        asks = []
+        if cf and tab_id:
+            r = cf.fill(tab_id)
+            if r["error"]:
+                print(f"    ⚠️  ContextFill: {r['error'][:120]} — using built-in filler")
+            else:
+                asks = r["asks"]
+                print(f"    📝 ContextFill filled {r['filled']} field(s), {len(asks)} question(s) for you")
+            driver.switch_to.window(opened[-1])
+        if not (cf and tab_id) or (cf and r["error"]):
+            smart_form_filler.fill_all_form_fields(driver, config)
+            google_form_filler.fill_web_form(driver, config)
+        if asks:
+            print("    ⏸️  Needs your answers — tab left open (see ContextFill badge).")
+            result = "review"
+            return result
+
+        # ponytail: single-page submit (Greenhouse/Lever); multi-step ATS (Workday) ends in 'review'.
+        sub = _submit_application(driver, config)
+        if sub == "review":
+            result = "review"
+        elif sub:
+            time.sleep(2)
+            result = "applied" if _confirmed(driver) else "review"
+            if result == "review":
+                print("    ⏸️  Submitted but no confirmation seen — tab left open to check.")
+        return result
+    except Exception as e:
+        print(f"    ❌ apply-error [web_search {url[:100]}]: {type(e).__name__}: {str(e)[:160]}")
+        return result
+    finally:
+        config.pop("_current_jd", None)
+        config.pop("_current_title", None)
+        if result != "review":
+            _close_tabs(driver, opened, home)
+        else:
+            try:
+                driver.switch_to.window(home)
+            except Exception:
+                pass
+
+
+def run_pipeline(driver, config, applied_urls=None, cf=None):
+    """Phase 6 entry point. Returns (applied_count, processed_urls)."""
+    web_cfg = config.get("web_search") or {}
+    if isinstance(web_cfg, dict) and web_cfg.get("enabled") is False:
+        print("[Web Search] ⏭️  Disabled in config")
+        return 0, []
+    limit = max(1, min(int(web_cfg.get("tab_limit", 50) or 50), 200))
+    ctx = job_targeting.target_ctx(config)
+    if not ctx["keywords"]:
+        print("[Web Search] ⚠️  No target roles configured — nothing to search")
+        return 0, []
+    applied_urls = applied_urls if applied_urls is not None else set()
+    seen = set()  # this run; the tracker's SkipSet does its own key normalisation + cooldown
+    level = job_targeting.LEVELS[ctx["max_level"]]
+    print(f"[Web Search] 🎯 Targeting {', '.join(ctx['keywords'])} — up to {level} level"
+          f"{'' if ctx['allow_tech'] else ', non-tech'} — {', '.join(ctx['locations'][:4]) or 'any location'}")
+
+    # 1. Board APIs (fast, CAPTCHA-free, carry JD text) → rule filter before any tab opens.
+    t0 = time.time()
+    postings = job_finder.fetch_board_jobs(web_cfg.get("target_boards") or [])
+    n_boards = len(postings)
+    if web_cfg.get("jobspy", True):
+        postings += job_finder.fetch_jobspy_jobs(
+            ctx["keywords"], ctx["locations"],
+            web_cfg.get("jobspy_sites") or ["indeed", "naukri", "linkedin", "google"])
+    jobs, skipped = [], {}
+    for p in postings:
+        n = normalize_url(p["url"])
+        if n in seen or p["url"] in applied_urls:
+            continue
+        seen.add(n)
+        ok, why = job_targeting.check(p["title"], p["location"], ctx)
+        if ok:
+            jobs.append(p)
+        else:
+            key = why.split(" '")[0]
+            skipped[key] = skipped.get(key, 0) + 1
+    print(f"[Web Search] 🔌 {n_boards} postings from company boards + {len(postings) - n_boards} "
+          f"from JobSpy in {time.time() - t0:.1f}s → "
+          f"{len(jobs)} match your level/role/location")
+    for why, cnt in sorted(skipped.items(), key=lambda x: -x[1])[:4]:
+        print(f"    ⏭ Skipped {cnt}: {why.strip()}")
+
+    jobs = job_finder.fetch_jd(jobs[:limit])
+
+    # 2. Google only tops up when the boards didn't fill the budget.
+    home = driver.current_window_handle
+    if len(jobs) < limit:
+        jobs += _google_urls(driver, config, seen, limit - len(jobs), applied_urls)
+    jobs = jobs[:limit]
+    print(f"[Web Search] 📋 {len(jobs)} job(s) to process, one tab at a time")
+
+    applied, processed = 0, []
+    for i, job in enumerate(jobs, 1):
+        if should_stop() or not is_driver_alive(driver):
+            print("[Web Search] ⏹  Stopping.")
+            break
+        print(f"\n  [{i}/{len(jobs)}] {job['url'][:90]}")
+        res = process_job(driver, job, config, ctx, cf=cf, home=home)
+        processed.append(job["url"])
+        if res == "applied":
+            applied += 1
+            print(f"  ✅ Applied ({applied} so far)")
+        if res in ("applied", "review"):
+            random_delay(config)
+    print(f"\n[Web Search] ✅ DONE — {applied} applied, {len(processed)} processed")
+    return applied, processed

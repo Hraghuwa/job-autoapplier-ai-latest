@@ -494,7 +494,9 @@ def fill_modal_fields(driver, config):
             "div.jobs-easy-apply-modal input[type='text'], "
             "div.artdeco-modal input[type='text'], "
             "div.jobs-easy-apply-content input[type='text'], "
-            "div[role='dialog'] input[type='text']")
+            "div[role='dialog'] input[type='text'], "
+            # Newer Easy Apply renders some inputs with no type attribute.
+            "div[role='dialog'] input:not([type])")
         for inp in inputs:
             try:
                 val = (inp.get_attribute("value") or "").strip()
@@ -861,6 +863,15 @@ def _find_modal_action_button(driver):
     return None, None
 
 
+def _contextfill(driver, config):
+    try:
+        import contextfill_page
+        return contextfill_page.fill(driver, _find_modal(driver), config)
+    except Exception as e:
+        print(f"    ⚠️  ContextFill skipped ({type(e).__name__}: {str(e)[:80]})")
+        return 0
+
+
 def process_easy_apply_modal(driver, config, dry_run=False):
     """Walk through the multi-step Easy Apply modal until submitted."""
     max_steps = 15
@@ -943,7 +954,10 @@ def process_easy_apply_modal(driver, config, dry_run=False):
         except:
             pass
 
-        # Fill any empty form fields
+        # Fill any empty form fields: ContextFill first (understands typeless
+        # inputs, typeahead comboboxes and radio groups in LinkedIn's newer
+        # Easy Apply), then the built-in rules for whatever it left empty.
+        _contextfill(driver, config)
         fill_modal_fields(driver, config)
 
         # Find and click the primary action button using the resilient helper
@@ -1009,6 +1023,7 @@ def process_easy_apply_modal(driver, config, dry_run=False):
                 "span.artdeco-inline-feedback__message")
             if errors and any(e.is_displayed() for e in errors):
                 print("    ⚠️  Validation errors found, re-filling fields...")
+                _contextfill(driver, config)
                 fill_modal_fields(driver, config)
                 time.sleep(1)
         except:

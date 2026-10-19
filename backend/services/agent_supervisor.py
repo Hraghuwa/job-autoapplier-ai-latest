@@ -78,12 +78,13 @@ def ensure_application_columns() -> None:
     where the existence check uses information_schema.
     """
     try:
-        from backend.database import engine
+        from backend.workers.agent_tasks import _sync_session
         from sqlalchemy import text, inspect
+        # backend.database.engine is async (aiosqlite/asyncpg) and `with` on it
+        # raised, so this silently never ran and every applications INSERT/SELECT
+        # failed on the missing columns. Use a sync engine instead.
+        engine = _sync_session().get_bind()
         with engine.begin() as conn:
-            # SQLAlchemy 2.0 inspect requires a sync connection — engine.begin()
-            # gives us one if engine is sync; for async engines this is wrong,
-            # but the migration is opportunistic so we swallow failures.
             insp = inspect(conn)
             cols = {c["name"] for c in insp.get_columns("applications")}
             if "tailored_resume_id" not in cols:

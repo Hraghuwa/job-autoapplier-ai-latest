@@ -55,6 +55,7 @@ def should_apply(config: Dict[str, Any], *, jd_text: Optional[str],
     except (TypeError, ValueError):
         floor = DEFAULT_FLOOR
 
-    profile = config.get("profile") or {}
+    profile = dict(config.get("profile") or {})
+    profile["_target_seniority"] = config.get("target_seniority") or ""
     return score_fit(sig, profile, title=title, floor=floor,
                      archetype_rates=config.get("_archetype_rates"))

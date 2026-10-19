@@ -82,10 +82,10 @@ _GEMINI_MODELS = [
     "gemini-1.5-pro",
 ]
 _GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
     "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
-    "mixtral-8x7b-32768",
-    "gemma2-9b-it",
 ]
 
 
@@ -150,14 +150,16 @@ def _ai(prompt: str, user: Optional[User]) -> str:
     errs: list[str] = []
 
     try:
+        import llm_router
         from llm_router import generate
+        llm_router.LAST_ERROR = None
         cfg = {}
         if gemini: cfg["gemini_api_key"] = gemini
         if groq:   cfg["groq_api_key"]   = groq
         out = generate(prompt, role="writer", config=cfg, max_tokens=2048)
         if out:
             return out
-        errs.append("llm_router: no provider returned a response")
+        errs.append(llm_router.LAST_ERROR or "llm_router: no provider returned a response")
     except ImportError:
         # Defensive — keep working if llm_router was removed.
         if gemini:

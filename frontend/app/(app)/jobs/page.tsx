@@ -36,7 +36,8 @@ export default function JobsPage() {
   const { data: jobs = [], isLoading } = useQuery({
     queryKey: ['jobs', platform, status, search],
     queryFn: () => {
-      const params: Record<string, string> = {}
+      // ponytail: one request for every application; paginate if users pass ~5k
+      const params: Record<string, string> = { limit: '5000' }
       if (platform !== 'all') params.platform = platform
       if (status !== 'all') params.status = status
       if (search) params.search = search
@@ -60,6 +61,7 @@ export default function JobsPage() {
           <h1 className="font-display text-2xl font-bold tracking-tight">Applications</h1>
           <p className="text-[hsl(var(--muted-foreground))] mt-1 text-sm">
             Track and manage your automated job applications.
+            {!isLoading && <span className="ml-1 font-semibold text-[hsl(var(--foreground))]">{jobs.length} total</span>}
           </p>
         </div>
         <Tabs value={view} onValueChange={(v) => setView(v as 'list' | 'kanban')} className="w-full sm:w-auto">
