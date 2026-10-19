@@ -40,7 +40,7 @@ def test_generates_tailored_note():
 def test_passes_profile_and_jd_into_prompt():
     seen = {}
     def spy_llm(prompt, **kw):
-        seen["prompt"] = prompt
+        seen.setdefault("prompt", prompt)  # drafter prompt, not the reviewer's
         return "ok note"
     generate(_PROFILE, jd_text="growth marketing role", config={}, llm=spy_llm)
     assert "growth marketing" in seen["prompt"].lower()

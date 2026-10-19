@@ -20,6 +20,7 @@ import sys
 from typing import Callable, Optional
 
 from backend.services.career_schemas import JDSignature
+from backend.services.untrusted import DATA_RULE, INJECTION_FLAG, fence, looks_injected
 
 # Ensure the repo-root llm_router is importable from inside this package.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -54,11 +55,9 @@ Rules:
 - Do NOT invent skills the JD does not mention.
 - Use lowercase for keywords.
 - If you can't tell, use "unknown" rather than guessing.
+- {data_rule}
 
-JD:
-\"\"\"
 {jd_text}
-\"\"\"
 
 JSON only, no markdown, no commentary."""
 
@@ -122,10 +121,18 @@ def analyse(
         llm:     optional LLM function for testing. Defaults to llm_router.generate.
         config:  optional agent config (carries per-user API keys).
     """
+    # A posting that tries to instruct the model is skipped outright: the
+    # INJECTION_FLAG is a hard red flag in fit_scorer, and we never send it.
+    if looks_injected(jd_text):
+        return JDSignature(jd_hash=_hash_jd(jd_text), red_flags=[INJECTION_FLAG])
+
     if llm is None:
         llm = _default_llm()
 
-    prompt = _PROMPT_TEMPLATE.format(jd_text=(jd_text or "")[:8000])
+    prompt = _PROMPT_TEMPLATE.format(
+        jd_text=fence((jd_text or "")[:8000]),
+        data_rule=DATA_RULE.format(tag="job_posting"),
+    )
 
     try:
         raw = llm(prompt, role="form_fill", config=config or {}, max_tokens=600, temperature=0.0)

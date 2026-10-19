@@ -967,6 +967,14 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
         config = _build_config(user, profile)
         config["run_id"] = run_id
         config["dry_run"] = bool(dry_run)
+        # Past callback rates per job archetype → fit_scorer nudges the score
+        # toward roles that actually answered this user. Best-effort.
+        try:
+            from backend.services.response_rates import by_archetype
+            config["_archetype_rates"] = by_archetype(session, user.id)
+        except Exception as e:
+            session.rollback()  # a failed query aborts the Postgres transaction
+            logger.warning("archetype rates unavailable: %s", e)
 
         if os.environ.get("JOBAGENT_INPROC_PHASE") == "1":
             applied = _execute_inproc(user_id, phase, run_id, config, dry_run,
