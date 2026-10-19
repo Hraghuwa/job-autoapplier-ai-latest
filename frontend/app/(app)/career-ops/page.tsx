@@ -41,12 +41,12 @@ const DESCRIPTIONS: Record<Tab, { title: string; what: string; how: string; out:
     out: 'A ranked table with weighted totals + a PURSUE / HOLD / DROP verdict per offer and a time-to-offer recommendation.' },
   tailor:    { title: 'Tailor CV',
     what: 'Surgical, non-fabricating rewrites of your CV for one specific JD. No invented experience.',
-    how: 'Paste the JD. The AI reads your stored profile and proposes a new summary, keywords to inject, bullet rewrites, and section reorder.',
-    out: 'Tailored summary, keyword chips, XYZ-formula bullet rewrites, and ATS tips.' },
-  scan:      { title: 'Portal Scan — Target Company Finder',
-    what: 'Discovers which companies are actively hiring for your target archetype and tells you exactly where to apply on their career portals. Instead of scrolling job boards, you go direct-to-source: Greenhouse, Lever, Ashby, Workday, and company careers pages — bypassing recruiter filters that hide direct applications. Works for any archetype: "applied AI / LLM ops", "senior backend Go", "product data analyst", "fintech PM", etc.',
-    how: '1. Type a keyword archetype that describes the role you want — be specific (e.g. "agentic AI engineer Python" or "growth PM B2C SaaS"). 2. Optionally list companies you already know about (comma-separated) — the AI will include their portals and suggest 10 more similar ones. 3. Click "Suggest targets" — results appear in ~5 seconds.',
-    out: '10 ranked companies, each with: why they\'re a good fit for your archetype, 3 direct portal URLs (careers page / ATS links), and an example search query to use on their portal. Click any URL to open the portal directly and use the Tailor CV tab to customise your CV before applying.' },
+    how: 'Paste the JD. The AI reads your stored profile and proposes a new summary, keywords, and rewrites of your experience entries — shown next to the current text.',
+    out: 'Tick what you want to keep and save it to your profile: every AI Mission then builds its resumes from that version. One-click undo.' },
+  scan:      { title: 'Portal Scan → AI Mission targets',
+    what: 'Finds companies actively hiring for your archetype and their direct career portals (Greenhouse, Lever, Ashby, careers pages).',
+    how: 'Describe the role you want, optionally list companies you know, then tick the good ones and save them as mission targets.',
+    out: 'Saved targets drive the Web Search mission: it searches those companies first and pulls every open role from their verified Greenhouse/Lever boards.' },
   stories:   { title: 'Story Bank (STAR + Reflection)',
     what: 'A private library of interview stories structured with the STAR + Reflection method: Situation → Task → Action → Result → what you learned. Strong candidates walk into every interview with 10–15 stories ready to flex to any question. The bank is auto-seeded every time you run an Evaluate Offer — the AI extracts the most relevant STAR stories from the JD so you never start from scratch.',
     how: 'Either add stories manually using the form (one per real work experience, project, or leadership moment), OR run "Evaluate Offer" on any JD and the AI will draft STAR stories from the job requirements and add them to your bank automatically. Tag stories with skills (e.g. "conflict resolution", "data engineering") so you can filter by interview type.',
@@ -330,12 +330,37 @@ function TailorPanel() {
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<any>(null)
   const [err, setErr] = useState('')
+  const [useSummary, setUseSummary] = useState(false)
+  const [skills, setSkills] = useState<Record<string, boolean>>({})
+  const [rewrites, setRewrites] = useState<Record<number, boolean>>({})
+  const [saved, setSaved] = useState('')
   const run = async () => {
-    setLoading(true); setErr(''); setResult(null)
+    setLoading(true); setErr(''); setResult(null); setSaved('')
+    setUseSummary(false); setSkills({}); setRewrites({})
     try {
       const { data } = await api.post('/career-ops/tailor-cv', { jd_text: jd })
       setResult(data)
     } catch (e: any) { setErr(e?.response?.data?.detail || e.message) }
+    finally { setLoading(false) }
+  }
+  const picked = useSummary || Object.values(skills).some(Boolean) || Object.values(rewrites).some(Boolean)
+  const apply = async () => {
+    setLoading(true); setErr('')
+    try {
+      await api.post('/career-ops/tailor-cv/apply', {
+        summary: useSummary ? result.tailored_summary : null,
+        skills_add: Object.keys(skills).filter(k => skills[k]),
+        rewrites: (result.bullet_rewrites || []).filter((_: any, i: number) => rewrites[i])
+          .map((b: any) => ({ experience_index: b.experience_index, rewrite: b.rewrite })),
+      })
+      setSaved('Saved to your profile — every AI Mission now starts from this version.')
+    } catch (e: any) { setErr(e?.response?.data?.detail || e.message) }
+    finally { setLoading(false) }
+  }
+  const undo = async () => {
+    setLoading(true); setErr('')
+    try { await api.post('/career-ops/tailor-cv/undo'); setSaved('Restored your previous profile.') }
+    catch (e: any) { setErr(e?.response?.data?.detail || e.message) }
     finally { setLoading(false) }
   }
   return (
@@ -346,27 +371,47 @@ function TailorPanel() {
         Tailor my CV
       </Button>
       <Err msg={err} />
+      {saved && (
+        <p className="text-sm text-green-600 flex items-center gap-2"><CheckCircle2 className="w-4 h-4" />{saved}
+          {saved.startsWith('Saved') && <button className="underline text-muted-foreground" onClick={undo}>Undo</button>}
+        </p>
+      )}
       {result && (
         <div className="border border-border rounded-xl p-5 space-y-4 bg-card">
+          <p className="text-xs text-muted-foreground">Tick what you want to keep, then save it to your profile. AI Missions use your profile as the base resume for every application.</p>
           <section>
-            <h3 className="font-semibold text-sm mb-2">Tailored Summary</h3>
-            <p className="text-sm text-muted-foreground">{result.tailored_summary}</p>
+            <label className="flex items-start gap-2">
+              <input type="checkbox" className="mt-1" checked={useSummary} onChange={e => setUseSummary(e.target.checked)} />
+              <span>
+                <span className="block font-semibold text-sm mb-1">Tailored Summary</span>
+                <span className="text-sm text-muted-foreground">{result.tailored_summary}</span>
+              </span>
+            </label>
           </section>
           <section>
-            <h3 className="font-semibold text-sm mb-2">Keywords to Inject</h3>
+            <h3 className="font-semibold text-sm mb-1">Keywords to Inject</h3>
+            <p className="text-xs text-muted-foreground mb-2">Only tick skills you really have — missions treat your profile skills as true.</p>
             <div className="flex flex-wrap gap-1.5">
-              {(result.keywords_to_inject || []).map((k: string, i: number) => (
-                <span key={i} className="px-2 py-0.5 rounded bg-primary/10 text-primary text-xs">{k}</span>
+              {(result.keywords_to_inject || []).map((k: string) => (
+                <label key={k} className={`px-2 py-0.5 rounded text-xs cursor-pointer ${skills[k] ? 'bg-primary text-primary-foreground' : 'bg-primary/10 text-primary'}`}>
+                  <input type="checkbox" className="sr-only" checked={!!skills[k]} onChange={e => setSkills({ ...skills, [k]: e.target.checked })} />{k}
+                </label>
               ))}
             </div>
           </section>
           <section>
-            <h3 className="font-semibold text-sm mb-2">Bullet Rewrites</h3>
-            <ul className="space-y-2 text-sm">
+            <h3 className="font-semibold text-sm mb-2">Experience Rewrites</h3>
+            <ul className="space-y-3 text-sm">
               {(result.bullet_rewrites || []).map((b: any, i: number) => (
-                <li key={i} className="border-l-2 border-primary pl-3">
-                  <p className="text-muted-foreground text-xs">{b.original_hint}</p>
-                  <p>{b.rewrite}</p>
+                <li key={i}>
+                  <label className="flex items-start gap-2">
+                    <input type="checkbox" className="mt-1" checked={!!rewrites[i]} onChange={e => setRewrites({ ...rewrites, [i]: e.target.checked })} />
+                    <span className="border-l-2 border-primary pl-3 min-w-0">
+                      <span className="block text-xs font-medium">{b.role}{b.company ? ` · ${b.company}` : ''}</span>
+                      <span className="block text-xs text-muted-foreground line-through decoration-muted-foreground/40 whitespace-pre-wrap">{b.original}</span>
+                      <span className="block whitespace-pre-wrap">{b.rewrite}</span>
+                    </span>
+                  </label>
                 </li>
               ))}
             </ul>
@@ -377,6 +422,7 @@ function TailorPanel() {
               {(result.ats_tips || []).map((t: string, i: number) => <li key={i}>{t}</li>)}
             </ul>
           </section>
+          <Button onClick={apply} disabled={loading || !picked}>Save selected to my profile</Button>
         </div>
       )}
     </div>
@@ -390,8 +436,12 @@ function ScanPanel() {
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<any>(null)
   const [err, setErr] = useState('')
+  const [picked, setPicked] = useState<Record<number, boolean>>({})
+  const [targets, setTargets] = useState<any>(null)
+  const [note, setNote] = useState('')
+  useEffect(() => { api.get('/career-ops/mission-targets').then(r => setTargets(r.data)).catch(() => {}) }, [])
   const run = async () => {
-    setLoading(true); setErr(''); setResult(null)
+    setLoading(true); setErr(''); setResult(null); setPicked({}); setNote('')
     try {
       const { data } = await api.post('/career-ops/scan', {
         query, companies: companies.split(',').map(s => s.trim()).filter(Boolean),
@@ -400,6 +450,23 @@ function ScanPanel() {
     } catch (e: any) { setErr(e?.response?.data?.detail || e.message) }
     finally { setLoading(false) }
   }
+  const save = async () => {
+    setLoading(true); setErr('')
+    try {
+      const chosen = result.suggestions.filter((_: any, i: number) => picked[i])
+        .map((s: any) => ({ company: s.company, portals: s.portals || [] }))
+      const { data } = await api.post('/career-ops/mission-targets', { targets: chosen })
+      setTargets(data); setPicked({})
+      setNote(`Saved ${chosen.length} compan${chosen.length === 1 ? 'y' : 'ies'}` +
+        (data.boards_added.length ? ` · ${data.boards_added.length} job board${data.boards_added.length === 1 ? '' : 's'} verified (${data.boards_added.reduce((n: number, b: any) => n + b.open_jobs, 0)} open roles)` : '') +
+        (data.unverified_portals.length ? ` · ${data.unverified_portals.length} portal link${data.unverified_portals.length === 1 ? '' : 's'} didn't check out and ${data.unverified_portals.length === 1 ? 'was' : 'were'} skipped` : ''))
+    } catch (e: any) { setErr(e?.response?.data?.detail || e.message) }
+    finally { setLoading(false) }
+  }
+  const remove = async (c: string) => {
+    try { const { data } = await api.delete(`/career-ops/mission-targets/${encodeURIComponent(c)}`); setTargets(data) }
+    catch (e: any) { setErr(e?.response?.data?.detail || e.message) }
+  }
   return (
     <div className="space-y-4">
       {/* Inline help */}
@@ -407,8 +474,9 @@ function ScanPanel() {
         <p className="font-semibold">🎯 What does Portal Scan do?</p>
         <p className="text-muted-foreground">
           Finds the <strong>best companies hiring for your archetype</strong> right now and gives you their
-          direct career-portal URLs — bypassing job board algorithms. Apply direct to
-          Greenhouse / Lever / Ashby portals where competition is lower and your application lands in the ATS unfiltered.
+          direct career-portal URLs — bypassing job board algorithms. Save the ones you like as
+          <strong> AI Mission targets</strong>: the Web Search mission then searches them first and pulls every
+          open role from their Greenhouse / Lever boards automatically.
         </p>
         <div className="grid sm:grid-cols-3 gap-3 mt-2 text-xs text-muted-foreground">
           <div className="bg-background border border-border rounded p-2">
@@ -421,10 +489,26 @@ function ScanPanel() {
           </div>
           <div className="bg-background border border-border rounded p-2">
             <p className="font-semibold text-foreground mb-1">Step 3</p>
-            Click the portal URLs in results → open their careers page → use <strong>Tailor CV</strong> before applying.
+            Tick the companies you want and click <strong>Save as mission targets</strong>, then launch the Web Search mission from AI Missions.
           </div>
         </div>
       </div>
+      {targets && (targets.companies?.length > 0) && (
+        <div className="border border-border rounded-xl p-4 bg-card space-y-2">
+          <h4 className="font-semibold text-sm">Mission targets ({targets.companies.length})</h4>
+          <div className="flex flex-wrap gap-2">
+            {targets.companies.map((c: string) => {
+              const b = (targets.boards || []).find((x: any) => (x.company || '').toLowerCase() === c.toLowerCase())
+              return (
+                <span key={c} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-muted">
+                  {c}{b ? <span className="text-muted-foreground">· {b.kind} board, {b.open_jobs} open</span> : null}
+                  <button aria-label={`Remove ${c}`} className="text-muted-foreground hover:text-foreground" onClick={() => remove(c)}>×</button>
+                </span>
+              )
+            })}
+          </div>
+        </div>
+      )}
       <input className="w-full rounded border border-border bg-background px-3 py-2 text-sm" placeholder="e.g. 'applied AI, agentic systems, LLM ops' or 'senior backend Go, fintech, remote'" value={query} onChange={e => setQuery(e.target.value)} />
       <input className="w-full rounded border border-border bg-background px-3 py-2 text-sm" placeholder="Companies (comma-separated, optional)" value={companies} onChange={e => setCompanies(e.target.value)} />
       <Button onClick={run} disabled={loading || !query}>
@@ -432,21 +516,28 @@ function ScanPanel() {
         Suggest targets
       </Button>
       <Err msg={err} />
+      {note && <p className="text-sm text-green-600 flex items-center gap-1"><CheckCircle2 className="w-4 h-4" />{note}</p>}
       {result?.suggestions && (
-        <div className="grid md:grid-cols-2 gap-3">
-          {result.suggestions.map((s: any, i: number) => (
-            <div key={i} className="border border-border rounded-lg p-4 bg-card">
-              <h3 className="font-semibold">{s.company}</h3>
-              <p className="text-xs text-muted-foreground mt-1">{s.why}</p>
-              <div className="mt-2 space-y-1">
-                {(s.portals || []).map((url: string, j: number) => (
-                  <a key={j} href={url} target="_blank" rel="noreferrer" className="block text-xs text-primary hover:underline truncate">{url}</a>
-                ))}
-              </div>
-              {s.example_query && <p className="text-xs mt-2 font-mono text-muted-foreground">"{s.example_query}"</p>}
-            </div>
-          ))}
-        </div>
+        <>
+          <div className="grid md:grid-cols-2 gap-3">
+            {result.suggestions.map((s: any, i: number) => (
+              <label key={i} className={`border rounded-lg p-4 bg-card cursor-pointer ${picked[i] ? 'border-primary' : 'border-border'}`}>
+                <span className="flex items-center gap-2">
+                  <input type="checkbox" checked={!!picked[i]} onChange={e => setPicked({ ...picked, [i]: e.target.checked })} />
+                  <span className="font-semibold">{s.company}</span>
+                </span>
+                <span className="block text-xs text-muted-foreground mt-1">{s.why}</span>
+                <span className="block mt-2 space-y-1">
+                  {(s.portals || []).map((url: string, j: number) => (
+                    <a key={j} href={url} target="_blank" rel="noreferrer" className="block text-xs text-primary hover:underline truncate" onClick={e => e.stopPropagation()}>{url}</a>
+                  ))}
+                </span>
+                {s.example_query && <span className="block text-xs mt-2 font-mono text-muted-foreground">"{s.example_query}"</span>}
+              </label>
+            ))}
+          </div>
+          <Button onClick={save} disabled={loading || !Object.values(picked).some(Boolean)}>Save as mission targets</Button>
+        </>
       )}
     </div>
   )

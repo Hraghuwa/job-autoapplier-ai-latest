@@ -616,6 +616,8 @@ def _build_config(user, profile) -> dict:
             "enabled": bool(prefs.get("disable_web_search", False) is False),
             "max_results_per_query": int(prefs.get("max_results_per_query", 10)),
             "target_companies": list(prefs.get("target_companies") or []),
+            # Portal Scan targets saved via /career-ops/mission-targets (Greenhouse/Lever).
+            "target_boards": list(prefs.get("target_boards") or []),
             "ats_domains": list(prefs.get("ats_domains") or []),
             # User-configurable tab cap (preset options in the UI: 20/50/70/100)
             # and extra sites the user wants searched on top of the defaults.

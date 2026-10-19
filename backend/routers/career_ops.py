@@ -432,18 +432,21 @@ async def compare_offers(
 
 TAILOR_PROMPT = """Tailor the candidate's CV to the JD. Surgical edits only —
 do not invent experience. Return JSON.
+{data_rule}
 
 CV:
 {cv}
 
-JD:
+EXPERIENCE ENTRIES (index: role at company — current description):
+{experiences}
+
 {jd}
 
 Return ONLY JSON:
 {{
   "tailored_summary": "2-3 sentences",
   "keywords_to_inject": ["kw1","kw2"],
-  "bullet_rewrites": [{{"original_hint": "...", "rewrite": "stronger XYZ-formula bullet"}}],
+  "bullet_rewrites": [{{"experience_index": 0, "rewrite": "the whole description of that entry, rewritten in stronger XYZ-formula bullets, using only facts already in it"}}],
   "sections_to_reorder": ["Projects first because ..."],
   "ats_tips": [""]
 }}
@@ -456,12 +459,105 @@ async def tailor_cv(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    from backend.services.untrusted import DATA_RULE, fence
     cv = await _cv_summary(db, user)
-    raw = _ai(TAILOR_PROMPT.format(cv=cv[:5000] or "(no CV)", jd=body.jd_text[:6000]), user)
+    exps = _experiences(await _profile(db, user))
+    raw = _ai(TAILOR_PROMPT.format(
+        cv=cv[:5000] or "(no CV)", data_rule=DATA_RULE.format(tag="job_posting"),
+        experiences="\n".join(f"{i}: {e.get('role', '')} at {e.get('company', '')} — "
+                              f"{str(e.get('description') or '')[:600]}" for i, e in enumerate(exps)) or "(none)",
+        jd=fence(body.jd_text[:6000])), user)
     try:
-        return _parse_json(raw)
+        out = _parse_json(raw)
     except Exception as e:
         raise HTTPException(500, f"Tailor failed: {e}")
+    # Attach what each rewrite would replace so the user can compare before applying.
+    rewrites = []
+    for r in out.get("bullet_rewrites") or []:
+        i = r.get("experience_index") if isinstance(r, dict) else None
+        if isinstance(i, int) and 0 <= i < len(exps) and str(r.get("rewrite") or "").strip():
+            rewrites.append({"experience_index": i, "rewrite": r["rewrite"].strip(),
+                             "role": exps[i].get("role", ""), "company": exps[i].get("company", ""),
+                             "original": exps[i].get("description", "")})
+    out["bullet_rewrites"] = rewrites
+    return out
+
+
+def _experiences(profile: UserProfile) -> List[Dict[str, Any]]:
+    exps = (profile.extracted_data or {}).get("experience") or []
+    return [e for e in exps if isinstance(e, dict)] if isinstance(exps, list) else []
+
+
+class Rewrite(BaseModel):
+    experience_index: int = Field(..., ge=0)
+    rewrite: str = Field(..., min_length=1, max_length=3000)
+
+
+class ApplyTailorBody(BaseModel):
+    summary: Optional[str] = Field(None, max_length=1500)
+    skills_add: List[str] = Field(default_factory=list, max_length=30)
+    rewrites: List[Rewrite] = Field(default_factory=list, max_length=30)
+
+
+@router.post("/tailor-cv/apply")
+async def apply_tailor(body: ApplyTailorBody, user: User = Depends(get_current_user),
+                       db: AsyncSession = Depends(get_db)):
+    """Save the rewrites the user accepted into their profile, so every AI
+    Mission's resume (and its per-job tailoring) starts from them. The previous
+    values are kept for one-step undo via POST /tailor-cv/undo."""
+    import copy
+    from sqlalchemy.orm.attributes import flag_modified
+    profile = await _profile(db, user)
+    data = copy.deepcopy(profile.extracted_data or {})
+    autofill = dict(profile.autofill_bank or {})
+    data["_before_tailor_apply"] = copy.deepcopy({  # deep: rewrites below mutate experience in place
+        "summary": data.get("summary"), "skills": data.get("skills"),
+        "experience": data.get("experience"), "autofill_skills": autofill.get("skills"),
+    })
+    if body.summary and body.summary.strip():
+        data["summary"] = body.summary.strip()
+    if body.skills_add:
+        skills = data.get("skills") or []
+        skills = [s.strip() for s in skills.split(",")] if isinstance(skills, str) else list(skills)
+        have = {str(s).lower() for s in skills}
+        new = [s.strip() for s in body.skills_add if s.strip() and s.strip().lower() not in have]
+        data["skills"] = skills + new
+        # Missions read autofill_bank.skills first when the user has set it.
+        if new and autofill.get("skills"):
+            autofill["skills"] = ", ".join([autofill["skills"]] + new)
+            profile.autofill_bank = autofill
+            flag_modified(profile, "autofill_bank")
+    exps = data.get("experience") if isinstance(data.get("experience"), list) else []
+    for r in body.rewrites:
+        if r.experience_index >= len(exps) or not isinstance(exps[r.experience_index], dict):
+            raise HTTPException(400, f"No experience entry {r.experience_index}")
+        exps[r.experience_index]["description"] = r.rewrite.strip()
+    profile.extracted_data = data
+    flag_modified(profile, "extracted_data")
+    await db.commit()
+    return {"summary": data.get("summary"), "skills": data.get("skills"),
+            "experience": data.get("experience"), "undo_available": True}
+
+
+@router.post("/tailor-cv/undo")
+async def undo_tailor(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    from sqlalchemy.orm.attributes import flag_modified
+    profile = await _profile(db, user)
+    data = dict(profile.extracted_data or {})
+    before = data.pop("_before_tailor_apply", None)
+    if not before:
+        raise HTTPException(404, "Nothing to undo.")
+    for k in ("summary", "skills", "experience"):
+        data[k] = before.get(k)
+    autofill = dict(profile.autofill_bank or {})
+    if before.get("autofill_skills") is not None:
+        autofill["skills"] = before["autofill_skills"]
+        profile.autofill_bank = autofill
+        flag_modified(profile, "autofill_bank")
+    profile.extracted_data = data
+    flag_modified(profile, "extracted_data")
+    await db.commit()
+    return {"restored": True}
 
 
 # ── Story Bank (STAR + Reflection) ───────────────────────────────────────────
@@ -539,6 +635,9 @@ INCLUDE_COMPANIES: {companies}
 Return ONLY JSON:
 {{"suggestions": [{{"company":"","why":"","portals":["https://..."],"example_query":""}}]}}
 Only real, well-known companies. No invented URLs — if unsure, leave portals [].
+If the company hires through Greenhouse or Lever, include that board URL
+(https://boards.greenhouse.io/<slug> or https://jobs.lever.co/<slug>) — AI
+Missions pull every open role from those boards automatically.
 """
 
 
@@ -549,6 +648,121 @@ async def scan(body: ScanBody, user: User = Depends(get_current_user)):
         return _parse_json(raw)
     except Exception as e:
         raise HTTPException(500, f"Scan parse failed: {e}")
+
+
+# ── Portal Scan → AI Mission targets ─────────────────────────────────────────
+# Saved targets live in job_preferences: names in "target_companies" (the web
+# mission's Google site: queries) and verified Greenhouse/Lever boards in
+# "target_boards" (the web mission pulls every posting from them via API).
+
+_BOARD_URL = [
+    ("greenhouse", re.compile(r"(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([A-Za-z0-9_-]+)")),
+    ("lever", re.compile(r"jobs\.lever\.co/([A-Za-z0-9_-]+)")),
+]
+_BOARD_API = {
+    "greenhouse": "https://boards-api.greenhouse.io/v1/boards/{}/jobs",
+    "lever": "https://api.lever.co/v0/postings/{}?mode=json",
+}
+
+
+def parse_board(url: str) -> Optional[tuple]:
+    for kind, rx in _BOARD_URL:
+        m = rx.search(url or "")
+        if m and m.group(1).lower() not in {"embed", "jobs"}:
+            return kind, m.group(1).lower()
+    return None
+
+
+async def _open_jobs(kind: str, slug: str) -> Optional[int]:
+    """Open-role count from the board's public API, or None if the board doesn't
+    exist — the scan LLM sometimes invents portal URLs."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(_BOARD_API[kind].format(slug))
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        jobs = data.get("jobs") if kind == "greenhouse" else data
+        return len(jobs) if isinstance(jobs, list) else None
+    except Exception:
+        return None
+
+
+async def _profile(db: AsyncSession, user: User) -> UserProfile:
+    p = (await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(400, "Finish onboarding (upload a resume) first.")
+    return p
+
+
+class TargetIn(BaseModel):
+    company: str = Field(..., min_length=1, max_length=120)
+    portals: List[str] = Field(default_factory=list, max_length=10)
+
+
+class SaveTargetsBody(BaseModel):
+    targets: List[TargetIn] = Field(..., min_length=1, max_length=30)
+
+
+@router.get("/mission-targets")
+async def mission_targets(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    prefs = (await _profile(db, user)).job_preferences or {}
+    return {"companies": prefs.get("target_companies") or [], "boards": prefs.get("target_boards") or []}
+
+
+@router.post("/mission-targets")
+async def save_mission_targets(body: SaveTargetsBody, user: User = Depends(get_current_user),
+                               db: AsyncSession = Depends(get_db)):
+    """Save Portal Scan picks as AI Mission targets (merged, de-duplicated)."""
+    import asyncio
+    from sqlalchemy.orm.attributes import flag_modified
+    profile = await _profile(db, user)
+    prefs = dict(profile.job_preferences or {})
+    companies = list(prefs.get("target_companies") or [])
+    boards = list(prefs.get("target_boards") or [])
+    have = {c.lower() for c in companies}
+    for t in body.targets:
+        if t.company.strip().lower() not in have:
+            companies.append(t.company.strip())
+            have.add(t.company.strip().lower())
+    candidates = {}
+    for t in body.targets:
+        for url in t.portals:
+            b = parse_board(url)
+            if b and b not in {(x["kind"], x["slug"]) for x in boards}:
+                candidates.setdefault(b, t.company.strip())
+    counts = await asyncio.gather(*(_open_jobs(k, s) for k, s in candidates))
+    added, unverified = [], []
+    for ((kind, slug), company), n in zip(candidates.items(), counts):
+        if n is None:
+            unverified.append(f"{kind}:{slug}")
+        else:
+            entry = {"kind": kind, "slug": slug, "company": company, "open_jobs": n}
+            boards.append(entry)
+            added.append(entry)
+    prefs["target_companies"], prefs["target_boards"] = companies[:100], boards[:60]
+    profile.job_preferences = prefs
+    flag_modified(profile, "job_preferences")
+    await db.commit()
+    return {"companies": prefs["target_companies"], "boards": prefs["target_boards"],
+            "boards_added": added, "unverified_portals": unverified}
+
+
+@router.delete("/mission-targets/{company}")
+async def delete_mission_target(company: str, user: User = Depends(get_current_user),
+                                db: AsyncSession = Depends(get_db)):
+    from sqlalchemy.orm.attributes import flag_modified
+    profile = await _profile(db, user)
+    prefs = dict(profile.job_preferences or {})
+    key = company.strip().lower()
+    prefs["target_companies"] = [c for c in prefs.get("target_companies") or [] if c.lower() != key]
+    prefs["target_boards"] = [b for b in prefs.get("target_boards") or []
+                              if (b.get("company") or "").lower() != key and b.get("slug") != key]
+    profile.job_preferences = prefs
+    flag_modified(profile, "job_preferences")
+    await db.commit()
+    return {"companies": prefs["target_companies"], "boards": prefs["target_boards"]}
 
 
 # ── Portfolio Project Evaluation (project.md) ────────────────────────────────
