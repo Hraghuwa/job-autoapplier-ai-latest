@@ -1,12 +1,28 @@
-# JobAgent
+<h1 align="center">JobAgent: AI Job Application Automation</h1>
 
-AI-assisted job search automation: discovery, fit scoring, CV tailoring, browser-driven applications and outcome tracking, exposed through a web app, a REST API and a Claude MCP server.
+<p align="center">
+Open-source job auto-applier that finds roles, scores fit, tailors your resume per job, fills and submits applications in a real browser, and tracks every outcome. Works with LinkedIn Easy Apply, Internshala, Wellfound, Naukri, Unstop and ATS pages (Lever, Greenhouse, Workday). Includes a Claude MCP server.
+</p>
 
-![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688?logo=fastapi&logoColor=white)
-![Next.js](https://img.shields.io/badge/frontend-Next.js-000000?logo=nextdotjs&logoColor=white)
-![Celery](https://img.shields.io/badge/workers-Celery-37814A?logo=celery&logoColor=white)
-![Selenium](https://img.shields.io/badge/automation-Selenium-43B02A?logo=selenium&logoColor=white)
+<p align="center">
+  <a href="https://frontend-harshs-projects-68f6e57b.vercel.app"><b>Live app</b></a> ·
+  <a href="#getting-started">Quick start</a> ·
+  <a href="#api-reference">API</a> ·
+  <a href="#mcp-server-and-chrome-extension">Claude / MCP</a> ·
+  <a href="docs/">Docs</a>
+</p>
+
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/backend-FastAPI-009688?logo=fastapi&logoColor=white">
+  <img alt="Next.js" src="https://img.shields.io/badge/frontend-Next.js-000000?logo=nextdotjs&logoColor=white">
+  <img alt="Celery" src="https://img.shields.io/badge/workers-Celery-37814A?logo=celery&logoColor=white">
+  <img alt="Selenium" src="https://img.shields.io/badge/automation-Selenium-43B02A?logo=selenium&logoColor=white">
+  <img alt="MCP" src="https://img.shields.io/badge/Claude-MCP%20server-D97757">
+  <a href="https://github.com/Hraghuwa/job-autoapplier-ai-latest/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Hraghuwa/job-autoapplier-ai-latest?style=social"></a>
+</p>
+
+> **Who is it for?** Students and job seekers applying at volume (internships, entry-level and full-time roles) who want quality-gated, tailored applications instead of spray-and-pray. If it saves you time, a star helps others find it.
 
 ## Table of contents
 
