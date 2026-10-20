@@ -26,15 +26,20 @@ def main():
     print(f"  📌 PHASE 1: LINKEDIN AUTO-APPLY")
     print(f"{'═' * 60}")
 
-    linkedin_pwd = CONFIG["linkedin"]["password"]
-    if not linkedin_pwd or linkedin_pwd.startswith("YOUR_"):
-        print("  [LinkedIn] ❌ Password not set. Update config.py.")
+    linkedin_pwd = CONFIG["linkedin"].get("password", "")
+    cookies_json = CONFIG.get("linkedin_cookies", "")
+
+    has_pwd = linkedin_pwd and not linkedin_pwd.startswith("YOUR_")
+    has_cookies = bool(cookies_json)
+
+    if not has_pwd and not has_cookies:
+        print("  [LinkedIn] ❌ Neither password nor cookies are set. Please configure credentials or session cookies.")
         return 0
 
     # Create ONE browser session and login ONCE — shared across all agents
     driver = create_driver(headless=CONFIG.get("headless", False))
     print(f"  [LinkedIn] 🔐 Logging in (once for all agents)...")
-    login_ok = linkedin_applier.login(driver, CONFIG["linkedin"]["email"], linkedin_pwd)
+    login_ok = linkedin_applier.login(driver, CONFIG["linkedin"].get("email", ""), linkedin_pwd)
 
     if not login_ok:
         print("  [LinkedIn] ❌ Login failed. Exiting.")

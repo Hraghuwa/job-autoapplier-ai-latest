@@ -21,6 +21,15 @@ from selenium.common.exceptions import (
 import agent_vision
 import job_finder
 import google_form_filler
+from submit_gate import safety_gate
+
+
+def _numeric_only(value) -> str:
+    """LinkedIn renders number questions as text inputs (id contains 'numeric')
+    that reject anything but a number — '30 days' fails validation forever."""
+    import re as _re
+    m = _re.search(r"\d+(?:\.\d+)?", str(value or ""))
+    return m.group(0) if m else "0"
 
 # ─────────────────────────────────────────────
 #  GEMINI / GROQ AI for smart form filling
@@ -418,8 +427,11 @@ def fill_modal_fields(driver, config):
 
                 # Match against field rules
                 matched = False
+                is_numeric = "numeric" in inp_id.lower()
                 for keywords, value in field_rules:
                     if value and any(kw in combined for kw in keywords):
+                        if is_numeric:
+                            value = _numeric_only(value)
                         inp.clear()
                         inp.send_keys(value)
                         filled_something = True
@@ -430,6 +442,8 @@ def fill_modal_fields(driver, config):
                 if not matched:
                     # AI-powered fallback: ask Gemini to answer the question
                     ai_answer = _ask_ai(combined, config)
+                    if ai_answer and is_numeric:
+                        ai_answer = _numeric_only(ai_answer)
                     if ai_answer:
                         inp.clear()
                         inp.send_keys(ai_answer)
@@ -609,6 +623,7 @@ def fill_modal_fields(driver, config):
 def process_easy_apply_modal(driver, config):
     """Walk through the multi-step Easy Apply modal until submitted."""
     max_steps = 15
+    last_state = None
 
     for step in range(max_steps):
         time.sleep(2)
@@ -647,6 +662,25 @@ def process_easy_apply_modal(driver, config):
             upload_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
             for upload_input in upload_inputs:
                 try:
+                    # Verify file input label to avoid uploading resume to other fields (photos, cover letters)
+                    inp_id = upload_input.get_attribute("id") or ""
+                    aria = upload_input.get_attribute("aria-label") or ""
+                    placeholder = upload_input.get_attribute("placeholder") or ""
+                    label_text = ""
+                    try:
+                        label_el = driver.find_element(By.CSS_SELECTOR, f"label[for='{inp_id}']")
+                        label_text = label_el.text
+                    except:
+                        pass
+                    combined = f"{label_text} {aria} {inp_id} {placeholder}".lower()
+
+                    if combined.strip():
+                        non_resume_kws = ["photo", "picture", "image", "transcript", "cover letter", "portfolio", "certificate", "id card", "passport"]
+                        resume_kws = ["resume", "cv", "curriculum", "bio"]
+                        if any(nk in combined for nk in non_resume_kws) and not any(rk in combined for rk in resume_kws):
+                            print(f"    [Resume] Skipping file input with label '{combined[:40]}' (not a resume field)")
+                            continue
+
                     driver.execute_script(
                         "arguments[0].style.display='block'; arguments[0].style.opacity='1';",
                         upload_input)
@@ -693,6 +727,9 @@ def process_easy_apply_modal(driver, config):
 
                     if (priority_text.lower() in btn_text.lower() or
                         priority_text.lower() in aria_label.lower()):
+                        if "submit" in priority_text.lower():
+                            if not safety_gate(config, label=f"LinkedIn Easy Apply: {btn_text}"):
+                                return "review"
                         print(f"    [Step {step+1}] Clicking: '{btn_text}' (aria: '{aria_label}')")
                         try_click(driver, btn)
                         time.sleep(2)
@@ -728,6 +765,9 @@ def process_easy_apply_modal(driver, config):
                         f"//button[contains(normalize-space(),'{btn_text}')]")
                     for btn in fallback_btns:
                         if btn.is_displayed() and btn.is_enabled():
+                            if "submit" in btn_text.lower():
+                                if not safety_gate(config, label=f"LinkedIn Easy Apply (fallback): {btn.text.strip()}"):
+                                    return "review"
                             print(f"    [Step {step+1}] Fallback click: '{btn.text.strip()}'")
                             try_click(driver, btn)
                             time.sleep(2)
@@ -770,6 +810,19 @@ def process_easy_apply_modal(driver, config):
                 time.sleep(1)
         except:
             pass
+
+        # No progress since last step (same page, same errors) → re-looping
+        # just burns ~15 steps × several seconds on a form we can't pass.
+        try:
+            state = driver.find_element(By.CSS_SELECTOR,
+                "div.jobs-easy-apply-modal, div.artdeco-modal--is-open, "
+                "div[role='dialog']").get_attribute("innerText")
+        except Exception:
+            state = None
+        if state and state == last_state:
+            print(f"    ❌ Easy Apply stuck at step {step+1} (no progress) — giving up on this job")
+            return "stuck"
+        last_state = state
 
     return "stuck"
 
@@ -939,6 +992,13 @@ def handle_external_application(driver, config, original_handles, linkedin_tab):
                         f"//a[contains(normalize-space(),'{btn_text}')]")
                     for btn in btns:
                         if btn.is_displayed() and btn.is_enabled():
+                            if any(w in btn_text.lower() for w in ["submit", "apply", "send"]):
+                                if not safety_gate(config, label=f"LinkedIn External Form: {btn.text.strip() or btn_text}"):
+                                    try:
+                                        driver.switch_to.window(linkedin_tab)
+                                    except Exception:
+                                        pass
+                                    return "review"
                             print(f"  👆 Clicking: '{btn.text.strip() or btn_text}'")
                             try_click(driver, btn)
                             time.sleep(3)
@@ -1008,7 +1068,12 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
     )
 
     def find_cards():
-        cards = driver.find_elements(By.CSS_SELECTOR, CARD_SELECTORS)
+        # Outermost matches only: the selectors also match the nested
+        # div.job-card-container inside each li, so every job ran twice.
+        cards = driver.execute_script(
+            "const s = arguments[0];"
+            "return [...document.querySelectorAll(s)].filter(e => !e.parentElement.closest(s));",
+            CARD_SELECTORS) or []
         if not cards:
             cards = driver.find_elements(By.CSS_SELECTOR, "a[href*='/jobs/view/']")
         return cards
@@ -1040,10 +1105,23 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
         processed += 1
 
         try:
-            # Scroll the card into view
-            driver.execute_script(
-                "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", card)
-            time.sleep(1)
+            # Scroll the card into view (instant — LinkedIn only renders
+            # card contents once they're on screen)
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", card)
+            time.sleep(0.3)
+
+            # Title filter from the card itself BEFORE clicking — clicking +
+            # waiting for the detail panel cost ~4s per irrelevant job.
+            card_title = (card.text or "").strip().split("\n")[0][:60]
+            if not card_title:
+                time.sleep(0.7)
+                card_title = (card.text or "").strip().split("\n")[0][:60]
+            if not card_title:
+                continue  # never rendered — clicking it just re-reads the previous job
+            _ok, _why = _is_title_relevant(card_title, current_keywords or config.get("keywords", []))
+            if not _ok:
+                print(f"  ⏭️  Skipping (not relevant): {card_title} ({_why})")
+                continue
 
             # Click the job card to load details in right panel
             try_click(driver, card)
@@ -1117,49 +1195,24 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             except:
                 pass
 
-            # Look for Easy Apply button in the right panel / detail area
+            # Easy Apply button: button.jobs-apply-button in the job's top card.
+            # Waits only as long as the panel needs. Must NOT match the
+            # "Easy Apply" search-filter pill (#searchFilter_applyWithLinkedin).
+            def _find_easy_apply(d):
+                for b in d.find_elements(By.CSS_SELECTOR, "button.jobs-apply-button"):
+                    try:
+                        label = f"{b.text} {b.get_attribute('aria-label') or ''}".lower()
+                        if "easy apply" in label and b.is_displayed() and b.is_enabled():
+                            return b
+                    except StaleElementReferenceException:
+                        continue
+                return False
+
             easy_apply_btn = None
-
-            # Try multiple selectors for the Easy Apply button
-            selectors = [
-                "//button[contains(@class,'jobs-apply-button')]",
-                "//button[contains(normalize-space(),'Easy Apply')]",
-                "//button[contains(@aria-label,'Easy Apply')]",
-                "//button[contains(@class,'jobs-apply-button') and contains(normalize-space(),'Apply')]",
-                "//div[contains(@class,'jobs-details')]//button[contains(normalize-space(),'Apply')]",
-                "//div[contains(@class,'job-details')]//button[contains(normalize-space(),'Apply')]",
-            ]
-
-            for sel in selectors:
-                try:
-                    btns = driver.find_elements(By.XPATH, sel)
-                    for btn in btns:
-                        if btn.is_displayed() and btn.is_enabled():
-                            btn_text = btn.text.strip()
-                            # Skip if it's an "Apply" that redirects externally
-                            if "Easy" in btn_text or "Easy" in (btn.get_attribute("aria-label") or ""):
-                                easy_apply_btn = btn
-                                break
-                            elif "Apply" in btn_text:
-                                # Could be Easy Apply without the word "Easy" visible
-                                easy_apply_btn = btn
-                                break
-                    if easy_apply_btn:
-                        break
-                except:
-                    continue
-
-            if not easy_apply_btn:
-                # Last resort: wait and try one more time
-                time.sleep(3)
-                try:
-                    easy_apply_btn = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable(
-                            (By.XPATH, "//button[contains(normalize-space(),'Easy Apply') or contains(normalize-space(),'Apply')]")
-                        )
-                    )
-                except:
-                    pass
+            try:
+                easy_apply_btn = WebDriverWait(driver, 6, poll_frequency=0.3).until(_find_easy_apply)
+            except TimeoutException:
+                pass
 
             if not easy_apply_btn:
                 print(f"  ⏭️  No Apply button found for: {job_title}")
@@ -1175,9 +1228,8 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             handles_before = set(driver.window_handles)
             linkedin_tab = driver.current_window_handle
             try_click(driver, easy_apply_btn)
-            time.sleep(3)
 
-            # Check if an external tab opened first
+            # Check if an external tab opened first (waits 3s itself)
             ext_result = handle_external_application(driver, config, handles_before, linkedin_tab)
 
             if ext_result in ("submitted", "filled"):

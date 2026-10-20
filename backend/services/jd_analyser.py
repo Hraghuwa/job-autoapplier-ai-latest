@@ -20,6 +20,7 @@ import sys
 from typing import Callable, Optional
 
 from backend.services.career_schemas import JDSignature
+from backend.services.untrusted import DATA_RULE, INJECTION_FLAG, fence, looks_injected
 
 # Ensure the repo-root llm_router is importable from inside this package.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -54,13 +55,19 @@ Rules:
 - Do NOT invent skills the JD does not mention.
 - Use lowercase for keywords.
 - If you can't tell, use "unknown" rather than guessing.
+- {data_rule}
 
-JD:
-\"\"\"
 {jd_text}
-\"\"\"
 
 JSON only, no markdown, no commentary."""
+
+
+# Per-process cache: the fit gate and the tailored-resume store both analyse
+# the same JD for every applied job; this halves that. Phase subprocesses are
+# short-lived, so a crude size cap is enough.
+# ponytail: per-process dict; move to Redis if web workers start re-analysing.
+_CACHE: dict = {}
+_CACHE_MAX = 500
 
 
 def _hash_jd(jd_text: str) -> str:
@@ -122,10 +129,23 @@ def analyse(
         llm:     optional LLM function for testing. Defaults to llm_router.generate.
         config:  optional agent config (carries per-user API keys).
     """
+    # A posting that tries to instruct the model is skipped outright: the
+    # INJECTION_FLAG is a hard red flag in fit_scorer, and we never send it.
+    if looks_injected(jd_text):
+        return JDSignature(jd_hash=_hash_jd(jd_text), red_flags=[INJECTION_FLAG])
+
+    key = _hash_jd(jd_text)
+    use_cache = llm is None  # injected LLMs (tests, previews) bypass the cache
+    if use_cache and key in _CACHE:
+        return _CACHE[key].model_copy(deep=True)
+
     if llm is None:
         llm = _default_llm()
 
-    prompt = _PROMPT_TEMPLATE.format(jd_text=(jd_text or "")[:8000])
+    prompt = _PROMPT_TEMPLATE.format(
+        jd_text=fence((jd_text or "")[:8000]),
+        data_rule=DATA_RULE.format(tag="job_posting"),
+    )
 
     try:
         raw = llm(prompt, role="form_fill", config=config or {}, max_tokens=600, temperature=0.0)
@@ -154,8 +174,8 @@ def analyse(
     seniority = seniority_raw if seniority_raw in valid_levels else "unknown"
 
     try:
-        return JDSignature(
-            jd_hash       = _hash_jd(jd_text),
+        sig = JDSignature(
+            jd_hash       = key,
             keywords      = keywords[:20],
             must_haves    = must_haves[:20],
             nice_to_haves = nice_to_haves[:20],
@@ -165,3 +185,9 @@ def analyse(
         )
     except Exception:
         return _safe_empty(jd_text)
+    # Only real analyses are cached — a failed call should be retried next time.
+    if use_cache:
+        if len(_CACHE) >= _CACHE_MAX:
+            _CACHE.clear()
+        _CACHE[key] = sig
+    return sig.model_copy(deep=True)

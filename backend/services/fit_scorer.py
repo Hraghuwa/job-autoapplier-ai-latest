@@ -31,6 +31,7 @@ _HARD_RED_FLAGS = (
     "unpaid", "no pay", "no stipend", "non-paying", "without pay",
     "pay to apply", "registration fee", "pay a fee", "security deposit",
     "mlm", "multi-level", "pyramid", "commission only", "scam",
+    "prompt injection",  # untrusted.INJECTION_FLAG — posting tried to steer the LLM
 )
 
 _SENIORITY_RANK = {
@@ -50,6 +51,7 @@ class FitDecision:
     vetoed: bool
     reasons: List[str] = field(default_factory=list)
     components: Dict[str, float] = field(default_factory=dict)
+    missing: List[str] = field(default_factory=list)  # must-haves the profile lacks
 
 
 def _as_skill_set(value: Any) -> set:
@@ -102,13 +104,10 @@ def _covers(term: str, haystack_words: set, haystack_text: str) -> bool:
     return False
 
 
-def _must_have_coverage(must_haves: List[str], profile: Dict[str, Any]) -> float:
-    if not must_haves:
-        return 1.0  # JD makes no hard demands → nothing to miss
+def _missing_must_haves(must_haves: List[str], profile: Dict[str, Any]) -> List[str]:
     text = _profile_text(profile)
     words = set(re.split(r"\W+", text))
-    hits = sum(1 for m in must_haves if _covers(m, words, text))
-    return hits / len(must_haves)
+    return [m for m in must_haves if not _covers(m, words, text)]
 
 
 def _title_match(keywords: List[str], title: Optional[str], profile: Dict[str, Any]) -> float:
@@ -132,14 +131,41 @@ def _seniority_fit(jd_seniority: str, profile: Dict[str, Any]) -> float:
         years = float(profile.get("years_of_experience") or 0)
     except (TypeError, ValueError):
         years = 0.0
-    # Map candidate years → an approximate rank.
+    # Map candidate years → an approximate rank, unless the user set the level
+    # they're targeting (e.g. a career switcher aiming at entry roles, ADR-001).
     cand_rank = 0 if years < 1 else 1 if years < 3 else 2 if years < 6 else 3
+    target = str(profile.get("_target_seniority") or "").lower()
+    cand_rank = {"intern": 0, "entry": 1, "associate": 1, "junior": 1, "mid": 2, "senior": 3}.get(target, cand_rank)
     gap = abs(jd_rank - cand_rank)
     return max(0.0, 1.0 - 0.34 * gap)  # 0 gap=1.0, 1=0.66, 2=0.32, 3=0.0
 
 
+_MIN_ARCHETYPE_APPLIED = 5   # don't learn from fewer results than this
+_MIN_TOTAL_APPLIED = 10
+_MAX_OUTCOME_POINTS = 10
+
+
+def _outcome_adjustment(archetype: str, archetype_rates) -> tuple:
+    """Points (±10) from this user's real callback rate for this archetype vs
+    their overall rate — rows from response_rates.by_archetype. (0, None) until
+    there is enough data. ponytail: linear nudge, swap for a proper model once
+    users have hundreds of outcomes."""
+    rows = [r for r in (archetype_rates or []) if isinstance(r, dict)]
+    total = sum(int(r.get("applied") or 0) for r in rows)
+    if total < _MIN_TOTAL_APPLIED or not archetype or archetype == "unknown":
+        return 0, None
+    row = next((r for r in rows if str(r.get("archetype", "")).lower() == archetype.lower()), None)
+    if not row or int(row.get("applied") or 0) < _MIN_ARCHETYPE_APPLIED:
+        return 0, None
+    overall = sum(int(r.get("callbacks") or 0) for r in rows) / total
+    rate = float(row.get("response_rate") or 0.0)
+    pts = max(-_MAX_OUTCOME_POINTS, min(_MAX_OUTCOME_POINTS, round((rate - overall) * 40)))
+    return pts, (f"Past results: '{archetype}' roles got callbacks {rate*100:.0f}% vs "
+                 f"your {overall*100:.0f}% average ({pts:+d}).")
+
+
 def score_fit(jd_sig, profile: Dict[str, Any], *, title: Optional[str] = None,
-              floor: int = DEFAULT_FLOOR) -> FitDecision:
+              floor: int = DEFAULT_FLOOR, archetype_rates=None) -> FitDecision:
     """Decide whether to apply. Never raises."""
     try:
         profile = profile if isinstance(profile, dict) else {}
@@ -159,13 +185,16 @@ def score_fit(jd_sig, profile: Dict[str, Any], *, title: Optional[str] = None,
                             "seniority_fit": 0.0, "red_flag_penalty": 1.0},
             )
 
-        cov = _must_have_coverage(must_haves, profile)
+        missing = _missing_must_haves(must_haves, profile)
+        cov = 1 - len(missing) / len(must_haves) if must_haves else 1.0
         tit = _title_match(keywords, title, profile)
         sen = _seniority_fit(seniority, profile)
         soft_penalty = 0.10 if red_flags else 0.0  # vague flags nudge down
 
         raw = (cov * 55) + (tit * 25) + (sen * 20)
-        score = int(round(max(0.0, raw * (1.0 - soft_penalty))))
+        outcome_pts, outcome_reason = _outcome_adjustment(
+            str(getattr(jd_sig, "archetype", "") or ""), archetype_rates)
+        score = int(round(max(0.0, min(100.0, raw * (1.0 - soft_penalty) + outcome_pts))))
 
         reasons: List[str] = []
         reasons.append(f"Must-have coverage {cov*100:.0f}% (weight 55).")
@@ -173,6 +202,8 @@ def score_fit(jd_sig, profile: Dict[str, Any], *, title: Optional[str] = None,
         reasons.append(f"Seniority fit {sen*100:.0f}% (weight 20).")
         if red_flags:
             reasons.append(f"Soft red flags noted: {', '.join(map(str, red_flags))}.")
+        if outcome_reason:
+            reasons.append(outcome_reason)
 
         apply = score >= floor
         reasons.append(f"Score {score} {'>=' if apply else '<'} floor {floor} → "
@@ -182,7 +213,9 @@ def score_fit(jd_sig, profile: Dict[str, Any], *, title: Optional[str] = None,
             components={"must_have_coverage": round(cov, 3),
                         "title_match": round(tit, 3),
                         "seniority_fit": round(sen, 3),
-                        "red_flag_penalty": soft_penalty},
+                        "red_flag_penalty": soft_penalty,
+                        "outcome_points": outcome_pts},
+            missing=missing,
         )
     except Exception:
         # Decision engine must never break an applier — fail OPEN to a neutral

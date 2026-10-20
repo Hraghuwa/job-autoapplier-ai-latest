@@ -22,7 +22,8 @@ async def list_jobs(
     status: Optional[str] = None,
     min_score: Optional[int] = Query(None, ge=0, le=100),
     max_score: Optional[int] = Query(None, ge=0, le=100),
-    limit: int = Query(50, le=200),
+    search: Optional[str] = Query(None, max_length=100),
+    limit: int = Query(50, ge=1, le=5000),
     offset: int = 0,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -36,6 +37,9 @@ async def list_jobs(
         q = q.where(Application.match_score >= min_score)
     if max_score is not None:
         q = q.where(Application.match_score <= max_score)
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        q = q.where(Application.job_title.ilike(like) | Application.company.ilike(like))
     q = q.order_by(desc(Application.applied_at)).offset(offset).limit(limit)
     result = await db.execute(q)
     apps = result.scalars().all()
@@ -157,7 +161,8 @@ async def update_status(
         raise HTTPException(404, "Job not found")
 
     try:
-        await tracking_service.update_status(db, app, ApplicationStatus(body.status))
+        await tracking_service.update_status(db, app, ApplicationStatus(body.status),
+                                             reason=body.note[:1000])
     except ValueError:
         raise HTTPException(400, f"Invalid status: {body.status}")
 
@@ -170,7 +175,8 @@ async def update_status(
             prof_r = await db.execute(sa_select(UserProfile).where(UserProfile.user_id == user.id))
             profile = prof_r.scalar_one_or_none()
             n = 10 if user.plan != "free" else 3
-            resume_summary = str(profile.extracted_data or {}) if profile else ""
+            resume_summary = (await _submitted_materials(db, app)
+                              or (str(profile.extracted_data or {}) if profile else ""))
             app.interview_prep = generate_interview_prep(
                 resume_summary, app.jd_text or "", app.company, n_questions=n
             )
@@ -179,6 +185,30 @@ async def update_status(
 
     await db.commit()
     return ApplicationOut.model_validate(app)
+
+
+async def _submitted_materials(db: AsyncSession, app: Application) -> str:
+    """What the interviewer actually read: the tailored resume and note that
+    were uploaded for THIS job, plus notes from earlier rounds. "" if none."""
+    import json
+    parts = []
+    if app.tailored_resume_id:
+        from backend.models.tailored_resume import TailoredResume
+        tr = (await db.execute(select(TailoredResume).where(
+            TailoredResume.id == app.tailored_resume_id))).scalar_one_or_none()
+        if tr and tr.resume_json:
+            r = tr.resume_json
+            parts.append("SUBMITTED RESUME: " + json.dumps(
+                {k: r.get(k) for k in ("summary", "skills", "experience", "education")})[:2500])
+    note = app.cover_note_used or app.cover_letter_used
+    if note:
+        parts.append(f"SUBMITTED COVER NOTE: {note[:800]}")
+    feedback = [h.get("data", {}).get("reason") for h in (app.history or [])
+                if isinstance(h, dict) and h.get("type") == "status_change"]
+    feedback = [f for f in feedback if f]
+    if feedback:
+        parts.append("NOTES FROM EARLIER ROUNDS: " + " | ".join(feedback)[:800])
+    return "\n".join(parts)
 
 
 @router.get("/{job_id}/interview-prep")

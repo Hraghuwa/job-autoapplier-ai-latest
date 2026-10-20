@@ -197,6 +197,16 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, token: str = Qu
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "ws_connections": {k: len(v) for k, v in manager.connections.items()}}
+    # Always 200 so the platform healthcheck passes even during a cold DB, but
+    # report DB reachability so an expired/missing database is diagnosable at a
+    # glance (it otherwise only shows up as "login is broken").
+    from backend.database import db_ping
+    db_ok = await db_ping()
+    return {
+        "status": "ok",
+        "database": "ok" if db_ok else "unreachable",
+        # Aggregate only — this endpoint is unauthenticated, so never list user IDs.
+        "ws_connections": sum(len(v) for v in manager.connections.values()),
+    }
 
 

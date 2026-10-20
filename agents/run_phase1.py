@@ -29,15 +29,20 @@ def main():
     print(f"  📌 PHASE 1: LINKEDIN AUTO-APPLY")
     print(f"{'═' * 60}")
 
-    linkedin_pwd = CONFIG["linkedin"]["password"]
-    if not linkedin_pwd or linkedin_pwd.startswith("YOUR_"):
-        print("  [LinkedIn] ❌ Password not set. Update config.py.")
+    linkedin_pwd = CONFIG["linkedin"].get("password", "")
+    cookies_json = CONFIG.get("linkedin_cookies", "")
+
+    has_pwd = linkedin_pwd and not linkedin_pwd.startswith("YOUR_")
+    has_cookies = bool(cookies_json)
+
+    if not has_pwd and not has_cookies:
+        print("  [LinkedIn] ❌ Neither password nor cookies are set. Please configure credentials or session cookies.")
         return
 
     # Create ONE browser session and login ONCE — shared across all agents
     driver = create_driver(headless=CONFIG.get("headless", False))
     print(f"  [LinkedIn] 🔐 Logging in (once for all agents)...")
-    login_ok = linkedin_applier.login(driver, CONFIG["linkedin"]["email"], linkedin_pwd)
+    login_ok = linkedin_applier.login(driver, CONFIG["linkedin"].get("email", ""), linkedin_pwd, cookies_json=cookies_json)
 
     if not login_ok:
         print("  [LinkedIn] ❌ Login failed. Exiting.")
@@ -52,7 +57,14 @@ def main():
             if _stop and _stop.is_set():
                 print("  [Phase 1] 🛑 Stop requested — exiting agent loop.")
                 break
-            count = run_linkedin_agent(agent, i, len(agents), tracker, shared_driver=driver)
+            # One daily cap for the whole phase, shared by every role agent
+            # (applied + prepared-for-review both count).
+            remaining = CONFIG["max_jobs_per_day"] - total_applied - CONFIG.get("_li_prepared", 0)
+            if remaining <= 0:
+                print(f"  [Phase 1] ✅ Daily cap of {CONFIG['max_jobs_per_day']} reached — remaining role agents skipped.")
+                break
+            count = run_linkedin_agent(agent, i, len(agents), tracker, shared_driver=driver,
+                                       max_jobs=remaining)
             total_applied += count
             if i < len(agents):
                 if _stop and _stop.is_set():

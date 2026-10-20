@@ -61,6 +61,7 @@ class ApplicationDetail(ApplicationOut):
 
 class StatusUpdate(BaseModel):
     status: str  # applied / viewed / shortlisted / interview / offer / rejected
+    note: str = ""  # e.g. interviewer feedback — feeds the next round's prep
 
 
 class AnalyticsOut(BaseModel):

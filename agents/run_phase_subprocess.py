@@ -39,8 +39,22 @@ def _setup_path():
     return repo_root
 
 
-def _start_stop_poller(run_id: str, stop_event: threading.Event):
-    """Set stop_event when Redis pause:{run_id} appears. Daemon thread."""
+def _start_stop_poller(run_id: str, stop_event: threading.Event, session_factory=None):
+    """Set stop_event when the user stops the run. Daemon thread.
+
+    Two signals: Redis `pause:{run_id}`, and the run's own DB row turning
+    'paused' (POST /agents/pause sets it). The DB check is what makes Stop
+    work when Redis is down — exactly when runs fall back to this path."""
+    def _db_paused():
+        if session_factory is None:
+            return False
+        import uuid as _uuid
+        from backend.models.agent_run import AgentRun
+        with session_factory() as s:
+            row = s.get(AgentRun, _uuid.UUID(run_id))
+            status = getattr(getattr(row, "status", None), "value", getattr(row, "status", None))
+            return status == "paused"
+
     def _poll():
         while not stop_event.is_set():
             try:
@@ -49,6 +63,12 @@ def _start_stop_poller(run_id: str, stop_event: threading.Event):
                 c = _r.from_url(_s.redis_url, decode_responses=True,
                                 socket_connect_timeout=0.3)
                 if c.get(f"pause:{run_id}") == "1":
+                    stop_event.set()
+                    return
+            except Exception:
+                pass
+            try:
+                if _db_paused():
                     stop_event.set()
                     return
             except Exception:
@@ -156,16 +176,16 @@ def main(argv):
         config["chrome_profile_suffix"] = "".join(
             c if c.isalnum() or c in "-_" else "_" for c in str(config.get("user_id", "")))
 
-        stop_event = threading.Event()
-        _start_stop_poller(run_id, stop_event)
-        config["_stop_event"] = stop_event
-
         try:
             config["_session_factory"] = _build_session_factory(repo_root)
             config["_tailored_upload_dir"] = os.environ.get(
                 "TAILORED_UPLOAD_DIR", os.path.join(repo_root, "uploads", "tailored"))
         except Exception as e:
             print(f"  ⚠️  Could not build session factory: {e}")
+
+        stop_event = threading.Event()
+        _start_stop_poller(run_id, stop_event, config.get("_session_factory"))
+        config["_stop_event"] = stop_event
 
         config["_save_linkedin_cookies"] = _make_cookie_saver(str(config.get("user_id", "")))
 

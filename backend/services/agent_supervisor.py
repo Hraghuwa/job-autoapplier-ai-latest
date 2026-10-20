@@ -78,12 +78,13 @@ def ensure_application_columns() -> None:
     where the existence check uses information_schema.
     """
     try:
-        from backend.database import engine
+        from backend.workers.agent_tasks import _sync_session
         from sqlalchemy import text, inspect
+        # backend.database.engine is async (aiosqlite/asyncpg) and `with` on it
+        # raised, so this silently never ran and every applications INSERT/SELECT
+        # failed on the missing columns. Use a sync engine instead.
+        engine = _sync_session().get_bind()
         with engine.begin() as conn:
-            # SQLAlchemy 2.0 inspect requires a sync connection — engine.begin()
-            # gives us one if engine is sync; for async engines this is wrong,
-            # but the migration is opportunistic so we swallow failures.
             insp = inspect(conn)
             cols = {c["name"] for c in insp.get_columns("applications")}
             if "tailored_resume_id" not in cols:
@@ -94,6 +95,19 @@ def ensure_application_columns() -> None:
                 conn.execute(text(
                     "ALTER TABLE applications ADD COLUMN cover_note_used TEXT"))
                 log.warning("Supervisor: added applications.cover_note_used")
+            # check_schedules dedups on agent_runs.created_at; older DBs lack it.
+            if "created_at" not in {c["name"] for c in insp.get_columns("agent_runs")}:
+                conn.execute(text("ALTER TABLE agent_runs ADD COLUMN created_at TIMESTAMP"))
+                log.warning("Supervisor: added agent_runs.created_at")
+            if "heartbeat_at" not in {c["name"] for c in insp.get_columns("agent_runs")}:
+                conn.execute(text("ALTER TABLE agent_runs ADD COLUMN heartbeat_at TIMESTAMP"))
+                log.warning("Supervisor: added agent_runs.heartbeat_at")
+            if "prepared_count" not in {c["name"] for c in insp.get_columns("agent_runs")}:
+                conn.execute(text("ALTER TABLE agent_runs ADD COLUMN prepared_count INTEGER DEFAULT 0"))
+                log.warning("Supervisor: added agent_runs.prepared_count")
+            if conn.dialect.name == "postgresql":
+                # Native enum on Postgres; SQLite stores the name as plain text.
+                conn.execute(text("ALTER TYPE applicationstatus ADD VALUE IF NOT EXISTS 'prepared'"))
     except Exception as e:
         # Engine may be async (sqlite+aiosqlite) — that's fine, create_all
         # in lifespan handles fresh DBs. Migration is for existing DBs only.
@@ -127,7 +141,7 @@ def recover_stuck_runs() -> int:
         n = 0
         for run in stuck:
             run.status = "failed"
-            run.completed_at = datetime.now()
+            run.completed_at = datetime.utcnow()
             n += 1
         if n:
             session.commit()
@@ -173,10 +187,24 @@ def ensure_worker_running() -> Optional[subprocess.Popen]:
         return _spawned_worker
 
     # Build the worker command. Use the same python that's running us.
-    py = sys.executable or shutil.which("python3") or "python3"
+    py = sys.executable
+    if sys.prefix != sys.base_prefix:
+        venv_py = os.path.join(sys.prefix, "bin", "python")
+        if os.path.exists(venv_py):
+            py = venv_py
+        else:
+            venv_py_win = os.path.join(sys.prefix, "Scripts", "python.exe")
+            if os.path.exists(venv_py_win):
+                py = venv_py_win
+    if not py:
+        py = shutil.which("python3") or "python3"
+
     log_path = os.environ.get("AGENT_WORKER_LOG", "/tmp/worker.log")
     cmd = [py, "-m", "celery", "-A", "backend.workers.celery_app",
-           "worker", "--loglevel=info", "-Q", "agents,default",
+           # -B: this is the only worker when the supervisor spawns it, so it
+           # also runs beat (scheduled missions). Never run -B on two workers.
+           "worker", "-B", "-s", "/tmp/celerybeat-schedule",
+           "--loglevel=info", "-Q", "agents,default",
            "--concurrency", os.environ.get("AGENT_WORKER_CONCURRENCY", "1")]
 
     try:
@@ -221,19 +249,21 @@ def _fail_stale_runs() -> int:
 
     session = _sync_session()
     try:
-        cutoff = datetime.now() - STALE_RUN_TIMEOUT
+        cutoff = datetime.utcnow() - STALE_RUN_TIMEOUT
         running = session.query(AgentRun).filter(AgentRun.status == "running").all()
         n = 0
         for run in running:
             last = session.query(func.max(AgentLog.created_at)).filter(
                 AgentLog.run_id == run.id
             ).scalar()
-            # If no logs and started_at is past cutoff → stale.
-            # If logs exist but newest is past cutoff → stale.
-            newest = last or run.started_at
+            # Stale only when nothing at all happened past the cutoff: no
+            # classified log AND no output line (heartbeat). Logs alone missed
+            # long quiet stretches (CAPTCHA/login waits, JD fetches) and failed
+            # runs that were still working.
+            newest = max([t for t in (last, run.heartbeat_at, run.started_at) if t], default=None)
             if newest and newest < cutoff:
                 run.status = "failed"
-                run.completed_at = datetime.now()
+                run.completed_at = datetime.utcnow()
                 run.error_count = (run.error_count or 0) + 1
                 # Best-effort log row so the UI shows the reason
                 try:
@@ -277,15 +307,20 @@ def healthcheck() -> dict:
         "redis":           _redis_reachable(),
         "celery_worker":   _celery_worker_listening(),
         "chrome_binary":   _chrome_binary_present(),
+        "selenium":        _selenium_installed(),
         "ollama":          _ollama_reachable(),
         "supervisor_pid":  os.getpid(),
     }
-    out["ok"] = bool(out["chrome_binary"])   # the only HARD requirement
+    # HARD requirements to actually run a browser phase: selenium importable AND
+    # a Chrome binary present. (chrome_binary is checked in the API process; the
+    # worker is the env that truly must satisfy both.)
+    out["ok"] = bool(out["chrome_binary"] and out["selenium"])
     return out
 
 
 def _chrome_binary_present() -> bool:
     candidates = [
+        os.environ.get("CHROME_BIN"),   # worker image points this at chromium
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
@@ -295,6 +330,13 @@ def _chrome_binary_present() -> bool:
         shutil.which("chromium"),
     ]
     return any(c and os.path.exists(c) for c in candidates)
+
+
+def _selenium_installed() -> bool:
+    """The appliers import selenium; a worker without it fails every run with
+    'No module named selenium'. Probe it so readiness is visible up front."""
+    import importlib.util
+    return importlib.util.find_spec("selenium") is not None
 
 
 def _ollama_reachable() -> bool:

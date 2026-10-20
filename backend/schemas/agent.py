@@ -19,6 +19,7 @@ class RunStatusResponse(BaseModel):
     platform: Optional[str]
     status: str
     applied_count: int
+    prepared_count: int = 0
     skipped_count: int
     error_count: int
     started_at: Optional[datetime]
@@ -35,6 +36,7 @@ class RunStatusResponse(BaseModel):
                 platform=obj.platform,
                 status=obj.status.value if hasattr(obj.status, "value") else str(obj.status),
                 applied_count=obj.applied_count or 0,
+                prepared_count=getattr(obj, "prepared_count", 0) or 0,
                 skipped_count=obj.skipped_count or 0,
                 error_count=obj.error_count or 0,
                 started_at=obj.started_at,
@@ -55,3 +57,15 @@ class LogResponse(BaseModel):
     created_at: datetime
     
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def model_validate(cls, obj, **kwargs):
+        if hasattr(obj, "__dict__"):
+            return cls(
+                id=str(obj.id),
+                event_type=obj.event_type,
+                message=obj.message,
+                created_at=obj.created_at,
+            )
+        return super().model_validate(obj, **kwargs)
+

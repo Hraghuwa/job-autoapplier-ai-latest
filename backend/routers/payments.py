@@ -142,6 +142,9 @@ async def razorpay_verify(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # Fail closed: with an empty secret anyone can compute a "valid" HMAC.
+    if not settings.razorpay_key_secret:
+        raise HTTPException(503, "Razorpay not configured")
     message = f"{body.razorpay_order_id}|{body.razorpay_payment_id}"
     expected = hmac.new(
         settings.razorpay_key_secret.encode(), message.encode(), hashlib.sha256
@@ -149,16 +152,30 @@ async def razorpay_verify(
     if not hmac.compare_digest(expected, body.razorpay_signature):
         raise HTTPException(400, "Invalid payment signature")
 
-    plan_info = PLANS.get(body.plan_id, {})
+    # The order must be one WE created for THIS user and not yet redeemed.
+    # FOR UPDATE serialises concurrent replays of the same signature.
     result = await db.execute(
-        select(Payment).where(Payment.razorpay_order_id == body.razorpay_order_id)
+        select(Payment).where(
+            Payment.razorpay_order_id == body.razorpay_order_id,
+            Payment.user_id == user.id,
+            Payment.gateway == "razorpay",
+        ).with_for_update()
     )
     payment = result.scalar_one_or_none()
-    if payment:
-        payment.razorpay_payment_id = body.razorpay_payment_id
-        payment.status = PaymentStatus.paid
+    if not payment:
+        raise HTTPException(404, "Order not found")
+    if payment.status != PaymentStatus.created:
+        raise HTTPException(409, "Order already processed")
 
-    await _apply_plan(user, plan_info)
+    # Grant what was PAID for (amount fixed server-side at order creation),
+    # never the client-supplied plan_id.
+    plan_id = _plan_id_for_amount("razorpay_amount", payment.amount)
+    if not plan_id:
+        raise HTTPException(400, "Order does not match a known plan")
+
+    payment.razorpay_payment_id = body.razorpay_payment_id
+    payment.status = PaymentStatus.paid
+    await _apply_plan(user, PLANS[plan_id])
     await db.commit()
     return {
         "message": "Payment verified — plan upgraded!",
@@ -172,12 +189,14 @@ async def razorpay_verify(
 async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     body = await request.body()
     sig = request.headers.get("X-Razorpay-Signature", "")
-    if settings.razorpay_webhook_secret:
-        expected = hmac.new(
-            settings.razorpay_webhook_secret.encode(), body, hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(expected, sig):
-            raise HTTPException(400, "Invalid webhook signature")
+    # Fail closed: an unverifiable webhook must not mutate payment state.
+    if not settings.razorpay_webhook_secret:
+        raise HTTPException(503, "Razorpay webhook secret not configured — refusing unverified webhook")
+    expected = hmac.new(
+        settings.razorpay_webhook_secret.encode(), body, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        raise HTTPException(400, "Invalid webhook signature")
 
     event = json.loads(body)
     if event.get("event") == "payment.failed":
@@ -256,6 +275,12 @@ async def stripe_create_session(
 @router.post("/stripe/webhook")
 async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """Stripe sends checkout.session.completed on successful payment."""
+    # FAIL CLOSED: without the webhook secret we cannot verify authenticity, and
+    # this endpoint grants plan upgrades from the payload. Processing an
+    # unverified body would let anyone POST a forged "payment completed" and
+    # upgrade any account to Pro for free. Refuse rather than trust it.
+    if not settings.stripe_webhook_secret:
+        raise HTTPException(503, "Stripe webhook secret not configured — refusing unverified webhook")
     if not settings.stripe_secret_key:
         raise HTTPException(503, "Stripe not configured")
 
@@ -265,15 +290,12 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     body = await request.body()
     sig = request.headers.get("Stripe-Signature", "")
 
-    if settings.stripe_webhook_secret:
-        try:
-            event = stripe_lib.Webhook.construct_event(
-                body, sig, settings.stripe_webhook_secret
-            )
-        except Exception:
-            raise HTTPException(400, "Invalid Stripe webhook signature")
-    else:
-        event = json.loads(body)
+    try:
+        event = stripe_lib.Webhook.construct_event(
+            body, sig, settings.stripe_webhook_secret
+        )
+    except Exception:
+        raise HTTPException(400, "Invalid Stripe webhook signature")
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
@@ -283,21 +305,27 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         user_id = metadata.get("user_id", "")
 
         r = await db.execute(
-            select(Payment).where(Payment.stripe_session_id == session_id)
+            select(Payment).where(Payment.stripe_session_id == session_id).with_for_update()
         )
         payment = r.scalar_one_or_none()
-        if payment:
-            payment.stripe_payment_intent_id = session.get("payment_intent")
-            payment.status = PaymentStatus.paid
+        # Idempotent: Stripe redelivers events, so grant only on the first
+        # delivery for a session we created, and only once money has moved.
+        if (payment is None or payment.status != PaymentStatus.created
+                or session.get("payment_status") != "paid"
+                or str(payment.user_id) != user_id
+                or PLANS.get(plan_id, {}).get("stripe_amount") != payment.amount):
+            return {"status": "ignored"}
 
-        if user_id:
-            from backend.models.user import User as UserModel
-            ur = await db.execute(
-                select(UserModel).where(UserModel.id == uuid.UUID(user_id))
-            )
-            u = ur.scalar_one_or_none()
-            if u and plan_id in PLANS:
-                await _apply_plan(u, PLANS[plan_id])
+        payment.stripe_payment_intent_id = session.get("payment_intent")
+        payment.status = PaymentStatus.paid
+
+        from backend.models.user import User as UserModel
+        ur = await db.execute(
+            select(UserModel).where(UserModel.id == payment.user_id)
+        )
+        u = ur.scalar_one_or_none()
+        if u:
+            await _apply_plan(u, PLANS[plan_id])
 
         await db.commit()
 
@@ -342,6 +370,17 @@ async def verify_alias(
 
 
 # ── Shared plan-application logic ─────────────────────────────────────────────
+
+def _plan_id_for_amount(field: str, amount: int) -> Optional[str]:
+    """Map a server-recorded order amount back to its catalogue entry."""
+    matches = [k for k, v in PLANS.items() if v[field] == amount]
+    return matches[0] if len(matches) == 1 else None
+
+
+# Amount → plan lookup above requires unique prices per gateway.
+for _f in ("razorpay_amount", "stripe_amount"):
+    assert len({v[_f] for v in PLANS.values()}) == len(PLANS), f"duplicate {_f} in PLANS"
+
 
 async def _apply_plan(user: User, plan_info: dict) -> None:
     if plan_info.get("plan") == "pro":

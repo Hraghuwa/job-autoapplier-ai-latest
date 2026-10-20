@@ -26,6 +26,22 @@ const nextConfig = {
       },
     ]
   },
+  // Baseline hardening headers. CSP deliberately not set yet — needs a
+  // nonce/hash pass so it doesn't break Next's inline scripts.
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          { key: 'X-Frame-Options', value: 'DENY' },
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+          { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+          { key: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains' },
+          { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
+        ],
+      },
+    ]
+  },
   // Silence the "Module not found" noise for optional server-only packages
   // that aren't used in the frontend bundle
   webpack(config) {

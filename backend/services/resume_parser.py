@@ -24,6 +24,7 @@ async def save_and_parse_resume(
     user_id: uuid.UUID,
     db: AsyncSession,
     gemini_key: Optional[str] = None,
+    groq_key: Optional[str] = None,
 ) -> Tuple[str, str, dict]:
     """
     Save resume file, check SHA-256 dedup, parse with Gemini.
@@ -85,7 +86,7 @@ async def save_and_parse_resume(
     if ext == ".pdf":
         try:
             from backend.services.gemini_service import parse_resume
-            extracted = parse_resume(content, user_key=gemini_key)
+            extracted = parse_resume(content, user_key=gemini_key, groq_key=groq_key)
         except Exception:
             extracted = {}
 

@@ -23,8 +23,12 @@ logger = logging.getLogger(__name__)
 MODEL_COSTS = {
     "llama-3.1-8b-instant":    (0.05, 0.08),
     "llama-3.3-70b-versatile": (0.59, 0.79),
+    "gemini-2.5-flash":        (0.075, 0.30),
     "gemini-2.0-flash":        (0.10, 0.40),
     "gemini-1.5-flash":        (0.075, 0.30),
+    # Groq defaults in llm_router — were missing, so Groq spend read as $0.
+    "openai/gpt-oss-20b":      (0.10, 0.50),
+    "openai/gpt-oss-120b":     (0.15, 0.75),
 }
 
 
@@ -44,13 +48,20 @@ def estimate_cost(model: str, prompt_tokens: int, output_tokens: int) -> float:
     return (prompt_tokens * in_rate + output_tokens * out_rate) / 1_000_000
 
 
+_FACTORY = None
+
+
 def _default_session_factory():
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from backend.config import settings
-    url = settings.database_url.replace("+aiosqlite", "").replace("+asyncpg", "")
-    eng = create_engine(url, connect_args={"check_same_thread": False} if "sqlite" in url else {})
-    return sessionmaker(bind=eng)
+    """One engine per process (was a new engine + pool on every LLM call)."""
+    global _FACTORY
+    if _FACTORY is None:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from backend.config import settings
+        url = settings.database_url.replace("+aiosqlite", "").replace("+asyncpg", "")
+        eng = create_engine(url, connect_args={"check_same_thread": False} if "sqlite" in url else {})
+        _FACTORY = sessionmaker(bind=eng)
+    return _FACTORY
 
 
 def record_usage(
@@ -63,6 +74,8 @@ def record_usage(
     latency_ms: int,
     user_id: Optional[str],
     session_factory: Optional[Callable] = None,
+    run_id: Optional[str] = None,
+    billed_to: str = "operator",
 ) -> bool:
     """Write one ai_requests row. Returns True on write, False on skip/failure.
 
@@ -83,6 +96,10 @@ def record_usage(
                     "model": model,
                     "prompt_tokens": int(prompt_tokens),
                     "output_tokens": int(output_tokens),
+                    # run_id + billed_to let the worker debit a mission's AI use
+                    # from the user's token balance (operator-key calls only).
+                    "run_id": run_id,
+                    "billed_to": billed_to,
                 },
                 output_data=None,
                 latency_ms=int(latency_ms),
@@ -96,3 +113,13 @@ def record_usage(
     except Exception as e:
         logger.debug("llm_usage: capture skipped (%s)", e)
         return False
+
+
+def operator_calls_for_run(session, user_id, run_id: str) -> int:
+    """How many of a run's LLM calls were paid with the operator's keys."""
+    from backend.models.resume import AIRequest
+    rows = session.query(AIRequest.input_data).filter(
+        AIRequest.user_id == str(user_id), AIRequest.type.like("llm:%")).order_by(
+        AIRequest.created_at.desc()).limit(2000).all()
+    return sum(1 for (d,) in rows if isinstance(d, dict) and d.get("run_id") == run_id
+               and d.get("billed_to") == "operator")

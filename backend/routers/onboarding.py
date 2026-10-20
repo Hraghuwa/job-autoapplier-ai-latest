@@ -48,8 +48,13 @@ async def upload_resume(
         from backend.services.crypto_service import decrypt
         gemini_key = decrypt(user.gemini_key_encrypted)
 
+    groq_key = None
+    if getattr(user, "groq_key_encrypted", None):
+        from backend.services.crypto_service import decrypt
+        groq_key = decrypt(user.groq_key_encrypted)
+
     resume_url, resume_hash, extracted = await save_and_parse_resume(
-        file, user.id, db, gemini_key=gemini_key
+        file, user.id, db, gemini_key=gemini_key, groq_key=groq_key
     )
 
     profile.resume_url = resume_url

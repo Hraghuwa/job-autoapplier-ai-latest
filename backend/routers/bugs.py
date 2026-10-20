@@ -81,7 +81,7 @@ def _analyze_bug_with_gemini(bug: dict) -> Optional[str]:
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.system_gemini_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""You are an AI agent coach for a job auto-applier app.
 
 A user filed this bug report:
@@ -143,7 +143,14 @@ async def report_bug(
     # Run the self-learn analysis before returning so the agent gets smarter
     # the instant the user reports something. Falls back silently if Gemini
     # is unavailable.
-    advice = _analyze_bug_with_gemini(bug_record)
+    # Analysis spends the operator's Gemini key — meter it. An exhausted
+    # balance only skips analysis; the report itself is still saved.
+    from backend.services.plan_gate import consume_ai_token
+    try:
+        consume_ai_token(user)
+        advice = _analyze_bug_with_gemini(bug_record)
+    except HTTPException:
+        advice = None
     if advice:
         bug_record["advice"] = advice
         bug_record["status"] = "analyzed"

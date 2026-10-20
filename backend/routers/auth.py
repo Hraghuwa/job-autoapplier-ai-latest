@@ -3,7 +3,7 @@ import uuid
 from typing import Optional
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import select, func
@@ -57,14 +57,10 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    # Auto-flag admin if:
-    #   1. email matches ADMIN_EMAIL env var, OR
-    #   2. this is the very first user in the DB (bootstrap admin)
-    is_admin = bool(settings.admin_email and body.email == settings.admin_email)
-    if not is_admin:
-        count_res = await db.execute(select(func.count()).select_from(User))
-        if (count_res.scalar() or 0) == 0:
-            is_admin = True
+    # Never grant admin at signup: emails are unverified and "first user on an
+    # empty DB" is a race anyone can win after a fresh deploy. Admin is granted
+    # only via /auth/promote-self with ADMIN_BOOTSTRAP_SECRET (or seed scripts).
+    is_admin = False
 
     user = User(
         id=uuid.uuid4(),
@@ -102,10 +98,20 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    # Throttle failed attempts per (email, client IP) — keyed on both so an
+    # attacker can't lock a victim out from their own network.
+    from backend.services.rate_limits import default_limiter
+    ip = request.client.host if request.client else "?"
+    key = f"{body.email.lower()}|{ip}"
+    ok, _ = default_limiter.can_apply(key, "login_fail")
+    if not ok:
+        raise HTTPException(status_code=429, detail="Too many failed logins. Try again later.")
+
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
     if not user or not verify_password(body.password, user.hashed_password):
+        default_limiter.register_apply(key, "login_fail")
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return create_tokens(str(user.id))
 
@@ -154,17 +160,17 @@ async def promote_self(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # Email match alone is not proof of identity (no email verification), so
+    # only the out-of-band secret authorizes promotion.
     bootstrap_secret = _os.environ.get("ADMIN_BOOTSTRAP_SECRET", "").strip()
-    email_match = bool(settings.admin_email and user.email == settings.admin_email)
-    secret_match = bool(bootstrap_secret and x_admin_secret == bootstrap_secret)
+    secret_match = bool(bootstrap_secret) and secrets.compare_digest(
+        (x_admin_secret or "").encode(), bootstrap_secret.encode()
+    )
 
-    if not (email_match or secret_match):
+    if not secret_match:
         raise HTTPException(
             status_code=403,
-            detail=(
-                "Not authorized to self-promote. Set ADMIN_EMAIL to your account "
-                "email, or send X-Admin-Secret header matching ADMIN_BOOTSTRAP_SECRET."
-            ),
+            detail="Not authorized to self-promote. Send X-Admin-Secret matching ADMIN_BOOTSTRAP_SECRET.",
         )
 
     user.is_admin = True

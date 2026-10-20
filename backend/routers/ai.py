@@ -18,6 +18,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from backend.config import settings
 from backend.dependencies import get_current_user, require_plan
 from backend.models.user import User
+from backend.services.plan_gate import consume_ai_token
 
 router = APIRouter()
 
@@ -50,9 +51,9 @@ def _resolve_keys(user: User) -> Tuple[Optional[str], Optional[str]]:
 # Models in fallback order. gemini-1.5-flash was deprecated on v1beta in 2025
 # for some keys/regions, so we now try the 2.x family first.
 _GEMINI_MODELS = [
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-flash-latest",
-    "gemini-2.5-flash",
     "gemini-2.0-flash-exp",
     "gemini-1.5-flash",
     "gemini-1.5-flash-8b",
@@ -60,10 +61,10 @@ _GEMINI_MODELS = [
 ]
 # Groq model names change frequently; this list is current as of 2026-04.
 _GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
     "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
-    "mixtral-8x7b-32768",
-    "gemma2-9b-it",
 ]
 
 
@@ -110,6 +111,7 @@ def _groq_generate(api_key: str, prompt: str) -> str:
 
 def _generate(prompt: str, user: User) -> str:
     """Try Gemini first, fall back to Groq. Raise HTTPException if both fail."""
+    consume_ai_token(user)
     gemini_key, groq_key = _resolve_keys(user)
     errors = []
 
@@ -140,6 +142,7 @@ def _generate(prompt: str, user: User) -> str:
 @router.get("/health")
 async def ai_health(user: User = Depends(get_current_user)):
     """Reports which AI providers are reachable for the current user."""
+    consume_ai_token(user)
     gemini_key, groq_key = _resolve_keys(user)
     out = {
         "gemini": {"configured": bool(gemini_key), "ok": False, "error": None},

@@ -1,0 +1,22 @@
+# Keep secrets, local data and browser profiles out of image layers
+# (backend/Dockerfile does `COPY . .`).
+.git
+.env*
+**/.env
+**/.env.local
+*.db
+*.db-journal
+uploads/
+users/
+scratch/
+chrome_profile*/
+applied_jobs.json
+resume.pdf
+config.py
+seed_admin.py
+frontend/
+node_modules/
+**/__pycache__/
+.venv/
+antigravity-awesome-skills/
+agent-manager-skill/

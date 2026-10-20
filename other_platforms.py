@@ -11,6 +11,7 @@ from selenium.common.exceptions import (
 import smart_form_filler
 from utils.auth import google_login_flow
 from agent_stop import should_stop
+from submit_gate import safety_gate
 
 
 def try_click(driver, element):
@@ -207,11 +208,15 @@ def unstop_apply(driver, keywords, locations, max_jobs, applied_count,
 
                         # Step 5: Try confirm/submit buttons
                         submitted = False
+                        is_review = False
                         for btn_label in ["Confirm", "Submit", "Apply", "Register", "Proceed"]:
                             try:
                                 confirm = driver.find_element(
                                     By.XPATH, f"//button[contains(.,'{btn_label}')]")
                                 if confirm.is_displayed() and confirm.is_enabled():
+                                    if not safety_gate(config, label=f"Unstop: {btn_label}"):
+                                        is_review = True
+                                        break
                                     confirm.click()
                                     time.sleep(2)
                                     submitted = True
@@ -219,12 +224,17 @@ def unstop_apply(driver, keywords, locations, max_jobs, applied_count,
                             except:
                                 continue
 
-                        if not submitted:
+                        if not submitted and not is_review:
                             # Try multi-step form
                             result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=6)
-                            submitted = result == "submitted"
+                            if result == "review":
+                                is_review = True
+                            else:
+                                submitted = result == "submitted"
 
-                        if submitted:
+                        if is_review:
+                            print(f"  ⏸️  Left tab open for user review.")
+                        elif submitted:
                             print(f"  ✅ Applied successfully!")
                             applied_count += 1
                             keyword_applied += 1
@@ -234,10 +244,11 @@ def unstop_apply(driver, keywords, locations, max_jobs, applied_count,
                             print(f"  ⚠️  Could not auto-submit — skipping")
 
                         # Step 6: Close tab
-                        try:
-                            driver.close()
-                        except Exception:
-                            pass
+                        if not is_review:
+                            try:
+                                driver.close()
+                            except Exception:
+                                pass
                         try:
                             driver.switch_to.window(driver.window_handles[0])
                         except Exception:
@@ -419,11 +430,15 @@ def naukri_apply(driver, keywords, locations, max_jobs, applied_count,
 
                         # Step 5: Try submit
                         submitted = False
+                        is_review = False
                         for btn_label in ["Submit", "Apply", "Confirm", "Send"]:
                             try:
                                 submit = driver.find_element(
                                     By.XPATH, f"//button[contains(.,'{btn_label}')]")
                                 if submit.is_displayed() and submit.is_enabled():
+                                    if not safety_gate(config, label=f"Naukri: {btn_label}"):
+                                        is_review = True
+                                        break
                                     submit.click()
                                     time.sleep(2)
                                     submitted = True
@@ -431,11 +446,16 @@ def naukri_apply(driver, keywords, locations, max_jobs, applied_count,
                             except:
                                 continue
 
-                        if not submitted:
+                        if not submitted and not is_review:
                             result = smart_form_filler.walk_multi_step_form(driver, config, max_steps=6)
-                            submitted = result == "submitted"
+                            if result == "review":
+                                is_review = True
+                            else:
+                                submitted = result == "submitted"
 
-                        if submitted:
+                        if is_review:
+                            print(f"  ⏸️  Left tab open for user review.")
+                        elif submitted:
                             print(f"  ✅ Applied successfully!")
                             applied_count += 1
                             keyword_applied += 1
@@ -445,10 +465,11 @@ def naukri_apply(driver, keywords, locations, max_jobs, applied_count,
                             print(f"  ⚠️  Could not auto-submit — skipping")
 
                         # Step 6: Close tab
-                        try:
-                            driver.close()
-                        except Exception:
-                            pass
+                        if not is_review:
+                            try:
+                                driver.close()
+                            except Exception:
+                                pass
                         try:
                             driver.switch_to.window(driver.window_handles[0])
                         except Exception:

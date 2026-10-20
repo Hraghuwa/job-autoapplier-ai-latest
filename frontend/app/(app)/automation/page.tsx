@@ -43,6 +43,7 @@ interface RunStatusResponse {
   platform: string | null
   status: 'queued' | 'running' | 'completed' | 'failed' | 'paused' | 'limit_reached'
   applied_count: number
+  prepared_count?: number  // forms filled and left open for you to submit
   skipped_count: number
   error_count: number
   started_at: string | null
@@ -534,6 +535,9 @@ export default function AutomationPage() {
                         <div className="text-center border-r">
                            <p className="text-lg font-black text-emerald-600">{run.applied_count}</p>
                            <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">Applied</p>
+                           {(run.prepared_count ?? 0) > 0 && (
+                             <p className="text-[10px] text-amber-600 font-semibold mt-0.5">{run.prepared_count} ready to submit</p>
+                           )}
                         </div>
                         <div className="text-center border-r">
                            <p className="text-lg font-black text-slate-500">{run.skipped_count}</p>
@@ -548,9 +552,9 @@ export default function AutomationPage() {
                       <div className="mt-4 space-y-1.5">
                         <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-muted-foreground px-0.5">
                             <span>Processing...</span>
-                            <span>{Math.min(100, Math.round(((run.applied_count + run.skipped_count + run.error_count) / 20) * 100))}%</span>
+                            <span>{Math.min(100, Math.round(((run.applied_count + (run.prepared_count ?? 0) + run.skipped_count + run.error_count) / 20) * 100))}%</span>
                         </div>
-                        <Progress value={Math.min(100, ((run.applied_count + run.skipped_count + run.error_count) / 20) * 100)} className="h-1.5 bg-blue-100 dark:bg-blue-900/20 shadow-inner" />
+                        <Progress value={Math.min(100, ((run.applied_count + (run.prepared_count ?? 0) + run.skipped_count + run.error_count) / 20) * 100)} className="h-1.5 bg-blue-100 dark:bg-blue-900/20 shadow-inner" />
                       </div>
 
                       {/* ── Error Reasons Panel (shown whenever errors surfaced via WS) ── */}
@@ -730,7 +734,7 @@ export default function AutomationPage() {
                         </div>
                         <div className="flex items-center justify-between text-[11px] text-muted-foreground mt-2">
                            <span className="flex items-center gap-1">
-                             <CheckCircle2 className="h-3 w-3 text-emerald-500" /> {run.applied_count} applied
+                             <CheckCircle2 className="h-3 w-3 text-emerald-500" /> {run.applied_count} applied{(run.prepared_count ?? 0) > 0 ? ` · ${run.prepared_count} to submit` : ''}
                            </span>
                            <span className="flex items-center gap-1">
                               {run.started_at ? new Date(run.started_at).toLocaleDateString() : '—'}

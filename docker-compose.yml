@@ -56,7 +56,9 @@ services:
   worker:
     build:
       context: .
-      dockerfile: backend/Dockerfile
+      # Worker needs selenium + Chromium (the API image has neither) — that
+      # mismatch caused "No module named 'selenium'" / no browser.
+      dockerfile: backend/Dockerfile.worker
     restart: unless-stopped
     volumes:
       - ./backend:/app/backend
@@ -71,7 +73,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A backend.workers.celery_app worker --concurrency=4 --loglevel=info
+    command: celery -A backend.workers.celery_app worker -B -s /tmp/celerybeat-schedule --concurrency=4 --loglevel=info -Q agents,default
 
   # ── Next.js frontend ──────────────────────────────────────────────────────
   frontend:

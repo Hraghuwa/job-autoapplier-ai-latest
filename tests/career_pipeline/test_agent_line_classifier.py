@@ -21,7 +21,9 @@ def test_blank_and_noise_return_none():
 
 def test_applied_markers():
     assert _cat("✅ Applied to Acme") == "applied"
-    assert _cat("External form filled for Foo") == "applied"
+    assert _cat("External form submitted for Foo") == "applied"
+    # Filled but not submitted is "prepared" — counting it as applied inflated runs.
+    assert _cat("External form filled for Foo") == "prepared"
 
 
 def test_skipped_markers():
@@ -81,3 +83,27 @@ def test_event_has_no_run_id_caller_adds_it():
     # The pure classifier must NOT bake in run_id — the caller injects it.
     res = classify_agent_line("✅ Applied to Acme")
     assert "run_id" not in res["event"]
+
+
+def test_applying_line_is_visible_ping():
+    # Long Easy Apply flows used to look frozen: nothing was logged until done.
+    assert _cat("  🚀 APPLYING: Sr Client Services Consultant...") == "ping"
+
+
+def test_linkedin_success_lines_count_as_applied():
+    # Frontend showed 0 applied: these LinkedIn lines were never classified.
+    assert _cat("    ✅ SUCCESS: Application sent!") == "applied"
+    assert _cat("    ✅ SUCCESS: Application submitted!") == "applied"
+    assert _cat("  📊 External form submitted: 3/15") == "applied"
+
+
+def test_job_context_is_parsed_for_application_rows():
+    # Dashboard showed 0 jobs: no Application row was ever written because the
+    # success line has no title — the preceding context line supplies it.
+    from backend.workers.agent_tasks import parse_job_context as p
+    assert p("  🚀 APPLYING: Product Intern...")["title"] == "Product Intern"
+    assert p("  [3/10] 🔍 ANALYZING: Growth Intern")["title"] == "Growth Intern"
+    wf = p("  📋 [2] PM Intern @ Acme")
+    assert (wf["title"], wf["company"]) == ("PM Intern", "Acme")
+    assert p("  [1/5] Applying to: https://jobs.lever.co/x/1")["url"] == "https://jobs.lever.co/x/1"
+    assert p("    ✅ SUCCESS: Application sent!") is None

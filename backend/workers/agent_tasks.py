@@ -14,9 +14,11 @@ import sys
 import os
 import uuid
 import json
+import re
 import traceback
 import threading
-from datetime import datetime, date, timedelta
+import time
+from datetime import datetime, date, timedelta, timezone
 
 from celery import Task
 from celery.utils.log import get_task_logger
@@ -164,7 +166,7 @@ def _check_quota(session, user_id: str, platform: str, plan: str) -> bool:
         UsageQuota.quota_date == today,
     ).first()
     current = quota.applies_count if quota else 0
-    limit = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])["applies_per_48hr"]
+    limit = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])["apply_credits_daily"]
     return current < limit
 
 
@@ -236,21 +238,29 @@ def _learn_from_run_logs(session, user_id: str, run_id: str) -> Optional[str]:
 
     errors_text = "\n".join(f"- {log.message[:500]}" for log in logs)
     advice = ""
-    if settings.system_gemini_key:
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=settings.system_gemini_key)
-            model = genai.GenerativeModel("gemini-2.0-flash")
-            response = model.generate_content(f"""You are improving a browser job auto-applier.
+    # Route through llm_router (Ollama → Groq → Gemini) with the user's own keys.
+    # Calling Gemini directly with SYSTEM_GEMINI_KEY failed outright once that
+    # key went invalid, so self-learning silently never produced rules.
+    try:
+        from backend.models.user import User
+        import llm_router
+        user = session.query(User).filter(User.id == uuid.UUID(user_id)).first()
+        groq_enc = getattr(user, "groq_key_encrypted", None) if user else None
+        llm_config = {"user_id": user_id,
+                      "groq_api_key": _decrypt(groq_enc) if groq_enc else "",
+                      "gemini_api_key": settings.system_gemini_key or ""}
+        advice = (llm_router.generate(f"""You are improving a browser job auto-applier.
 
 These are real failure logs from one run:
 {errors_text}
 
 Produce 1-3 concrete future rules. Each rule must be a single imperative sentence.
-Return only the rules, one per line.""")
-            advice = (response.text or "").strip()
-        except Exception as e:
-            logger.warning("Self-learning analysis failed for run %s: %s", run_id, e)
+Return only the rules, one per line.""", role="writer", config=llm_config) or "").strip()
+        if not advice:
+            logger.warning("Self-learning: no LLM provider answered for run %s (%s)",
+                           run_id, llm_router.LAST_ERROR)
+    except Exception as e:
+        logger.warning("Self-learning analysis failed for run %s: %s", run_id, e)
 
     if not advice:
         lowered = errors_text.lower()
@@ -413,6 +423,23 @@ def is_stopping(run_id: str) -> bool:
     return False
 
 
+def _plan_name(user) -> str:
+    return str(getattr(user, "plan", "free") or "free").split(".")[-1].lower()
+
+
+def _plan_apply_limit(user) -> int:
+    """The user's account-wide daily apply cap from their plan (free=20,
+    pro/team effectively unlimited). Falls back to free on any surprise."""
+    try:
+        from backend.services.plan_gate import PLAN_LIMITS
+        plan = getattr(user, "plan", "free") or "free"
+        plan = str(plan).split(".")[-1].lower()  # handle PlanEnum.free
+        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+        return int(limits.get("apply_credits_daily", 20))
+    except Exception:
+        return 20
+
+
 def _build_config(user, profile) -> dict:
     prefs = _ensure_dict(profile.job_preferences)
     autofill = _ensure_dict(profile.autofill_bank)
@@ -444,12 +471,14 @@ def _build_config(user, profile) -> dict:
         if isinstance(edu, dict):
             d = edu.get("degree", "")
             inst = edu.get("institution", "")
-            yr = edu.get("year", "")
-            cgpa = edu.get("cgpa", "")
+            yr = edu.get("year", "") or ""
+            cgpa = edu.get("cgpa") or ""
+            if cgpa:
+                cgpa = str(cgpa)
             if d and inst:
-                edu_summary_parts.append(f"{d} from {inst}{' (' + yr + ')' if yr else ''}{' CGPA: ' + cgpa if cgpa else ''}")
+                edu_summary_parts.append(f"{d} from {inst}{' (' + str(yr) + ')' if yr else ''}{' CGPA: ' + cgpa if cgpa else ''}")
             if not grad_cgpa and cgpa:
-                grad_cgpa = cgpa
+                grad_cgpa = str(cgpa)
             if not university and inst:
                 university = inst
             if not degree and d:
@@ -553,6 +582,7 @@ def _build_config(user, profile) -> dict:
         "phone": str(rich_profile.get("phone") or ""),
         "email": str(autofill.get("email") or extracted.get("email") or user.email or ""),
         "resume_path": str(profile.resume_url or ""),
+        "resume_filename": str(profile.resume_filename or ""),
         
         "linkedin": linkedin_creds,
         "linkedin_cookies": linkedin_cookies_json,    # raw JSON string for _try_cookie_login
@@ -575,6 +605,11 @@ def _build_config(user, profile) -> dict:
         "profile": dict(rich_profile),
         "cover_letter": str(profile.cover_letter or ""),
 
+        # Account-wide daily apply cap from the user's plan — enforced per-apply
+        # by the rate limiter so a single phase can't exceed the plan (the DB
+        # quota is only checked at phase start). free=20, pro/team≈unlimited.
+        "plan_apply_limit": _plan_apply_limit(user),
+
         "max_jobs_per_day": int(prefs.get("max_jobs_per_day", 15)),
         "min_per_keyword": 3,
         "delay_between_applies_sec": [10, 25],
@@ -591,15 +626,26 @@ def _build_config(user, profile) -> dict:
             "enabled": bool(prefs.get("disable_web_search", False) is False),
             "max_results_per_query": int(prefs.get("max_results_per_query", 10)),
             "target_companies": list(prefs.get("target_companies") or []),
+            # Portal Scan targets saved via /career-ops/mission-targets (Greenhouse/Lever).
+            "target_boards": list(prefs.get("target_boards") or []),
             "ats_domains": list(prefs.get("ats_domains") or []),
             # User-configurable tab cap (preset options in the UI: 20/50/70/100)
             # and extra sites the user wants searched on top of the defaults.
             # Both are clamped to sane bounds inside web_search_applier.
             "tab_limit": int(prefs.get("web_search_tab_limit", 50)),
             "max_queries": int(prefs.get("web_search_max_queries", 30)),
+            # Per-keyword query cap — keeps multi-role searches fair AND bounds
+            # the tab fan-out (each keyword × this many queries × ~10 links).
+            "max_queries_per_keyword": int(prefs.get("web_search_max_queries_per_keyword", 6)),
             "google_login_wait_sec": int(prefs.get("google_login_wait_sec", 120)),
             "extra_sites": list(prefs.get("web_search_extra_sites") or []),
         },
+        # ADR-001 web-search targeting + ContextFill. Highest seniority to apply
+        # for (intern|entry|associate|mid|senior); "entry" also allows associate.
+        "target_seniority": str(prefs.get("target_seniority", "entry")),
+        # Off by default: the safety gate leaves filled forms for the user to submit.
+        "auto_submit": bool(prefs.get("auto_submit", False)),
+        "contextfill_dir": str(prefs.get("contextfill_dir", "")),
         "custom_instructions": str(prefs.get("agent_custom_instructions", "")),
     }
     return config
@@ -621,6 +667,94 @@ PHASE_PLATFORM_MAP = {
     1: "linkedin", 2: "internshala", 3: "wellfound", 4: "naukri",
     5: "unstop", 6: "web_search", 7: "form_fill",
 }
+
+# Lines that announce which job the applier is about to work on. The "✅" success
+# lines carry no title/company, so the parent remembers the last context seen
+# and attaches it to the Application row when the success line arrives.
+# ponytail: stdout scraping; switch to a structured marker line if appliers change format.
+_JOB_CTX_PATTERNS = (
+    re.compile(r"(?:APPLYING|ANALYZING):\s*(?P<title>.+?)(?:\.\.\.)?$"),
+    re.compile(r"📋 \[\d+\]\s*(?P<title>.+?)(?:\s+@\s+(?P<company>.+))?$"),
+    re.compile(r"(?:Applying to:|\[\d+/\d+\])\s*(?P<url>https?://\S+)$"),
+)
+
+
+def parse_job_record(line: str) -> Optional[dict]:
+    """The structured line appliers print via apply_decision.report_job, or None."""
+    from backend.services.apply_decision import JOB_MARKER
+    line = (line or "").strip()
+    if not line.startswith(JOB_MARKER):
+        return None
+    try:
+        rec = json.loads(line[len(JOB_MARKER):])
+    except ValueError:
+        return None
+    if not isinstance(rec, dict) or rec.get("status") not in ("applied", "prepared"):
+        return None
+    return rec
+
+
+def parse_job_context(line: str) -> Optional[dict]:
+    """Return {"title", "company", "url"} if the line announces a job, else None."""
+    line = (line or "").strip()
+    for pat in _JOB_CTX_PATTERNS:
+        m = pat.search(line)
+        if m:
+            d = m.groupdict()
+            return {"title": (d.get("title") or "").strip(),
+                    "company": (d.get("company") or "").strip(),
+                    "url": (d.get("url") or "").strip()}
+    return None
+
+
+def _save_application(session, user_id: str, platform: str, ctx: Optional[dict]) -> Optional[str]:
+    """Persist one applied/prepared job so /jobs and /jobs/analytics (the dashboard) see it.
+    `ctx` is either the legacy {title, company, url} scraped from text lines or a
+    full report_job record (adds status, jd_text, match_score, missing_skills,
+    cover_note_used, tailored_resume_id)."""
+    import hashlib
+    from backend.models.application import Application, ApplicationStatus
+    ctx = ctx or {}
+    title = (ctx.get("title") or ctx.get("url") or "Unknown role")[:255]
+    company = (ctx.get("company") or "")[:255]
+    url = ctx.get("url") or None
+    job_hash = hashlib.sha256(f"{platform}|{url or ''}|{title}|{company}".lower().encode()).hexdigest()
+    try:
+        uid = uuid.UUID(user_id)
+        existing = session.query(Application).filter(
+            Application.user_id == uid, Application.job_hash == job_hash).first()
+        # Only dedup real identities; "Unknown role" lines must not collapse together.
+        if existing and (url or ctx.get("title")):
+            # A job first prepared, then submitted on a later run, moves forward.
+            if ctx.get("status") == "applied" and existing.status == ApplicationStatus.prepared:
+                existing.status = ApplicationStatus.applied
+                session.commit()
+            return str(existing.id)
+        tr_id = ctx.get("tailored_resume_id")
+        try:
+            tr_id = uuid.UUID(str(tr_id)) if tr_id else None
+        except ValueError:
+            tr_id = None
+        app = Application(
+            user_id=uid, platform=platform, job_title=title, company=company,
+            job_url=url, job_hash=job_hash,
+            status=ApplicationStatus(ctx.get("status") or "applied"),
+            jd_text=ctx.get("jd_text") or None,
+            match_score=ctx.get("match_score"),
+            missing_skills=ctx.get("missing_skills") or None,
+            cover_note_used=ctx.get("cover_note_used"),
+            tailored_resume_id=tr_id,
+        )
+        session.add(app)
+        session.commit()
+        return str(app.id)
+    except Exception as e:
+        logger.warning("Could not save application for user %s: %s", user_id, e)
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return None
 
 
 def classify_agent_line(line: str):
@@ -646,7 +780,10 @@ def classify_agent_line(line: str):
     is_login_blocked = has_challenge_marker or (has_failure and is_login_msg)
     is_error = has_failure and not is_login_msg
 
-    if "External form filled" in line or "✅ Applied" in line:
+    # (LinkedIn prints these AFTER its structured record, so they're never double-counted.)
+    if "External form filled" in line or "paused for review" in line:
+        return {"category": "prepared", "event": {"event": "prepared", "message": line}}
+    if "External form submitted" in line or "✅ Applied" in line or "✅ SUCCESS" in line:
         return {"category": "applied", "event": {"event": "applied", "message": line}}
     if "⏭" in line or "Already applied" in line or "Skipping" in line:
         return {"category": "skipped", "event": {"event": "skipped", "message": line}}
@@ -659,7 +796,7 @@ def classify_agent_line(line: str):
         }}
     if is_error:
         return {"category": "error", "event": {"event": "error", "message": line}}
-    if "🎯 KEYWORD" in line or "LINKEDIN AGENT" in line or "Phase" in line:
+    if "🎯 KEYWORD" in line or "LINKEDIN AGENT" in line or "Phase" in line or "🚀 APPLYING" in line:
         return {"category": "ping", "event": {"event": "ping", "message": line}}
     return None
 
@@ -806,6 +943,24 @@ def _persist_autofill_bank(session, user_id, agent_config_mod) -> None:
         logger.warning("Could not persist autofill bank: %s", _e)
 
 
+def _get_python_executable() -> str:
+    """Resolve correct virtualenv python binary on macOS / Windows."""
+    py_exe = sys.executable
+    # Worker may be launched with a system python that lacks selenium etc.
+    # (seen: every run failed "No module named 'selenium'"); prefer the repo venv.
+    repo_venv = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".venv", "bin", "python"))
+    if os.path.exists(repo_venv):
+        return repo_venv
+    if sys.prefix != sys.base_prefix:
+        venv_py = os.path.join(sys.prefix, "bin", "python")
+        if os.path.exists(venv_py):
+            return venv_py
+        venv_py_win = os.path.join(sys.prefix, "Scripts", "python.exe")
+        if os.path.exists(venv_py_win):
+            return venv_py_win
+    return py_exe
+
+
 # ── Subprocess executor (default) — full isolation, no globals, no lock ──────
 def _execute_subprocess(user_id, phase, run_id, config, dry_run, on_line) -> int:
     import subprocess
@@ -826,8 +981,9 @@ def _execute_subprocess(user_id, phase, run_id, config, dry_run, on_line) -> int
             json.dump(cfg, f, default=str)
 
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "JOBAGENT_SERVER_MODE": "1"}
+        py_exe = _get_python_executable()
         proc = subprocess.Popen(
-            [sys.executable, script, cfg_path, str(phase), run_id, res_path],
+            [py_exe, script, cfg_path, str(phase), run_id, res_path],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, cwd=repo_root, env=env,
         )
@@ -853,7 +1009,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
     skipped = 0
     errors = 0
     error_reasons: list = []  # collect error messages for post-run summary
-    stats = {"skipped": 0, "errors": 0}
+    stats = {"applied": 0, "prepared": 0, "skipped": 0, "errors": 0}
 
     # Create a stop event for this run — used by the in-process path; the
     # subprocess path honours stop via the Redis pause:{run_id} key.
@@ -862,19 +1018,28 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
     try:
         user, profile = _load_user_and_profile(session, user_id)
         if not user or not profile:
-            _update_run(session, run_id, status="failed", completed_at=datetime.now())
+            _update_run(session, run_id, status="failed", completed_at=datetime.utcnow())
             return
 
         platform = PHASE_PLATFORM_MAP.get(phase, "unknown")
 
+        # Plan gate at the chokepoint every run passes through (API, scheduler,
+        # anything added later): free = LinkedIn only, mirroring
+        # routers/agents._allowed_phases. The API filter alone was bypassable
+        # via a schedule saved through PATCH /users/profile.
+        if _plan_name(user) == "free" and phase != 1:
+            _update_run(session, run_id, status="failed", completed_at=datetime.utcnow())
+            _log_event(session, run_id, "error", f"Phase {phase} ({platform}) requires a Pro plan.")
+            return
+
         # Quota check
         if not _check_quota(session, user_id, platform, user.plan):
-            _update_run(session, run_id, status="limit_reached", completed_at=datetime.now())
+            _update_run(session, run_id, status="limit_reached", completed_at=datetime.utcnow())
             publish(user_id, {"type": "run_complete", "message": "Daily limit reached."})
             return
 
         celery_task_id = task_self.request.id if task_self else None
-        _update_run(session, run_id, status="running", started_at=datetime.now(),
+        _update_run(session, run_id, status="running", started_at=datetime.utcnow(),
                     celery_task_id=celery_task_id)
         _log_event(session, run_id, "info", f"Phase {phase} ({platform}) started.")
         publish(user_id, {"type": "phase_started", "phase": phase, "platform": platform,
@@ -882,15 +1047,54 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
 
         # Per-line handler: classify → log + publish + accumulate stats. Shared
         # by both executors so behaviour is identical regardless of path.
+        job_ctx: dict = {}
+        last_beat = [0.0]
+
         def _handle_line(line):
+            # Any output = alive. Throttled so chatty phases don't write per line.
+            if time.time() - last_beat[0] > 30:
+                last_beat[0] = time.time()
+                try:
+                    _update_run(session, run_id, heartbeat_at=datetime.utcnow())
+                except Exception:
+                    session.rollback()
+            rec = parse_job_record(line)
+            if rec:
+                # Structured record from report_job — authoritative. From now on
+                # the legacy applied/prepared text lines are only log noise.
+                stats["structured"] = True
+                cat = rec["status"]
+                stats[cat] += 1
+                app_id = None if dry_run else _save_application(session, user_id, platform, rec)
+                msg = f"{'Applied' if cat == 'applied' else 'Prepared — review & submit'}: {rec.get('title') or rec.get('url')}"
+                _log_event(session, run_id, cat, msg, app_id)
+                job_ctx.clear()
+                _update_run(session, run_id, applied_count=stats["applied"],
+                            prepared_count=stats["prepared"], skipped_count=stats["skipped"],
+                            error_count=stats["errors"])
+                publish(user_id, {"event": cat, "message": msg, "run_id": run_id,
+                                  "job_title": rec.get("title", ""), "company": rec.get("company", "")})
+                return
+            ctx = parse_job_context(line)
+            if ctx:
+                job_ctx.clear()
+                job_ctx.update(ctx)
             res = classify_agent_line(line)
             if not res:
                 return
             cat = res["category"]
+            if cat in ("applied", "prepared") and stats.get("structured"):
+                cat = "ping"  # already counted from the structured record
             event = dict(res["event"])
             event["run_id"] = run_id
-            if cat == "applied":
-                _log_event(session, run_id, "applied", line)
+            if cat in ("applied", "prepared"):
+                stats[cat] += 1
+                app_id = None if dry_run else _save_application(
+                    session, user_id, platform, {**job_ctx, "status": cat})
+                event["job_title"] = job_ctx.get("title", "")
+                event["company"] = job_ctx.get("company", "")
+                job_ctx.clear()
+                _log_event(session, run_id, cat, line, app_id)
             elif cat == "skipped":
                 stats["skipped"] += 1
                 _log_event(session, run_id, "skipped", line)
@@ -904,11 +1108,53 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
                 error_reasons.append(line[:200])
             elif cat == "ping":
                 _log_event(session, run_id, "info", line)
+            if cat in ("applied", "prepared", "skipped", "error", "login_challenge"):
+                # Live counts — run cards read agent_runs, which was only
+                # written when the run finished.
+                _update_run(session, run_id, applied_count=stats["applied"],
+                            prepared_count=stats["prepared"],
+                            skipped_count=stats["skipped"], error_count=stats["errors"])
             publish(user_id, event)
 
         config = _build_config(user, profile)
         config["run_id"] = run_id
         config["dry_run"] = bool(dry_run)
+        # AI metering: missions used to spend the operator's keys for free.
+        # Users without their own key spend ai_tokens_balance; at 0 the run
+        # still goes ahead with AI off (static cover note, untailored resume,
+        # fit gate defaults to apply) instead of failing.
+        from backend.services.plan_gate import refill_ai_tokens, uses_own_key
+        own_key = uses_own_key(user)
+        if not own_key:
+            try:
+                refill_ai_tokens(user)
+                session.commit()
+                if (user.ai_tokens_balance or 0) <= 0:
+                    config["_llm_disabled"] = True
+                    _log_event(session, run_id, "info",
+                               "AI features off for this run: AI token balance is used up. "
+                               "Add your own Gemini/Groq key in Settings to keep tailoring.")
+            except Exception as e:
+                session.rollback()
+                logger.warning("AI token check skipped: %s", e)
+        # Today's applications across all platforms → apply_decision.rate_ok
+        # enforces the plan's daily cap even when Redis (the limiter) is down.
+        try:
+            from backend.models.application import Application
+            midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            config["_applied_today"] = session.query(Application).filter(
+                Application.user_id == user.id, Application.applied_at >= midnight).count()
+        except Exception as e:
+            session.rollback()
+            logger.warning("applied-today count unavailable: %s", e)
+        # Past callback rates per job archetype → fit_scorer nudges the score
+        # toward roles that actually answered this user. Best-effort.
+        try:
+            from backend.services.response_rates import by_archetype
+            config["_archetype_rates"] = by_archetype(session, user.id)
+        except Exception as e:
+            session.rollback()  # a failed query aborts the Postgres transaction
+            logger.warning("archetype rates unavailable: %s", e)
 
         if os.environ.get("JOBAGENT_INPROC_PHASE") == "1":
             applied = _execute_inproc(user_id, phase, run_id, config, dry_run,
@@ -916,25 +1162,47 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
         else:
             applied = _execute_subprocess(user_id, phase, run_id, config, dry_run, _handle_line)
 
+        # A crashed/closed browser leaves no result file (applied=0) even
+        # though applies were streamed — never report fewer than we saw.
+        # With structured records the streamed count is exact (the applier's own
+        # return value may include prepared-but-unsubmitted forms).
+        applied = stats["applied"] if stats.get("structured") else max(applied or 0, stats["applied"])
+        prepared = stats["prepared"]
         skipped = stats["skipped"]
         errors = stats["errors"]
-        _increment_quota(session, user_id, platform, applied)
+        # Prepared forms still spend the platform's daily budget (ban risk is the same).
+        _increment_quota(session, user_id, platform, applied + prepared)
+        if not own_key:
+            try:
+                from backend.services.llm_usage import operator_calls_for_run
+                used = operator_calls_for_run(session, user.id, run_id)
+                if used:
+                    user.ai_tokens_balance = max(0, (user.ai_tokens_balance or 0) - used)
+                    session.commit()
+                    _log_event(session, run_id, "info", f"AI calls this run: {used} "
+                               f"(balance left: {user.ai_tokens_balance})")
+            except Exception as e:
+                session.rollback()
+                logger.warning("AI token debit skipped for run %s: %s", run_id, e)
         was_stopped = stop_event.is_set() or _redis_paused(run_id)
         final_status = "paused" if was_stopped else "completed"
-        _log_event(session, run_id, "info", f"Phase {phase} {'stopped' if was_stopped else 'completed'}. Applied: {applied}")
+        _log_event(session, run_id, "info", f"Phase {phase} {'stopped' if was_stopped else 'completed'}. "
+                   f"Applied: {applied}, prepared for your review: {prepared}")
         try:
             learned = _learn_from_run_logs(session, user_id, run_id)
             if learned:
                 logger.info("Self-learning rules for run %s:\n%s", run_id, learned)
         except Exception as _learn_err:
             logger.warning("Self-learning skipped for run %s: %s", run_id, _learn_err)
-        _update_run(session, run_id, status=final_status, completed_at=datetime.now(),
-                    applied_count=applied, skipped_count=skipped, error_count=errors)
+        _update_run(session, run_id, status=final_status, completed_at=datetime.utcnow(),
+                    applied_count=applied, prepared_count=prepared,
+                    skipped_count=skipped, error_count=errors)
         publish(user_id, {
             "type": "run_complete",
             "phase": phase,
             "run_id": run_id,
             "total_applied": applied,
+            "total_prepared": prepared,
             "total_skipped": skipped,
             "error_reasons": error_reasons[-10:],  # last 10 errors max
             "summary": f"Stopped by user — {applied} applied." if was_stopped else f"Phase {phase} done — {applied} applications submitted.",
@@ -949,7 +1217,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
             _learn_from_run_logs(session, user_id, run_id)
         except Exception as _learn_err:
             logger.warning("Self-learning skipped for failed run %s: %s", run_id, _learn_err)
-        _update_run(session, run_id, status="failed", completed_at=datetime.now(),
+        _update_run(session, run_id, status="failed", completed_at=datetime.utcnow(),
                     error_count=1)
         publish(user_id, {
             "type": "agent_error",
@@ -969,6 +1237,26 @@ def run_phase_task(self: Task, user_id: str, phase: int, run_id: str, dry_run: b
     _run_phase_logic(user_id, phase, run_id, task_self=self, dry_run=dry_run)
 
 
+def _last_cron_slot(cron, now):
+    """Most recent time `cron` fired at or before `now` (naive local), or None if unparseable.
+    croniter when installed; otherwise only daily "M H * * *" is understood."""
+    try:
+        from croniter import croniter
+        return croniter(cron, now).get_prev(datetime)
+    except ImportError:
+        pass
+    except Exception:
+        return None
+    try:
+        m, h, *rest = cron.split()
+        if rest != ["*", "*", "*"]:
+            return None
+        slot = now.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+    except ValueError:
+        return None
+    return slot if slot <= now else slot - timedelta(days=1)
+
+
 @celery_app.task(name="backend.workers.agent_tasks.check_schedules")
 def check_schedules():
     from backend.models.user import User
@@ -983,41 +1271,31 @@ def check_schedules():
             if not profile or not profile.job_preferences:
                 continue
             
-            schedule = profile.job_preferences.get("schedule", {})
+            schedule = _ensure_dict(profile.job_preferences).get("schedule", {})
             if not schedule or not schedule.get("enabled"):
                 continue
-                
-            # Audit M4: use croniter for correct cron matching when available;
-            # fall back to the legacy hour-only check otherwise. Beat is assumed
-            # to call this ~hourly, so we match the cron against the current hour
-            # window. The per-day dedup below prevents double-fires either way.
-            cron = schedule.get("cron", "0 9 * * *")
-            now = datetime.now()
-            should_fire = None
-            try:
-                from croniter import croniter as _croniter
-                # True iff the cron's most-recent scheduled time falls within this hour.
-                prev = _croniter(cron, now).get_prev(datetime)
-                should_fire = (now - prev) < timedelta(hours=1)
-            except Exception:
-                should_fire = None  # croniter unavailable / bad expr → use fallback
-
-            if should_fire is None:
-                parts = cron.split(" ")
-                if len(parts) >= 2:
-                    target_hour = parts[1]
-                    if target_hour != "*" and str(now.hour) != target_hour:
-                        continue  # not time yet
-            elif not should_fire:
+            # Scheduling is a paid feature; the schedule JSON is user-writable
+            # via PATCH /users/profile, so enforce the plan here too.
+            from backend.services.plan_gate import check_plan_access
+            if not check_plan_access(_plan_name(user), "scheduling"):
                 continue
+                
+            # Fire when the cron's latest slot (server local time) is < 1h old and
+            # no run was created since that slot. Beat ticks every 5 min, so a
+            # worker restart can't skip the slot; the dedup stops double-fires.
+            prev = _last_cron_slot(schedule.get("cron", "0 9 * * *"), datetime.now())
+            if prev is None or datetime.now() - prev > timedelta(hours=1):
+                continue
+            # created_at is naive UTC and set on insert (started_at stays NULL while queued).
+            since = prev.astimezone(timezone.utc).replace(tzinfo=None)
 
             phases = schedule.get("phases", [])
             for phase in phases:
-                # To prevent running multiple times an hour, check if already ran today
+                # started_at covers rows from before created_at existed.
                 run = session.query(AgentRun).filter(
                     AgentRun.user_id == user.id,
                     AgentRun.phase == phase,
-                    AgentRun.started_at >= date.today()
+                    (AgentRun.created_at >= since) | (AgentRun.started_at >= since),
                 ).first()
                 
                 if not run:
@@ -1026,13 +1304,16 @@ def check_schedules():
                         id=uuid.UUID(run_id),
                         user_id=user.id,
                         phase=phase,
+                        platform=PHASE_PLATFORM_MAP.get(phase, "unknown"),
                         status=RunStatus.queued,
                     )
                     session.add(new_run)
                     session.commit()
                     run_phase_task.apply_async(args=[str(user.id), phase, run_id], queue="agents")
                     logger.info(f"Scheduled phase {phase} for user {user.id}")
-    except Exception as e:
-        logger.error(f"Error checking schedules: {e}")
+    except Exception:
+        # Was logger.error(str) — an AttributeError here silently disabled every
+        # schedule for months. Keep the traceback.
+        logger.exception("Error checking schedules")
     finally:
         session.close()

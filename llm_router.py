@@ -32,13 +32,13 @@ Role = Literal["form_fill", "writer"]
 MODELS = {
     "form_fill": {
         "ollama": os.environ.get("OLLAMA_FORM_MODEL", "qwen2.5:7b-instruct"),
-        "groq":   os.environ.get("GROQ_FORM_MODEL",   "llama-3.1-8b-instant"),
-        "gemini": os.environ.get("GEMINI_FORM_MODEL", "gemini-2.0-flash"),
+        "groq":   os.environ.get("GROQ_FORM_MODEL",   "openai/gpt-oss-20b"),
+        "gemini": os.environ.get("GEMINI_FORM_MODEL", "gemini-2.5-flash"),
     },
     "writer": {
         "ollama": os.environ.get("OLLAMA_WRITER_MODEL", "qwen2.5:14b-instruct"),
-        "groq":   os.environ.get("GROQ_WRITER_MODEL",   "llama-3.3-70b-versatile"),
-        "gemini": os.environ.get("GEMINI_WRITER_MODEL", "gemini-2.0-flash"),
+        "groq":   os.environ.get("GROQ_WRITER_MODEL",   "openai/gpt-oss-120b"),
+        "gemini": os.environ.get("GEMINI_WRITER_MODEL", "gemini-2.5-flash"),
     },
 }
 
@@ -50,8 +50,17 @@ DEFAULT_ORDER = {
 }
 
 _ollama_alive_cache: Optional[bool] = None
-_groq_client = None
-_gemini_client = None
+_groq_clients: dict = {}    # keyed by api key — per-user keys must not share a client
+_gemini_clients: dict = {}
+LAST_ERROR: Optional[str] = None  # last provider failure, so callers can say why generate() returned None
+
+
+def _note_error(provider: str, e: Exception) -> None:
+    global LAST_ERROR
+    msg = str(e)
+    if "API_KEY_INVALID" in msg or "API key not valid" in msg:
+        msg = "API key not valid"
+    LAST_ERROR = f"{provider}: {type(e).__name__}: {msg[:160]}"
 
 
 def _ollama_reachable() -> bool:
@@ -88,17 +97,18 @@ def _call_ollama(model: str, prompt: str, max_tokens: int, temperature: float) -
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
         return (data.get("response") or "").strip() or None
-    except Exception:
+    except Exception as e:
+        _note_error("ollama", e)
         return None
 
 
 def _call_groq(model: str, prompt: str, max_tokens: int, temperature: float, api_key: str) -> Optional[str]:
-    global _groq_client
     try:
-        if _groq_client is None:
+        client = _groq_clients.get(api_key)
+        if client is None:
             from groq import Groq
-            _groq_client = Groq(api_key=api_key)
-        resp = _groq_client.chat.completions.create(
+            client = _groq_clients[api_key] = Groq(api_key=api_key)
+        resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=max_tokens,
@@ -106,21 +116,23 @@ def _call_groq(model: str, prompt: str, max_tokens: int, temperature: float, api
         )
         text = (resp.choices[0].message.content or "").strip()
         return text or None
-    except Exception:
-        _groq_client = None
+    except Exception as e:
+        _groq_clients.pop(api_key, None)
+        _note_error("groq", e)
         return None
 
 
 def _call_gemini(model: str, prompt: str, api_key: str) -> Optional[str]:
-    global _gemini_client
     try:
-        if _gemini_client is None:
+        client = _gemini_clients.get(api_key)
+        if client is None:
             from google import genai
-            _gemini_client = genai.Client(api_key=api_key)
-        resp = _gemini_client.models.generate_content(model=model, contents=prompt)
+            client = _gemini_clients[api_key] = genai.Client(api_key=api_key)
+        resp = client.models.generate_content(model=model, contents=prompt)
         text = (resp.text or "").strip()
         return text or None
-    except Exception:
+    except Exception as e:
+        _note_error("gemini", e)
         # google-generativeai legacy path
         try:
             import google.generativeai as legacy
@@ -148,9 +160,17 @@ def generate(
     `config` is the agent CONFIG dict (carries per-user groq_api_key /
     gemini_api_key). Env vars are the fallback.
     """
+    global LAST_ERROR
     config = config or {}
+    if config.get("_llm_disabled"):
+        # The worker sets this when the user has no own key and no AI tokens
+        # left: the pipeline falls back to its non-AI paths instead of spending
+        # the operator's keys.
+        LAST_ERROR = "AI disabled for this run (token balance exhausted — add your own key)"
+        return None
     groq_key   = config.get("groq_api_key", "")   or os.environ.get("GROQ_API_KEY", "")
     gemini_key = config.get("gemini_api_key", "") or os.environ.get("GEMINI_API_KEY", "")
+    own = {"groq": bool(config.get("groq_api_key")), "gemini": bool(config.get("gemini_api_key"))}
 
     # Sensible defaults per role; callers can override.
     if max_tokens is None:
@@ -195,6 +215,9 @@ def generate(
                     output_tokens=_estimate_tokens(out),
                     latency_ms=int((_time.time() - started) * 1000),
                     user_id=str(user_id) if user_id else None,
+                    run_id=config.get("run_id"),
+                    billed_to=("local" if provider == "ollama"
+                               else "user" if own.get(provider) else "operator"),
                 )
             except Exception:
                 pass
@@ -223,7 +246,7 @@ def _record_usage_safe(**kwargs) -> bool:
 
 def reset_clients() -> None:
     """Drop cached clients — useful when a user rotates their API key mid-process."""
-    global _groq_client, _gemini_client, _ollama_alive_cache
-    _groq_client = None
-    _gemini_client = None
+    global _ollama_alive_cache
+    _groq_clients.clear()
+    _gemini_clients.clear()
     _ollama_alive_cache = None

@@ -13,6 +13,8 @@ from selenium.common.exceptions import (
     NoSuchElementException, StaleElementReferenceException,
     ElementNotInteractableException, ElementClickInterceptedException
 )
+from submit_gate import safety_gate
+
 
 
 def _cover_note(config):
@@ -54,6 +56,21 @@ def _kw_in_label(kw, combined):
     if " " in k:
         return k in c
     return k in set(re.split(r"[^a-z0-9]+", c))
+
+
+def _stem_in_label(stem, combined):
+    """Like _kw_in_label but matches a keyword as a word PREFIX — for intentional
+    stems where the suffix varies ('authoriz'→authorized/authorization,
+    'sponsor'→sponsorship, 'relocat'→relocate/relocation). Multi-word stems match
+    as a phrase. Use this for yes/no question detection, NOT for field rules
+    (a short stem like 'exp' must never prefix-match 'expected')."""
+    s = re.sub(r"[_\-]+", " ", str(stem).lower()).strip()
+    if not s:
+        return False
+    c = re.sub(r"[_\-]+", " ", str(combined).lower())
+    if " " in s:
+        return s in c
+    return any(w.startswith(s) for w in re.split(r"[^a-z0-9]+", c) if w)
 
 
 def _get_field_label(driver, element):
@@ -177,12 +194,6 @@ def _build_field_rules(config):
     _degree = profile.get("degree") or profile.get("course")
 
     raw_rules = [
-        # Name fields
-        (["first name", "given name", "fname", "first_name"], _first),
-        (["last name", "surname", "family name", "lname", "last_name"], _last),
-        (["full name", "your name", "candidate name", "applicant name", "fullname"], _full),
-        (["name"], _full),
-
         # Contact
         (["phone", "mobile", "contact number", "contact no", "tel", "whatsapp"], _phone),
         (["email", "e-mail", "mail id", "mail", "email id"], _email),
@@ -242,6 +253,12 @@ def _build_field_rules(config):
         # Gender / DOB
         (["gender", "sex"], profile.get("gender")),
         (["age", "date of birth", "dob", "birth"], profile.get("age") or profile.get("date_of_birth")),
+
+        # Name fields (evaluated last to prevent wrong-field matching like college name matching name)
+        (["first name", "given name", "fname", "first_name"], _first),
+        (["last name", "surname", "family name", "lname", "last_name"], _last),
+        (["full name", "your name", "candidate name", "applicant name", "fullname"], _full),
+        (["name"], _full),
     ]
     # Drop rules whose value is empty so the caller doesn't write placeholder data.
     return [(keys, val) for (keys, val) in raw_rules if val not in (None, "", [])]
@@ -482,7 +499,22 @@ def fill_text_inputs(driver, config, container=None):
 
                 matched = False
                 for keywords, value in field_rules:
-                    if value and any(_kw_in_label(kw, combined) for kw in keywords):
+                    if not value:
+                        continue
+                    found_kw = False
+                    for kw in keywords:
+                        if _kw_in_label(kw, combined):
+                            if kw == "name":
+                                exclude = ["company", "organization", "college", "university", "degree", "course", "project", 
+                                           "father", "mother", "reference", "file", "school", "employer", "manager", "recruiter", 
+                                           "friend", "spokesperson", "street", "city", "country", "state", "branch", 
+                                           "specialization", "stream", "department", "major", "job", "position", "role", "title",
+                                           "spouse", "child", "emergency", "contact", "referee", "professor", "teacher", "ref"]
+                                if any(e in combined for e in exclude):
+                                    continue
+                            found_kw = True
+                            break
+                    if found_kw:
                         inp.clear()
                         inp.send_keys(str(value))
                         filled = True
@@ -628,7 +660,7 @@ def fill_dropdowns(driver, config, container=None):
                 # Smart match: try to select the right value based on field label
                 smart_selected = False
 
-                if any(w in combined for w in ["gender", "sex"]):
+                if _kw_in_label("gender", combined) or _kw_in_label("sex", combined):
                     for opt in options:
                         if profile.get("gender", "male").lower() in opt.text.strip().lower():
                             sel.select_by_visible_text(opt.text.strip())
@@ -636,7 +668,7 @@ def fill_dropdowns(driver, config, container=None):
                             print(f"    [Fill] Dropdown gender: {opt.text.strip()}")
                             break
 
-                elif any(w in combined for w in ["country", "nationality"]):
+                elif _kw_in_label("country", combined) or _kw_in_label("nationality", combined):
                     for opt in options:
                         if "india" in opt.text.strip().lower():
                             sel.select_by_visible_text(opt.text.strip())
@@ -644,7 +676,7 @@ def fill_dropdowns(driver, config, container=None):
                             print(f"    [Fill] Dropdown country: {opt.text.strip()}")
                             break
 
-                elif any(w in combined for w in ["degree", "qualification", "education"]):
+                elif any(_kw_in_label(w, combined) for w in ["degree", "qualification", "education"]):
                     for opt in options:
                         opt_text = opt.text.strip().lower()
                         if any(d in opt_text for d in ["mba", "post grad", "master", "pg"]):
@@ -653,7 +685,9 @@ def fill_dropdowns(driver, config, container=None):
                             print(f"    [Fill] Dropdown degree: {opt.text.strip()}")
                             break
 
-                elif any(w in combined for w in ["experience", "exp", "year"]):
+                # Whole-word "experience"/"years" only — never the substring 'exp'
+                # (which used to match 'expected salary' and fill it with a years range).
+                elif any(_kw_in_label(w, combined) for w in ["experience", "years"]):
                     for opt in options:
                         opt_text = opt.text.strip().lower()
                         if any(y in opt_text for y in ["3", "4", "3-5", "2-4", "1-3"]):
@@ -663,14 +697,14 @@ def fill_dropdowns(driver, config, container=None):
                             break
 
                 if not smart_selected:
-                    # Analyze the question to decide Yes vs No
-                    should_say_no = any(w in combined for w in [
-                        "sponsorship", "sponsor", "disability", "handicap",
-                        "veteran", "military", "criminal", "conviction",
+                    # Analyze the question to decide Yes vs No (stem-matched).
+                    should_say_no = any(_stem_in_label(w, combined) for w in [
+                        "sponsor", "disability", "handicap",
+                        "veteran", "military", "criminal", "convict",
                         "felony", "restrict", "non-compete",
                     ])
-                    should_say_yes = any(w in combined for w in [
-                        "authorized", "authorization", "eligible", "legally",
+                    should_say_yes = any(_stem_in_label(w, combined) for w in [
+                        "authoriz", "eligible", "legally",
                         "relocat", "willing", "agree", "consent", "confirm",
                         "available", "immediate", "right to work", "permit",
                     ])
@@ -783,11 +817,19 @@ def fill_radio_buttons(driver, container=None):
                     except:
                         continue
 
-                # Try to click the target answer
+                # Try to click the target answer.
+                # NOTE: the previous one-liner `x in A if C else B` parsed as
+                # `(x in A) if C else B` — so for a "no" answer the condition
+                # became the truthy list B and clicked the FIRST radio (Yes),
+                # i.e. "Yes" to sponsorship/disability/felony. Fixed below.
+                if target_answer == "yes":
+                    accept = {"yes", "true", "agree", "i agree", "y"}
+                else:
+                    accept = {"no", "false", "disagree", "n"}
                 clicked = False
                 for radio, label in radio_labels.items():
                     label_text = label.text.strip().lower()
-                    if label_text in [target_answer, "true", "agree", "i agree"] if target_answer == "yes" else [target_answer, "false", "disagree"]:
+                    if label_text in accept:
                         try_click(driver, label)
                         clicked = True
                         filled = True
@@ -810,8 +852,25 @@ def fill_radio_buttons(driver, container=None):
     return filled
 
 
+# Checkboxes we must NOT auto-tick: marketing opt-ins and negative/decline boxes.
+# Blindly checking every box used to opt the user into promo email and tick
+# "I do NOT consent" boxes — actively harmful.
+_CHECKBOX_SKIP = (
+    "do not", "don't", "do n't", "opt out", "opt-out", "unsubscribe",
+    "newsletter", "promotional", "promotions", "marketing", "subscribe",
+    "third party", "third-party", "do you not", "decline",
+)
+# Boxes that are safe/required to tick so the form will submit.
+_CHECKBOX_ALLOW = (
+    "agree", "terms", "consent", "privacy", "policy", "acknowledge",
+    "confirm", "accept", "i have read", "authorize", "certify", "declare",
+)
+
+
 def fill_checkboxes(driver, container=None):
-    """Check any unchecked checkboxes (terms, agreements, etc.)."""
+    """Tick consent/terms checkboxes (needed to submit) but skip marketing
+    opt-ins and negative 'I do not...' boxes. Label-aware to avoid opting the
+    user into things they didn't ask for."""
     filled = False
     root = container or driver
 
@@ -819,13 +878,20 @@ def fill_checkboxes(driver, container=None):
         checkboxes = root.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
         for cb in checkboxes:
             try:
-                if not cb.is_displayed():
+                if not cb.is_displayed() or cb.is_selected():
                     continue
-                if not cb.is_selected():
+                label = _get_field_label(driver, cb)
+                if label and any(s in label for s in _CHECKBOX_SKIP):
+                    print(f"    [Skip] Checkbox (opt-in/negative): {label[:40]}")
+                    continue
+                # Tick when it's a clear consent/terms box, or when unlabeled
+                # (many required boxes have no readable label) — but never the
+                # skip-listed ones handled above.
+                if (not label) or any(a in label for a in _CHECKBOX_ALLOW):
                     try_click(driver, cb)
                     filled = True
-                    print("    [Fill] Checkbox checked")
-            except:
+                    print(f"    [Fill] Checkbox: {label[:40] or 'unlabeled'}")
+            except Exception:
                 continue
     except Exception:
         pass
@@ -930,6 +996,15 @@ def upload_resume(driver, config, container=None):
         file_inputs = root.find_elements(By.CSS_SELECTOR, "input[type='file']")
         for fi in file_inputs:
             try:
+                label = _get_field_label(driver, fi) or ""
+                if label:
+                    label_lower = label.lower()
+                    non_resume_kws = ["photo", "picture", "image", "transcript", "cover letter", "portfolio", "certificate", "id card", "passport"]
+                    resume_kws = ["resume", "cv", "curriculum", "bio"]
+                    if any(nk in label_lower for nk in non_resume_kws) and not any(rk in label_lower for rk in resume_kws):
+                        print(f"    [Resume] Skipping file input with label '{label[:40]}' (not a resume field)")
+                        continue
+
                 # Make visible if hidden
                 driver.execute_script(
                     "arguments[0].style.display='block'; "
@@ -955,10 +1030,20 @@ def fill_all_form_fields(driver, config, container=None):
     Returns True if any field was filled.
     """
     filled = False
-    from utils.auth import google_login_flow
-    if google_login_flow(driver, "Form Automation", config.get("profile", {}).get("email", "")):
-        filled = True
-        print("    [SmartFill] 🔗 Google login automation triggered")
+    # Auto-clicking "Sign in with Google" opens an OAuth popup/redirect that
+    # DESTROYS the active window → "no such window" → the whole Chrome session
+    # dies and every subsequent job in the run fails. This wrecked phase-6
+    # (browser died after job #1). Forms fill fine without it, so it is OFF by
+    # default and only runs when a config explicitly opts in.
+    if config.get("auto_google_login", False):
+        try:
+            from utils.auth import google_login_flow
+            if google_login_flow(driver, "Form Automation",
+                                 config.get("profile", {}).get("email", "")):
+                filled = True
+                print("    [SmartFill] 🔗 Google login automation triggered")
+        except Exception as e:
+            print(f"    [SmartFill] ⚠️  Google login skipped: {str(e)[:80]}")
 
     filled |= upload_resume(driver, config, container)
     filled |= fill_text_inputs(driver, config, container)
@@ -1029,6 +1114,9 @@ def walk_multi_step_form(driver, config, max_steps=10):
                     try:
                         if btn.is_displayed() and btn.is_enabled():
                             btn_label = btn.text.strip() or btn.get_attribute("value") or btn_text
+                            if "submit" in btn_text.lower() or "apply" in btn_text.lower() or "send" in btn_text.lower():
+                                if not safety_gate(config, label=f"Smart Form: {btn_label}"):
+                                    return "review"
                             print(f"    🚀 [Step {step+1}] ACTION: Clicking '{btn_label}'")
                             try_click(driver, btn)
                             clicked = True

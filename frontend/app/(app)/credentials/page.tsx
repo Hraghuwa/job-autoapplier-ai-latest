@@ -41,10 +41,19 @@ const PLATFORM_META: Record<Platform, { color: string; bg: string; url: string; 
 const EMPLOYMENT_TYPES = ['Full-time', 'Internship', 'Part-time', 'Contract', 'Trainee', 'Fresher']
 const WORK_MODES = ['Remote', 'Hybrid', 'On-site']
 const JOB_ROLE_SUGGESTIONS = [
+  // tech
   'Software Engineer', 'Frontend Developer', 'Backend Developer', 'Full Stack Developer',
-  'Data Scientist', 'Machine Learning Engineer', 'DevOps Engineer', 'Product Manager',
-  'UI/UX Designer', 'Data Analyst', 'Mobile Developer', 'Cloud Engineer',
-  'QA Engineer', 'Security Engineer', 'Blockchain Developer', 'AI Engineer',
+  'Data Scientist', 'Machine Learning Engineer', 'AI Engineer', 'DevOps Engineer',
+  'Cloud Engineer', 'Mobile Developer', 'QA Engineer', 'Security Engineer', 'Data Engineer',
+  'Data Analyst', 'Business Analyst', 'Product Manager', 'Associate Product Manager', 'UI/UX Designer',
+  // non-tech / entry-level
+  'Operations Executive', 'Operations Associate', 'Business Development Executive',
+  'Sales Executive', 'Inside Sales Representative', 'Customer Success Associate',
+  'Customer Support Executive', 'Marketing Executive', 'Digital Marketing Executive',
+  'Content Writer', 'Social Media Executive', 'HR Executive', 'Talent Acquisition Associate',
+  'Recruiter', 'Accounts Executive', 'Financial Analyst', 'Supply Chain Analyst',
+  'Project Coordinator', 'Management Trainee', 'Graduate Trainee', 'Research Analyst',
+  'Graphic Designer', 'Administrative Assistant', 'Consultant',
 ]
 const LOCATION_SUGGESTIONS = ['Bangalore', 'Mumbai', 'Delhi', 'Hyderabad', 'Pune', 'Chennai', 'Remote']
 
@@ -220,7 +229,11 @@ function TagInput({ tags, onAdd, onRemove, input, setInput, placeholder, suggest
       </div>
       {suggestions && suggestions.length > 0 && (
         <div className="flex flex-wrap gap-1">
-          {suggestions.filter(s => !tags.includes(s)).map(s => (
+          {suggestions
+            .filter(s => !tags.some(t => t.toLowerCase() === s.toLowerCase()))
+            .filter(s => !input.trim() || s.toLowerCase().includes(input.trim().toLowerCase()))
+            .slice(0, 16)
+            .map(s => (
             <button
               key={s}
               type="button"
@@ -528,6 +541,18 @@ export default function CredentialsPage() {
     }
   }
 
+  // Roles from the parsed resume first, then the catalog (deduped, case-insensitive).
+  const titleSuggestions = (() => {
+    const fromResume = [
+      profile?.autofill_bank?.current_role,
+      ...((profile?.extracted_data?.experience as any[]) || []).map(e => (e && typeof e === 'object' ? e.role : '')),
+    ].filter((r): r is string => typeof r === 'string' && r.trim().length > 1 && r.length < 60)
+    const seen = new Set<string>()
+    return [...fromResume.map(r => r.trim()), ...JOB_ROLE_SUGGESTIONS].filter(r => {
+      const k = r.toLowerCase()
+      return seen.has(k) ? false : (seen.add(k), true)
+    })
+  })()
   const titleHandlers = makeTagHandlers(jobTitles, setJobTitles, setTitleInput)
   const locationHandlers = makeTagHandlers(locations, setLocations, setLocationInput)
   const keywordHandlers = makeTagHandlers(keywords, setKeywords, setKeywordInput)
@@ -786,7 +811,7 @@ export default function CredentialsPage() {
                 input={titleInput}
                 setInput={setTitleInput}
                 placeholder="Type a role and press Enter..."
-                suggestions={JOB_ROLE_SUGGESTIONS}
+                suggestions={titleSuggestions}
               />
             </div>
 

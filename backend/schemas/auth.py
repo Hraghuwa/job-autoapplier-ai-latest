@@ -1,12 +1,13 @@
 from typing import Optional
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class RegisterRequest(BaseModel):
-    name: str
+    name: str = Field(..., max_length=255)
     email: EmailStr
-    password: str
-    referral_code: Optional[str] = None
+    # bcrypt only reads the first 72 bytes; cap well inside that.
+    password: str = Field(..., min_length=8, max_length=72)
+    referral_code: Optional[str] = Field(None, max_length=32)
 
 
 class LoginRequest(BaseModel):

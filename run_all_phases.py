@@ -101,6 +101,27 @@ def run_with_timeout(func, args, timeout_sec, phase_name):
 # ─────────────────────────────────────────────
 
 def phase1_linkedin(driver):
+    li_config = CONFIG.get("linkedin", {})
+    email = li_config.get("email", "")
+    password = li_config.get("password", "")
+    cookies_json = CONFIG.get("linkedin_cookies", "")
+
+    has_pwd = email and password and not password.startswith("YOUR_")
+    has_cookies = bool(cookies_json)
+
+    if not has_pwd and not has_cookies:
+        print("  ❌ Skipping: No LinkedIn credentials or cookies in config.py")
+        return 0
+
+    try:
+        login_ok = linkedin_applier.login(driver, email, password)
+        if not login_ok:
+            print("  ❌ LinkedIn login failed.")
+            return 0
+    except Exception as e:
+        print(f"  ❌ LinkedIn Login Error: {e}")
+        return 0
+
     agents = CONFIG.get("role_agents", [])
     total = 0
     start = time.time()

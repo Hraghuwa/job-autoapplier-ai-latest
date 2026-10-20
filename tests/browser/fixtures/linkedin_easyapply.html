@@ -1,0 +1,31 @@
+<!doctype html><html><body>
+<div id="result"></div>
+<div class="jobs-easy-apply-modal artdeco-modal artdeco-modal--is-open" role="dialog" aria-modal="true">
+  <div class="jobs-easy-apply-content">
+    <div id="s1" class="step">
+      <label for="em">Email address</label>
+      <input id="em" type="text" aria-label="Email address">
+      <label for="ph">Mobile phone number</label>
+      <input id="ph" type="text" aria-label="Mobile phone number">
+      <footer class="jobs-easy-apply-footer">
+        <button class="artdeco-button artdeco-button--primary" aria-label="Continue to next step"
+                onclick="document.getElementById('s1').style.display='none';document.getElementById('s2').style.display='block';">Next</button>
+      </footer>
+    </div>
+    <div id="s2" class="step" style="display:none">
+      <label for="yrs">Years of experience</label>
+      <input id="yrs" type="text" aria-label="Years of experience">
+      <footer class="jobs-easy-apply-footer">
+        <button class="artdeco-button artdeco-button--primary" aria-label="Review your application"
+                onclick="document.getElementById('s2').style.display='none';document.getElementById('s3').style.display='block';">Review</button>
+      </footer>
+    </div>
+    <div id="s3" class="step" style="display:none">
+      <footer class="jobs-easy-apply-footer">
+        <button class="artdeco-button artdeco-button--primary" aria-label="Submit application"
+                onclick="document.querySelector('.artdeco-modal--is-open').style.display='none';document.getElementById('result').innerText='Application submitted';">Submit application</button>
+      </footer>
+    </div>
+  </div>
+</div>
+</body></html>

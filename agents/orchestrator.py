@@ -63,6 +63,21 @@ def _server_mode() -> bool:
     return os.environ.get("JOBAGENT_SERVER_MODE") == "1"
 
 
+def _resolve_chrome_paths():
+    """Return (chrome_binary, chromedriver_path) to use, from env when present.
+
+    The worker container sets CHROME_BIN / CHROMEDRIVER_PATH to the distro
+    Chromium so Selenium doesn't need a runtime webdriver-manager download.
+    Returns (None, None) for local dev → fall back to webdriver-manager.
+    Only returns a path if it actually exists on disk.
+    """
+    chrome_bin = os.environ.get("CHROME_BIN") or ""
+    driver_path = os.environ.get("CHROMEDRIVER_PATH") or ""
+    chrome_bin = chrome_bin if chrome_bin and os.path.exists(chrome_bin) else None
+    driver_path = driver_path if driver_path and os.path.exists(driver_path) else None
+    return chrome_bin, driver_path
+
+
 def _teardown(driver, phase_label: str = "") -> None:
     if driver is None:
         return
@@ -79,11 +94,31 @@ def _teardown(driver, phase_label: str = "") -> None:
 # ─────────────────────────────────────────────
 #  SHARED BROWSER FACTORY
 # ─────────────────────────────────────────────
-def create_driver(profile_suffix=""):
+def create_driver(profile_suffix="", contextfill=False):
     """
     Create a Chrome driver with a persistent profile so logins survive
     across phases. profile_suffix allows each phase its own profile dir.
+
+    contextfill=True loads the ContextFill extension (ADR-001) into Chrome for
+    Testing; returns (driver, extension_id). Falls back to the normal driver and
+    extension_id=None if the extension or Chrome for Testing is unavailable.
     """
+    if contextfill:
+        import contextfill_bridge
+        opts = Options()
+        opts.add_argument("--window-size=1280,900")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_argument("--disable-notifications")
+        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+        opts.add_experimental_option("detach", not _server_mode())
+        ext_id = contextfill_bridge.add_to_options(opts, CONFIG)
+        if ext_id:
+            try:
+                return webdriver.Chrome(options=opts), ext_id  # Selenium Manager fetches Chrome for Testing
+            except Exception as e:
+                print(f"  ⚠️  ContextFill browser failed to start ({type(e).__name__}: {str(e)[:120]}) — using built-in filler")
+        return create_driver(profile_suffix), None
+
     opts = Options()
     opts.add_argument("--window-size=1280,900")
     opts.add_argument("--disable-blink-features=AutomationControlled")
@@ -100,12 +135,25 @@ def create_driver(profile_suffix=""):
     # Incognito: ensures no cached login session bypasses credential-based login
     opts.add_argument("--incognito")
 
-    import glob as _glob
-    wdm_path = ChromeDriverManager().install()
-    driver_dir = os.path.dirname(wdm_path)
-    candidates = _glob.glob(os.path.join(driver_dir, "chromedriver*"))
-    binary = next((p for p in candidates if os.path.isfile(p) and "NOTICES" not in p), wdm_path)
-    os.chmod(binary, 0o755)
+    # In a container (worker image) use the distro Chromium + driver via env —
+    # avoids a runtime webdriver-manager download and Chrome/driver version
+    # drift. Falls back to webdriver-manager for local dev.
+    chrome_bin, driver_path = _resolve_chrome_paths()
+    if chrome_bin:
+        opts.binary_location = chrome_bin
+
+    if driver_path:
+        binary = driver_path
+    else:
+        import glob as _glob
+        wdm_path = ChromeDriverManager().install()
+        driver_dir = os.path.dirname(wdm_path)
+        candidates = _glob.glob(os.path.join(driver_dir, "chromedriver*"))
+        binary = next((p for p in candidates if os.path.isfile(p) and "NOTICES" not in p), wdm_path)
+        try:
+            os.chmod(binary, 0o755)
+        except OSError:
+            pass
 
     driver = webdriver.Chrome(service=Service(binary), options=opts)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -274,31 +322,21 @@ def run_web_search_phase():
     applied = 0
 
     try:
-        driver = create_driver("_websearch")
+        # ADR-001: discover → target → ContextFill → close, one job at a time.
+        driver, ext_id = create_driver("_websearch", contextfill=True)
+        cf = None
+        if ext_id:
+            import contextfill_bridge
+            cf = contextfill_bridge.ContextFill(driver, ext_id)
+            if cf.setup(CONFIG):
+                print("  [Phase 6] 🧩 ContextFill loaded and seeded with your profile")
+            else:
+                print("  [Phase 6] ⚠️  ContextFill didn't load — using built-in filler")
+                cf = None
         tracker = load_tracker()
-        applied_urls = get_applied_urls(tracker)
-
-        print("  [Phase 6] 🌐 Finding jobs across the internet...")
-
-        # Open job board tabs (Internshala, Naukri, Unstop, Google results)
-        found_urls = job_finder.find_all_jobs(driver, CONFIG, applied_urls=applied_urls, max_tabs=20)
-        if found_urls:
-            add_applied_urls(tracker, found_urls)
-        applied_urls = get_applied_urls(tracker)
-
-        print(f"  [Phase 6] 📑 {len(found_urls)} job tabs opened")
-
-        # Auto-apply on ATS/career pages via Google search
-        print("  [Phase 6] 🤖 Running ATS auto-applier...")
-        web_count, web_urls = web_search_applier.search_and_apply(driver, CONFIG, applied_urls)
-        if web_urls:
-            add_applied_urls(tracker, web_urls)
-        applied += web_count
-
-        print(f"  [Phase 6] ✅ ATS applied: {web_count}")
-
-        # Auto-fill any forms that opened in new tabs during web search
-        _autofill_all_tabs(driver, "Phase 6")
+        applied, urls = web_search_applier.run_pipeline(driver, CONFIG, get_applied_urls(tracker), cf=cf)
+        if urls:
+            add_applied_urls(tracker, urls)
 
         PERFORMANCE_TRACKER.end_phase(phase_name, jobs_applied=applied)
         print(f"  [Phase 6] ✅ Done — {applied} applications")
@@ -390,6 +428,8 @@ def run_wellfound_phase():
             return 0
 
         print("  [Phase 3] ✅ Logged in — searching jobs...")
+        tracker = load_tracker()
+        skip = get_applied_urls(tracker)  # was set(): Wellfound re-applied every run
         applied, applied_urls = wellfound_applier.search_and_apply(
             driver,
             keywords=CONFIG["keywords"],
@@ -398,8 +438,14 @@ def run_wellfound_phase():
             applied_count=0,
             config=CONFIG,
             dry_run=CONFIG.get("dry_run", False),
-            applied_urls=set()
+            applied_urls=skip
         )
+        if not CONFIG.get("dry_run", False):
+            if hasattr(applied_urls, "applied_map"):
+                tracker["applied_at"] = applied_urls.applied_map
+                save_tracker(tracker)
+            else:
+                add_applied_urls(tracker, list(applied_urls))
 
         # Auto-fill any external tabs Wellfound redirected to
         _autofill_all_tabs(driver, "Phase 3")

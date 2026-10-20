@@ -296,7 +296,11 @@ def tailor(
 
     profile_skills = _as_str_list(profile.get("skills"))
     profile_education = _as_str_list(profile.get("education"))
-    skills_ordered = [s for s in (data.get("skills_ordered") or []) if isinstance(s, str)]
+    # Reviewer check for skills: the LLM may only reorder, never add. A skill
+    # absent from the profile would be a claim the candidate can't back up.
+    known_skills = {s.lower() for s in profile_skills}
+    skills_ordered = [s for s in (data.get("skills_ordered") or [])
+                      if isinstance(s, str) and s.strip().lower() in known_skills]
     rendered_chunks.extend(skills_ordered)
     rendered_text = " ".join(rendered_chunks)
 

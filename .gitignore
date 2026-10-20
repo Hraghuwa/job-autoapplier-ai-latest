@@ -16,6 +16,7 @@ users/
 # New platform
 backend/.env
 frontend/.env.local
+.env.prod
 uploads/
 *.db
 backend.db

@@ -1,0 +1,14 @@
+<!doctype html><html><body>
+<div id="done" style="display:none">Your application has been submitted successfully. Thank you for applying!</div>
+<form id="f">
+  <div id="step1">
+    <label for="nm">Full Name</label><input id="nm" type="text">
+    <label for="em">Email</label><input id="em" type="email">
+    <button type="button" id="next" onclick="document.getElementById('step1').style.display='none';document.getElementById('step2').style.display='block';">Next</button>
+  </div>
+  <div id="step2" style="display:none">
+    <label for="why">Why do you want this role?</label><textarea id="why"></textarea>
+    <button type="button" id="sub" onclick="document.getElementById('f').style.display='none';document.getElementById('done').style.display='block';">Submit application</button>
+  </div>
+</form>
+</body></html>

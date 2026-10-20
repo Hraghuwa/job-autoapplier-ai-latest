@@ -19,7 +19,10 @@ the static note.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, Dict, Optional
+
+from backend.services.untrusted import DATA_RULE, fence, looks_injected
 
 MAX_LEN = 700  # safe for LinkedIn/Greenhouse/Workday "why" textareas
 
@@ -33,6 +36,7 @@ STRICT RULES:
   titles, skills, metrics, or experience that are not present.
 - Reference the role's own language where the profile genuinely supports it.
 - First person, warm but professional, no greeting, no signature, no markdown.
+- {data_rule}
 
 CANDIDATE PROFILE (the only source of truth about the candidate):
 {profile}
@@ -41,6 +45,23 @@ JOB (what they are hiring for):
 {jd}
 
 Write the paragraph only."""
+
+# Second pass: a reviewer checks the draft against the profile before it is
+# submitted under the user's name (drafter→reviewer, as in ai-job-search).
+_REVIEW_PROMPT = """You are reviewing a job-application paragraph before it is
+submitted. Check every claim about the candidate against the profile.
+
+CANDIDATE PROFILE (the only source of truth):
+{profile}
+
+DRAFT:
+{draft}
+
+If every claim (companies, titles, skills, metrics, years, experience) is
+supported by the profile, return {{"ok": true}}.
+Otherwise return {{"ok": false, "revised": "<the paragraph with unsupported
+claims removed or softened, same tone, under 120 words>"}}.
+Return JSON only."""
 
 
 def _static(profile: Optional[Dict[str, Any]], config: Optional[Dict[str, Any]]) -> str:
@@ -79,7 +100,12 @@ def generate(profile: Optional[Dict[str, Any]], *, jd_text: Optional[str],
         except Exception:
             return static
 
-    prompt = _PROMPT.format(profile=_profile_brief(profile), jd=str(jd_text)[:4000])
+    if looks_injected(jd_text):
+        return static  # posting tries to steer the model — don't let it write for us
+
+    brief = _profile_brief(profile)
+    prompt = _PROMPT.format(profile=brief, jd=fence(str(jd_text)[:4000]),
+                            data_rule=DATA_RULE.format(tag="job_posting"))
     try:
         out = llm(prompt, role="writer", config=config or {},
                   max_tokens=220, temperature=0.5)
@@ -88,9 +114,28 @@ def generate(profile: Optional[Dict[str, Any]], *, jd_text: Optional[str],
     out = (out or "").strip()
     if not out:
         return static
+    out = _review(out, brief, llm, config)
+    if not out:
+        return static
     if len(out) > MAX_LEN:
         out = out[:MAX_LEN].rsplit(" ", 1)[0].rstrip()
     return out
+
+
+def _review(draft: str, brief: str, llm: LLMFn,
+            config: Optional[Dict[str, Any]]) -> str:
+    """Reviewer pass. Returns the draft, a revised draft, or "" (→ static note)
+    when the reviewer flags unsupported claims but offers no usable fix. A
+    reviewer outage keeps the draft: the drafter already ran under strict rules."""
+    try:
+        raw = llm(_REVIEW_PROMPT.format(profile=brief, draft=draft), role="writer",
+                  config=config or {}, max_tokens=260, temperature=0.0) or ""
+        verdict = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+    except Exception:
+        return draft
+    if not isinstance(verdict, dict) or verdict.get("ok") is not False:
+        return draft
+    return str(verdict.get("revised") or "").strip()
 
 
 def resolve_cover_note(config: Optional[Dict[str, Any]]) -> str:

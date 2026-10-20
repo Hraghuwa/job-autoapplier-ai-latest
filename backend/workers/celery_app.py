@@ -31,7 +31,7 @@ celery_app.conf.update(
     beat_schedule={
         "run-agent-schedules": {
             "task": "backend.workers.agent_tasks.check_schedules",
-            "schedule": 3600.0, # Run every hour
+            "schedule": 300.0,  # every 5 min; check_schedules dedups per cron slot
         },
     }
 )

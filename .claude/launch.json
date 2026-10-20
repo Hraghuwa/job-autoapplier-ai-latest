@@ -3,26 +3,57 @@
   "configurations": [
     {
       "name": "Backend (FastAPI)",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "3002"],
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "backend.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "3002"
+      ],
       "port": 3002
     },
     {
       "name": "Frontend (Next.js)",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["next", "dev", "--port", "3000"],
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "frontend",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "3000"
+      ],
       "port": 3000
     },
     {
       "name": "Celery Worker",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "celery", "-A", "backend.workers.celery_app", "worker", "--loglevel=info", "-Q", "agents,default"],
+      "runtimeArgs": [
+        "-m",
+        "celery",
+        "-A",
+        "backend.workers.celery_app",
+        "worker",
+        "-B",
+        "-s",
+        "/tmp/celerybeat-schedule",
+        "--loglevel=info",
+        "-Q",
+        "agents,default"
+      ],
       "port": null
     },
     {
       "name": "Redis",
       "runtimeExecutable": "redis-server",
-      "runtimeArgs": ["--daemonize", "no"],
+      "runtimeArgs": [
+        "--daemonize",
+        "no"
+      ],
       "port": 6379
     }
   ]

@@ -8,6 +8,7 @@ Uses Gemini AI for intelligent form field answers.
 import time
 import random
 import os
+import re
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
@@ -18,9 +19,55 @@ from selenium.common.exceptions import (
     ElementClickInterceptedException, TimeoutException,
     StaleElementReferenceException, JavascriptException
 )
+from submit_gate import safety_gate
 import agent_vision
 import job_finder
 import google_form_filler
+
+def _numeric_only(value) -> str:
+    """LinkedIn renders number questions as text inputs (id contains 'numeric')
+    that reject anything but a number — '30 days' fails validation forever."""
+    import re as _re
+    m = _re.search(r"\d+(?:\.\d+)?", str(value or ""))
+    return m.group(0) if m else "0"
+
+
+def _national_phone(phone) -> str:
+    """Digits only, country code dropped — LinkedIn's phone field is the
+    national number (country code is a separate dropdown)."""
+    import re as _re
+    digits = _re.sub(r"\D", "", str(phone or ""))
+    # ponytail: assumes 10-digit national numbers (India default); make
+    # country-aware if non-Indian users show up.
+    return digits[-10:] if len(digits) > 10 else digits
+
+
+def _identity_value(label: str, identity) -> str:
+    """Resume value for a name/phone/email field label, else ''."""
+    for keywords, value in identity:
+        if value and any(kw in label for kw in keywords):
+            return str(value).strip()
+    return ""
+
+
+def _with_original_name(path: str, filename, user_id="") -> str:
+    """Uploads are stored as uploads/<uid>/resume.pdf, so LinkedIn listed a
+    generic 'resume.pdf'. Upload a copy under the user's original filename."""
+    import shutil
+    import tempfile
+    if not path or not filename or not os.path.isfile(path):
+        return path
+    name = os.path.basename(str(filename))
+    if not name.lower().endswith(".pdf") or name == os.path.basename(path):
+        return path
+    dst = os.path.join(tempfile.gettempdir(), "jobagent_resume", str(user_id or "local"), name)
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(path, dst)
+        return dst
+    except OSError:
+        return path
+
 
 def _retry(fn, retries=3, delay=2, label=""):
     """Retry a lambda up to `retries` times on transient Selenium exceptions."""
@@ -374,7 +421,7 @@ def fill_modal_fields(driver, config):
         (["full name", "your name", "candidate name"], full_name),
 
         # ── Contact ──
-        (["phone", "mobile", "contact number", "tel", "whatsapp"], profile.get("phone", config.get("phone", ""))),
+        (["phone", "mobile", "contact number", "tel", "whatsapp"], _national_phone(profile.get("phone", config.get("phone", "")))),
         (["email", "e-mail", "mail id"], profile.get("email", config.get("email", ""))),
         (["linkedin", "profile url", "portfolio"], profile.get("linkedin", "")),
 
@@ -433,18 +480,27 @@ def fill_modal_fields(driver, config):
         (["certif", "credential"], profile.get("certifications", "")),
     ]
 
+    # Resume identity — overrides whatever the LinkedIn account pre-filled.
+    identity = [
+        (["first name", "given name"], first_name),
+        (["last name", "surname", "family name"], last_name),
+        (["full name", "your name", "candidate name"], full_name),
+        (["phone", "mobile"], _national_phone(profile.get("phone", config.get("phone", "")))),
+        (["email", "e-mail"], profile.get("email", config.get("email", ""))),
+    ]
+
     # Fill empty text inputs
     try:
         inputs = driver.find_elements(By.CSS_SELECTOR,
             "div.jobs-easy-apply-modal input[type='text'], "
             "div.artdeco-modal input[type='text'], "
             "div.jobs-easy-apply-content input[type='text'], "
-            "div[role='dialog'] input[type='text']")
+            "div[role='dialog'] input[type='text'], "
+            # Newer Easy Apply renders some inputs with no type attribute.
+            "div[role='dialog'] input:not([type])")
         for inp in inputs:
             try:
                 val = (inp.get_attribute("value") or "").strip()
-                if val:
-                    continue
 
                 # Build label text from all available sources
                 inp_id = inp.get_attribute("id") or ""
@@ -458,10 +514,24 @@ def fill_modal_fields(driver, config):
                     pass
                 combined = f"{label_text} {aria} {inp_id} {placeholder}".lower()
 
+                if val:
+                    # LinkedIn pre-fills name/phone/email from the logged-in
+                    # account — the resume's identity must win regardless.
+                    want = _identity_value(combined, identity)
+                    if want and want != val:
+                        inp.clear()
+                        inp.send_keys(want)
+                        filled_something = True
+                        print(f"    [Fill] {label_text or aria or inp_id}: {want[:30]} (from resume)")
+                    continue
+
                 # Match against field rules
                 matched = False
+                is_numeric = "numeric" in inp_id.lower()
                 for keywords, value in field_rules:
                     if value and any(kw in combined for kw in keywords):
+                        if is_numeric:
+                            value = _numeric_only(value)
                         inp.clear()
                         inp.send_keys(value)
                         filled_something = True
@@ -473,6 +543,8 @@ def fill_modal_fields(driver, config):
                     # AI-powered fallback: ask Gemini to answer the question
                     question = label_text or aria or placeholder or combined
                     ai_answer = _ask_ai(question, config)
+                    if ai_answer and is_numeric:
+                        ai_answer = _numeric_only(ai_answer)
                     if ai_answer:
                         inp.clear()
                         inp.send_keys(ai_answer)
@@ -578,6 +650,17 @@ def fill_modal_fields(driver, config):
             try:
                 sel = Select(sel_elem)
                 current = sel.first_selected_option.get_attribute("value") or ""
+                # Email dropdown lists the account's verified emails — pick
+                # the resume's email when LinkedIn offers it.
+                _resume_email = str(profile.get("email", config.get("email", ""))).strip().lower()
+                if _resume_email and current.strip().lower() != _resume_email:
+                    _match = next((o for o in sel.options
+                                   if o.text.strip().lower() == _resume_email), None)
+                    if _match:
+                        sel.select_by_visible_text(_match.text.strip())
+                        filled_something = True
+                        print(f"    [Fill] Email: {_resume_email} (from resume)")
+                        continue
                 if not current or current == "Select an option":
                     # Try to select "Yes" first
                     yes_found = False
@@ -781,10 +864,20 @@ def _find_modal_action_button(driver):
     return None, None
 
 
+def _contextfill(driver, config):
+    try:
+        import contextfill_page
+        return contextfill_page.fill(driver, _find_modal(driver), config)
+    except Exception as e:
+        print(f"    ⚠️  ContextFill skipped ({type(e).__name__}: {str(e)[:80]})")
+        return 0
+
+
 def process_easy_apply_modal(driver, config, dry_run=False):
     """Walk through the multi-step Easy Apply modal until submitted."""
     max_steps = 15
     _stop = config.get("_stop_event")
+    last_state = None
 
     for step in range(max_steps):
         if _stop and _stop.is_set():
@@ -826,9 +919,31 @@ def process_easy_apply_modal(driver, config, dry_run=False):
                 _resume_to_upload = resolve_resume_path(config, jd_text=jd_text)
             except Exception:
                 _resume_to_upload = config.get("resume_path", "")
+            _resume_to_upload = _with_original_name(
+                _resume_to_upload or config.get("resume_path", ""), config.get("resume_filename"),
+                config.get("user_id", ""))
             upload_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
             for upload_input in upload_inputs:
                 try:
+                    # Verify file input label to avoid uploading resume to other fields (photos, cover letters)
+                    inp_id = upload_input.get_attribute("id") or ""
+                    aria = upload_input.get_attribute("aria-label") or ""
+                    placeholder = upload_input.get_attribute("placeholder") or ""
+                    label_text = ""
+                    try:
+                        label_el = driver.find_element(By.CSS_SELECTOR, f"label[for='{inp_id}']")
+                        label_text = label_el.text
+                    except:
+                        pass
+                    combined = f"{label_text} {aria} {inp_id} {placeholder}".lower()
+
+                    if combined.strip():
+                        non_resume_kws = ["photo", "picture", "image", "transcript", "cover letter", "portfolio", "certificate", "id card", "passport"]
+                        resume_kws = ["resume", "cv", "curriculum", "bio"]
+                        if any(nk in combined for nk in non_resume_kws) and not any(rk in combined for rk in resume_kws):
+                            print(f"    [Resume] Skipping file input with label '{combined[:40]}' (not a resume field)")
+                            continue
+
                     driver.execute_script(
                         "arguments[0].style.display='block'; arguments[0].style.opacity='1';",
                         upload_input)
@@ -840,7 +955,10 @@ def process_easy_apply_modal(driver, config, dry_run=False):
         except:
             pass
 
-        # Fill any empty form fields
+        # Fill any empty form fields: ContextFill first (understands typeless
+        # inputs, typeahead comboboxes and radio groups in LinkedIn's newer
+        # Easy Apply), then the built-in rules for whatever it left empty.
+        _contextfill(driver, config)
         fill_modal_fields(driver, config)
 
         # Find and click the primary action button using the resilient helper
@@ -850,6 +968,9 @@ def process_easy_apply_modal(driver, config, dry_run=False):
         if action_btn:
             btn_text  = (action_btn.text or "").strip()
             aria_label = action_btn.get_attribute("aria-label") or ""
+            if action_type == "submit":
+                if not safety_gate(config, label=f"LinkedIn Easy Apply: {btn_text}"):
+                    return "review"
             print(f"    🚀 [Step {step+1}] ACTION: Clicking '{btn_text}' ({action_type})")
             try_click(driver, action_btn)
             time.sleep(2)
@@ -903,10 +1024,23 @@ def process_easy_apply_modal(driver, config, dry_run=False):
                 "span.artdeco-inline-feedback__message")
             if errors and any(e.is_displayed() for e in errors):
                 print("    ⚠️  Validation errors found, re-filling fields...")
+                _contextfill(driver, config)
                 fill_modal_fields(driver, config)
                 time.sleep(1)
         except:
             pass
+
+        # No progress since last step (same page, same errors) → re-looping
+        # just burns ~15 steps × several seconds on a form we can't pass.
+        try:
+            _m = _find_modal(driver)
+            state = _m.get_attribute("innerText") if _m else None
+        except Exception:
+            state = None
+        if state and state == last_state:
+            print(f"    ❌ Easy Apply stuck at step {step+1} (no progress) — giving up on this job")
+            return "stuck"
+        last_state = state
 
     return "stuck"
 
@@ -1061,6 +1195,13 @@ def handle_external_application(driver, config, original_handles, linkedin_tab):
                         f"//a[contains(normalize-space(),'{btn_text}')]")
                     for btn in btns:
                         if btn.is_displayed() and btn.is_enabled():
+                            if any(w in btn_text.lower() for w in ["submit", "apply", "send"]):
+                                if not safety_gate(config, label=f"LinkedIn External Form: {btn.text.strip() or btn_text}"):
+                                    try:
+                                        driver.switch_to.window(linkedin_tab)
+                                    except Exception:
+                                        pass
+                                    return "review"
                             print(f"  👆 Clicking: '{btn.text.strip() or btn_text}'")
                             try_click(driver, btn)
                             time.sleep(3)
@@ -1093,6 +1234,34 @@ def handle_external_application(driver, config, original_handles, linkedin_tab):
         except Exception:
             pass
         return None
+
+
+def _handled(config, applied_count):
+    """Applied + prepared-for-review this run. Caps count both: with auto_submit
+    off nothing is ever 'applied', and counting only applies looped forever."""
+    return applied_count + config.get("_li_prepared", 0)
+
+
+def _rate(action, config):
+    """Shared caps (apply_decision.rate_ok / rate_register). Fail-open."""
+    try:
+        from backend.services.apply_decision import rate_ok, rate_register
+    except Exception:
+        return True
+    if action == "ok":
+        return rate_ok(config, "linkedin")
+    rate_register(config, "linkedin", success=(action == "register"))
+    return True
+
+
+def _report(config, status, title, url):
+    if url:
+        config.setdefault("_li_handled_urls", []).append(url)  # → tracker cooldown
+    try:
+        from backend.services.apply_decision import report_job
+        report_job(config, status, title=title, company=config.get("_li_company", ""), url=url)
+    except Exception:
+        pass
 
 
 def apply_from_search_page(driver, config, applied_count, max_jobs, current_keywords=None, dry_run=False):
@@ -1130,7 +1299,12 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
     )
 
     def find_cards():
-        cards = driver.find_elements(By.CSS_SELECTOR, CARD_SELECTORS)
+        # Outermost matches only: the selectors also match the nested
+        # div.job-card-container inside each li, so every job ran twice.
+        cards = driver.execute_script(
+            "const s = arguments[0];"
+            "return [...document.querySelectorAll(s)].filter(e => !e.parentElement.closest(s));",
+            CARD_SELECTORS) or []
         if not cards:
             cards = driver.find_elements(By.CSS_SELECTOR, "a[href*='/jobs/view/']")
         return cards
@@ -1151,7 +1325,7 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
     processed = 0
     _stop = config.get("_stop_event")  # threading.Event — set when user clicks Stop
 
-    while card_index < total_count and applied_count < max_jobs:
+    while card_index < total_count and _handled(config, applied_count) < max_jobs:
         # ── Stop check: bail out immediately when user clicks Stop ──
         if _stop and _stop.is_set():
             print("  [LinkedIn] 🛑 Stop requested — exiting card loop.")
@@ -1168,10 +1342,24 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
         processed += 1
 
         try:
-            # Scroll the card into view
-            driver.execute_script(
-                "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", card)
-            time.sleep(1)
+            # Scroll the card into view (instant — LinkedIn only renders
+            # card contents once they're on screen)
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", card)
+            time.sleep(0.3)
+
+            # Title filter from the card itself BEFORE clicking — clicking +
+            # waiting for the detail panel cost ~4s per irrelevant job.
+            card_title = (card.text or "").strip().split("\n")[0][:60]
+            if not card_title:
+                time.sleep(0.7)
+                card_title = (card.text or "").strip().split("\n")[0][:60]
+            if not card_title:
+                continue  # never rendered — clicking it just re-reads the previous job
+            _ok, _why = _is_title_relevant(
+                card_title, current_keywords or config.get("keywords", []), config)
+            if not _ok:
+                print(f"  ⏭️  Skipped: {card_title} ({_why})")
+                continue
 
             # Click the job card to load details in right panel
             try_click(driver, card)
@@ -1225,6 +1413,18 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             except Exception:
                 config["current_jd_text"] = ""
 
+            _m = re.search(r"currentJobId=(\d+)|/jobs/view/(\d+)", driver.current_url or "")
+            _job_url = f"https://www.linkedin.com/jobs/view/{_m.group(1) or _m.group(2)}/" if _m else ""
+            try:
+                config["_li_company"] = driver.find_element(By.CSS_SELECTOR,
+                    "div.job-details-jobs-unified-top-card__company-name, "
+                    "div.jobs-unified-top-card__company-name").text.strip()[:120]
+            except Exception:
+                config["_li_company"] = ""
+            if _job_url and _job_url in config.get("_applied_urls", ()):
+                print(f"  ⏭️  Already applied (tracked): {job_title}")
+                continue
+
             # ── Duration filter: only for internship searches + user set explicit duration ──
             _intern_types = {"internship", "trainee", "fresher"}
             _searching_intern = any(t.lower() in _intern_types for t in config.get("employment_types", []))
@@ -1266,80 +1466,25 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             except Exception:
                 pass  # gate must never block a working apply
 
-            # Look for Easy Apply button in the right panel / detail area
-            easy_apply_btn = None
-
-            # Strategy 1 — scoped to the job detail panel, most specific first
-            DETAIL_PANELS = [
-                "div.jobs-details",
-                "div.job-details-jobs-unified-top-card",
-                "div.jobs-unified-top-card",
-                "div.jobs-s-apply",
-                "div.job-details",
-            ]
-            for panel_sel in DETAIL_PANELS:
-                if easy_apply_btn:
-                    break
-                try:
-                    panel = driver.find_element(By.CSS_SELECTOR, panel_sel)
-                    # Look for Easy Apply class button first
-                    for btn in panel.find_elements(By.CSS_SELECTOR, "button.jobs-apply-button"):
-                        if btn.is_displayed() and btn.is_enabled():
-                            easy_apply_btn = btn
-                            break
-                    if easy_apply_btn:
-                        break
-                    # Text / aria-label match within the panel
-                    for btn in panel.find_elements(By.TAG_NAME, "button"):
-                        if not btn.is_displayed() or not btn.is_enabled():
-                            continue
-                        txt = btn.text.strip()
-                        aria = btn.get_attribute("aria-label") or ""
-                        if "Easy Apply" in txt or "Easy Apply" in aria:
-                            easy_apply_btn = btn
-                            break
-                        # Regular external Apply button (opens new tab)
-                        if "Apply" in txt and "Applied" not in txt:
-                            easy_apply_btn = btn
-                            break
-                except Exception:
-                    continue
-
-            # Strategy 2 — page-wide fallback (scoped XPaths)
-            if not easy_apply_btn:
-                FALLBACK_XPATHS = [
-                    "//button[contains(@class,'jobs-apply-button')]",
-                    "//button[contains(normalize-space(),'Easy Apply')]",
-                    "//button[contains(@aria-label,'Easy Apply')]",
-                    "//button[contains(@aria-label,'Apply') and not(contains(@aria-label,'Applied'))]",
-                ]
-                for sel in FALLBACK_XPATHS:
+            # Easy Apply button: button.jobs-apply-button in the job's top card.
+            # Waits only as long as the panel needs (vs. the old 5-panel
+            # per-button scan + 3s sleep + 5s wait). Must NOT match the
+            # "Easy Apply" search-filter pill (#searchFilter_applyWithLinkedin).
+            def _find_easy_apply(d):
+                for b in d.find_elements(By.CSS_SELECTOR, "button.jobs-apply-button"):
                     try:
-                        btns = driver.find_elements(By.XPATH, sel)
-                        for btn in btns:
-                            if btn.is_displayed() and btn.is_enabled():
-                                if "Applied" not in (btn.text or ""):
-                                    easy_apply_btn = btn
-                                    break
-                        if easy_apply_btn:
-                            break
-                    except Exception:
+                        label = f"{b.text} {b.get_attribute('aria-label') or ''}".lower()
+                        if "easy apply" in label and b.is_displayed() and b.is_enabled():
+                            return b
+                    except StaleElementReferenceException:
                         continue
+                return False
 
-            if not easy_apply_btn:
-                # Last resort: wait a bit longer and retry the most reliable selector
-                time.sleep(3)
-                try:
-                    easy_apply_btn = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable(
-                            (By.XPATH,
-                             "//button[contains(@class,'jobs-apply-button') or "
-                             "contains(normalize-space(),'Easy Apply')]")
-                        )
-                    )
-                except Exception:
-                    pass
-
+            easy_apply_btn = None
+            try:
+                easy_apply_btn = WebDriverWait(driver, 6, poll_frequency=0.3).until(_find_easy_apply)
+            except TimeoutException:
+                pass
             if not easy_apply_btn:
                 print(f"  ⏭️  No Apply button found for: {job_title}")
                 continue
@@ -1350,59 +1495,48 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 print(f"  ⏭️  Already applied to: {job_title}")
                 continue
 
+            # ── Rate limiter BEFORE clicking (prevents account bans) ─────────
+            # Was checked after the click, by which point an external form had
+            # already been filled/submitted past the cap.
+            if not _rate("ok", config):
+                return applied_count
+
             print(f"  🚀 APPLYING: {job_title}...")
             handles_before = set(driver.window_handles)
             linkedin_tab = driver.current_window_handle
             _retry(lambda: try_click(driver, easy_apply_btn), label=f"Apply btn for '{job_title}'")
-            time.sleep(3)
 
-            # Check if an external tab opened first
+            # Check if an external tab opened first (waits 3s itself)
             ext_result = handle_external_application(driver, config, handles_before, linkedin_tab)
 
-            # ── Rate limiter check (prevents account bans) ───────────────────
-            try:
-                from backend.services.rate_limits import default_limiter
-                _uid = str(config.get("user_id", ""))
-                _ok, _reason = default_limiter.can_apply(_uid, "linkedin")
-                if not _ok:
-                    print(f"  🛑 Rate limit reached: {_reason}")
-                    return applied_count
-            except Exception:
-                pass  # limiter unavailable — proceed without it
-
             if ext_result in ("submitted", "filled"):
-                applied_count += 1
+                if ext_result == "submitted":
+                    applied_count += 1
+                    _report(config, "applied", job_title, _job_url)
+                else:
+                    config["_li_prepared"] = config.get("_li_prepared", 0) + 1
+                    _report(config, "prepared", job_title, _job_url)
+                _rate("register", config)
                 label = "submitted" if ext_result == "submitted" else "filled (review & submit)"
-                print(f"  📊 External form {label}: {applied_count}/{max_jobs}\n")
-                try:
-                    from backend.services.rate_limits import default_limiter
-                    _uid2 = str(config.get("user_id", ""))
-                    default_limiter.register_apply(_uid2, "linkedin")
-                    default_limiter.register_success(_uid2, "linkedin")  # reset consecutive-failure counter
-                except Exception:
-                    pass
+                print(f"  📊 External form {label}: {_handled(config, applied_count)}/{max_jobs}\n")
             else:
                 # No external tab — process LinkedIn Easy Apply modal
                 result = process_easy_apply_modal(driver, config, dry_run=dry_run)
 
-                if result == "submitted" or result == "closed":
+                if result == "review":
+                    config["_li_prepared"] = config.get("_li_prepared", 0) + 1
+                    _report(config, "prepared", job_title, _job_url)
+                    _rate("register", config)
+                    print(f"  ⏸️  LinkedIn Easy Apply paused for review: {job_title}")
+                elif result == "submitted" or result == "closed":
                     applied_count += 1
+                    _report(config, "applied", job_title, _job_url)
+                    _rate("register", config)
                     print(f"  📊 Progress: {applied_count}/{max_jobs} applications\n")
-                    try:
-                        from backend.services.rate_limits import default_limiter
-                        _uid2 = str(config.get("user_id", ""))
-                        default_limiter.register_apply(_uid2, "linkedin")
-                        default_limiter.register_success(_uid2, "linkedin")  # reset consecutive-failure counter
-                    except Exception:
-                        pass
                 else:
                     print(f"  ⚠️  Could not complete: {job_title}")
                     dismiss_modal(driver)
-                    try:
-                        from backend.services.rate_limits import default_limiter
-                        default_limiter.register_failure(str(config.get("user_id", "")), "linkedin")
-                    except Exception:
-                        pass
+                    _rate("fail", config)
 
             # Adaptive delay between applications — escalates after consecutive
             # failures to dodge bot detection. Fail-open to a flat jittered wait.
@@ -1433,6 +1567,8 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
     """
     if applied_urls is None:
         applied_urls = set()
+    config["_applied_urls"] = applied_urls  # apply_from_search_page skips tracked jobs
+    config.setdefault("_li_prepared", 0)
     min_per_kw = config.get("min_per_keyword", 10)
     keyword_stats = {}
     _stop = config.get("_stop_event")  # threading.Event — set when user clicks Stop
@@ -1443,7 +1579,7 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
 
     cycle = 0
     while True:
-        if applied_count >= max_jobs:
+        if _handled(config, applied_count) >= max_jobs:
             print(f"[LinkedIn] ✅ Reached max_jobs={max_jobs}. Stopping.")
             break
         if _stop and _stop.is_set():
@@ -1455,7 +1591,7 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
 
         cycle_applied = 0
         for keyword in keywords:
-            if applied_count >= max_jobs or (_stop and _stop.is_set()):
+            if _handled(config, applied_count) >= max_jobs or (_stop and _stop.is_set()):
                 break
 
             kw_applied = 0
@@ -1466,12 +1602,12 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
             print(f"{'═' * 60}")
 
             for location in config.get("locations", ["India"]):
-                if applied_count >= max_jobs or (_stop and _stop.is_set()):
+                if _handled(config, applied_count) >= max_jobs or (_stop and _stop.is_set()):
                     break
 
                 # Paginate through multiple pages of search results
                 for page in range(5):  # Up to 5 pages per location
-                    if applied_count >= max_jobs or (_stop and _stop.is_set()):
+                    if _handled(config, applied_count) >= max_jobs or (_stop and _stop.is_set()):
                         break
 
                     start = page * 25  # LinkedIn uses 25 results per page
@@ -1521,12 +1657,12 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
                     driver.get(search_url)
                     time.sleep(5)
 
-                    before = applied_count
+                    before = _handled(config, applied_count)
                     applied_count = apply_from_search_page(
                         driver, config, applied_count, max_jobs,
                         current_keywords=[keyword], dry_run=dry_run
                     )
-                    page_applied = applied_count - before
+                    page_applied = _handled(config, applied_count) - before
                     kw_applied += page_applied
                     cycle_applied += page_applied
 
@@ -1543,9 +1679,14 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
         # After one full cycle, brief pause then loop again unless stopped
         if _stop and _stop.is_set():
             break
-        if applied_count >= max_jobs:
+        if _handled(config, applied_count) >= max_jobs:
             break
-        print(f"\n[LinkedIn] ⏳ Cycle {cycle} complete ({cycle_applied} applied). Looping again in 10s…")
+        if cycle_applied == 0:
+            # A full pass over every keyword/location found nothing new — another
+            # pass would re-scan the same results forever.
+            print(f"[LinkedIn] ✅ No new matching jobs this cycle — stopping.")
+            break
+        print(f"\n[LinkedIn] ⏳ Cycle {cycle} complete ({cycle_applied} handled). Looping again in 10s…")
         time.sleep(10)
 
     print(f"\n{'═' * 60}")

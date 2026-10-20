@@ -37,7 +37,11 @@ from backend.config import settings
 from backend.database import get_db
 from backend.dependencies import get_current_user
 from backend.models.user import User
+from backend.models.application import Application, ApplicationStatus
 from backend.models.profile import UserProfile
+from backend.services import followthrough
+from backend.services.plan_gate import consume_ai_token
+from backend.services.tracking_service import tracking_service
 
 router = APIRouter()
 
@@ -69,19 +73,19 @@ def _resolve_keys(user: Optional[User]) -> tuple[Optional[str], Optional[str]]:
 # Model fallback list: newest first. `gemini-1.5-flash` was deprecated on
 # v1beta in 2025 for some keys/regions — we no longer rely on it being available.
 _GEMINI_MODELS = [
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-flash-latest",
-    "gemini-2.5-flash",
     "gemini-2.0-flash-exp",
     "gemini-1.5-flash",
     "gemini-1.5-flash-8b",
     "gemini-1.5-pro",
 ]
 _GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
     "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
-    "mixtral-8x7b-32768",
-    "gemma2-9b-it",
 ]
 
 
@@ -136,6 +140,7 @@ def _ai(prompt: str, user: Optional[User]) -> str:
     Falls back to the in-file Gemini/Groq direct calls only if `llm_router`
     is unimportable (defensive — should not happen in normal deploys).
     """
+    consume_ai_token(user)
     import sys, os as _os
     _root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
     if _root not in sys.path:
@@ -145,14 +150,16 @@ def _ai(prompt: str, user: Optional[User]) -> str:
     errs: list[str] = []
 
     try:
+        import llm_router
         from llm_router import generate
+        llm_router.LAST_ERROR = None
         cfg = {}
         if gemini: cfg["gemini_api_key"] = gemini
         if groq:   cfg["groq_api_key"]   = groq
         out = generate(prompt, role="writer", config=cfg, max_tokens=2048)
         if out:
             return out
-        errs.append("llm_router: no provider returned a response")
+        errs.append(llm_router.LAST_ERROR or "llm_router: no provider returned a response")
     except ImportError:
         # Defensive — keep working if llm_router was removed.
         if gemini:
@@ -185,9 +192,29 @@ def _parse_json(text: str) -> Dict[str, Any]:
 
 
 # In-memory caches (per-user). Survives process lifetime only — DB migration in v2.
-_STORY_BANK: Dict[str, List[Dict[str, Any]]] = {}
-_EVALUATIONS: Dict[str, List[Dict[str, Any]]] = {}
-_FOLLOWUP_LOG: Dict[str, List[Dict[str, Any]]] = {}
+# Story bank + evaluations live on the profile (were in-process dicts: lost on
+# every restart and invisible to other workers).
+_STORY_KEY, _EVAL_KEY = "_story_bank", "_evaluations"
+_SAVED_CAP = {_STORY_KEY: 200, _EVAL_KEY: 50}
+
+
+async def _saved(db: AsyncSession, user: User, key: str) -> List[Dict[str, Any]]:
+    p = (await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))).scalar_one_or_none()
+    items = ((p.extracted_data or {}) if p else {}).get(key)
+    return list(items) if isinstance(items, list) else []
+
+
+async def _store(db: AsyncSession, user: User, key: str, items: List[Dict[str, Any]]) -> None:
+    from sqlalchemy.orm.attributes import flag_modified
+    p = (await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))).scalar_one_or_none()
+    if p is None:
+        p = UserProfile(user_id=user.id, extracted_data={})
+        db.add(p)
+    data = dict(p.extracted_data or {})
+    data[key] = items[:_SAVED_CAP[key]]
+    p.extracted_data = data
+    flag_modified(p, "extracted_data")
+    await db.commit()
 
 
 async def _cv_summary(db: AsyncSession, user: User) -> str:
@@ -283,6 +310,7 @@ class FollowupBody(BaseModel):
     status: str = Field(..., description="applied | responded | interview")
     days_since_action: int
     last_message: Optional[str] = ""
+    application_id: Optional[str] = None  # saves the draft on that application
 
 
 class ContactBody(BaseModel):
@@ -354,23 +382,25 @@ async def evaluate_offer(
         "url": body.url, "company": body.company, "role": body.role,
         "evaluation": data,
     }
-    _EVALUATIONS.setdefault(str(user.id), []).insert(0, record)
+    await _store(db, user, _EVAL_KEY, [record] + await _saved(db, user, _EVAL_KEY))
 
     # Auto-accumulate STAR stories
     try:
+        bank = await _saved(db, user, _STORY_KEY)
+        existing = {st.get("title", "").lower() for st in bank}
         for s in data["blocks"]["F_interview_prep"]["stories"]:
-            bank = _STORY_BANK.setdefault(str(user.id), [])
-            existing = {st["title"].lower() for st in bank}
             if s.get("title") and s["title"].lower() not in existing:
                 bank.append({"id": str(uuid.uuid4()), **s, "source": body.company or "eval"})
+                existing.add(s["title"].lower())
+        await _store(db, user, _STORY_KEY, bank)
     except Exception:
         pass
     return record
 
 
 @router.get("/evaluations")
-async def list_evaluations(user: User = Depends(get_current_user)):
-    return _EVALUATIONS.get(str(user.id), [])
+async def list_evaluations(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return await _saved(db, user, _EVAL_KEY)
 
 
 # ── Multi-Offer Comparison (ofertas.md) ──────────────────────────────────────
@@ -427,18 +457,21 @@ async def compare_offers(
 
 TAILOR_PROMPT = """Tailor the candidate's CV to the JD. Surgical edits only —
 do not invent experience. Return JSON.
+{data_rule}
 
 CV:
 {cv}
 
-JD:
+EXPERIENCE ENTRIES (index: role at company — current description):
+{experiences}
+
 {jd}
 
 Return ONLY JSON:
 {{
   "tailored_summary": "2-3 sentences",
   "keywords_to_inject": ["kw1","kw2"],
-  "bullet_rewrites": [{{"original_hint": "...", "rewrite": "stronger XYZ-formula bullet"}}],
+  "bullet_rewrites": [{{"experience_index": 0, "rewrite": "the whole description of that entry, rewritten in stronger XYZ-formula bullets, using only facts already in it"}}],
   "sections_to_reorder": ["Projects first because ..."],
   "ats_tips": [""]
 }}
@@ -451,33 +484,127 @@ async def tailor_cv(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    from backend.services.untrusted import DATA_RULE, fence
     cv = await _cv_summary(db, user)
-    raw = _ai(TAILOR_PROMPT.format(cv=cv[:5000] or "(no CV)", jd=body.jd_text[:6000]), user)
+    exps = _experiences(await _profile(db, user))
+    raw = _ai(TAILOR_PROMPT.format(
+        cv=cv[:5000] or "(no CV)", data_rule=DATA_RULE.format(tag="job_posting"),
+        experiences="\n".join(f"{i}: {e.get('role', '')} at {e.get('company', '')} — "
+                              f"{str(e.get('description') or '')[:600]}" for i, e in enumerate(exps)) or "(none)",
+        jd=fence(body.jd_text[:6000])), user)
     try:
-        return _parse_json(raw)
+        out = _parse_json(raw)
     except Exception as e:
         raise HTTPException(500, f"Tailor failed: {e}")
+    # Attach what each rewrite would replace so the user can compare before applying.
+    rewrites = []
+    for r in out.get("bullet_rewrites") or []:
+        i = r.get("experience_index") if isinstance(r, dict) else None
+        if isinstance(i, int) and 0 <= i < len(exps) and str(r.get("rewrite") or "").strip():
+            rewrites.append({"experience_index": i, "rewrite": r["rewrite"].strip(),
+                             "role": exps[i].get("role", ""), "company": exps[i].get("company", ""),
+                             "original": exps[i].get("description", "")})
+    out["bullet_rewrites"] = rewrites
+    return out
+
+
+def _experiences(profile: UserProfile) -> List[Dict[str, Any]]:
+    exps = (profile.extracted_data or {}).get("experience") or []
+    return [e for e in exps if isinstance(e, dict)] if isinstance(exps, list) else []
+
+
+class Rewrite(BaseModel):
+    experience_index: int = Field(..., ge=0)
+    rewrite: str = Field(..., min_length=1, max_length=3000)
+
+
+class ApplyTailorBody(BaseModel):
+    summary: Optional[str] = Field(None, max_length=1500)
+    skills_add: List[str] = Field(default_factory=list, max_length=30)
+    rewrites: List[Rewrite] = Field(default_factory=list, max_length=30)
+
+
+@router.post("/tailor-cv/apply")
+async def apply_tailor(body: ApplyTailorBody, user: User = Depends(get_current_user),
+                       db: AsyncSession = Depends(get_db)):
+    """Save the rewrites the user accepted into their profile, so every AI
+    Mission's resume (and its per-job tailoring) starts from them. The previous
+    values are kept for one-step undo via POST /tailor-cv/undo."""
+    import copy
+    from sqlalchemy.orm.attributes import flag_modified
+    profile = await _profile(db, user)
+    data = copy.deepcopy(profile.extracted_data or {})
+    autofill = dict(profile.autofill_bank or {})
+    data["_before_tailor_apply"] = copy.deepcopy({  # deep: rewrites below mutate experience in place
+        "summary": data.get("summary"), "skills": data.get("skills"),
+        "experience": data.get("experience"), "autofill_skills": autofill.get("skills"),
+    })
+    if body.summary and body.summary.strip():
+        data["summary"] = body.summary.strip()
+    if body.skills_add:
+        skills = data.get("skills") or []
+        skills = [s.strip() for s in skills.split(",")] if isinstance(skills, str) else list(skills)
+        have = {str(s).lower() for s in skills}
+        new = [s.strip() for s in body.skills_add if s.strip() and s.strip().lower() not in have]
+        data["skills"] = skills + new
+        # Missions read autofill_bank.skills first when the user has set it.
+        if new and autofill.get("skills"):
+            autofill["skills"] = ", ".join([autofill["skills"]] + new)
+            profile.autofill_bank = autofill
+            flag_modified(profile, "autofill_bank")
+    exps = data.get("experience") if isinstance(data.get("experience"), list) else []
+    for r in body.rewrites:
+        if r.experience_index >= len(exps) or not isinstance(exps[r.experience_index], dict):
+            raise HTTPException(400, f"No experience entry {r.experience_index}")
+        exps[r.experience_index]["description"] = r.rewrite.strip()
+    profile.extracted_data = data
+    flag_modified(profile, "extracted_data")
+    await db.commit()
+    return {"summary": data.get("summary"), "skills": data.get("skills"),
+            "experience": data.get("experience"), "undo_available": True}
+
+
+@router.post("/tailor-cv/undo")
+async def undo_tailor(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    from sqlalchemy.orm.attributes import flag_modified
+    profile = await _profile(db, user)
+    data = dict(profile.extracted_data or {})
+    before = data.pop("_before_tailor_apply", None)
+    if not before:
+        raise HTTPException(404, "Nothing to undo.")
+    for k in ("summary", "skills", "experience"):
+        data[k] = before.get(k)
+    autofill = dict(profile.autofill_bank or {})
+    if before.get("autofill_skills") is not None:
+        autofill["skills"] = before["autofill_skills"]
+        profile.autofill_bank = autofill
+        flag_modified(profile, "autofill_bank")
+    profile.extracted_data = data
+    flag_modified(profile, "extracted_data")
+    await db.commit()
+    return {"restored": True}
 
 
 # ── Story Bank (STAR + Reflection) ───────────────────────────────────────────
 
 @router.get("/story-bank")
-async def list_stories(user: User = Depends(get_current_user)):
-    return _STORY_BANK.get(str(user.id), [])
+async def list_stories(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return await _saved(db, user, _STORY_KEY)
 
 
 @router.post("/story-bank")
-async def add_story(body: StoryIn, user: User = Depends(get_current_user)):
-    bank = _STORY_BANK.setdefault(str(user.id), [])
+async def add_story(body: StoryIn, user: User = Depends(get_current_user),
+                    db: AsyncSession = Depends(get_db)):
     story = {"id": str(uuid.uuid4()), **body.model_dump()}
-    bank.append(story)
+    await _store(db, user, _STORY_KEY, await _saved(db, user, _STORY_KEY) + [story])
     return story
 
 
 @router.delete("/story-bank/{sid}", status_code=204)
-async def delete_story(sid: str, user: User = Depends(get_current_user)):
-    bank = _STORY_BANK.get(str(user.id), [])
-    _STORY_BANK[str(user.id)] = [s for s in bank if s["id"] != sid]
+async def delete_story(sid: str, user: User = Depends(get_current_user),
+                       db: AsyncSession = Depends(get_db)):
+    bank = await _saved(db, user, _STORY_KEY)
+    await _store(db, user, _STORY_KEY, [s for s in bank if s.get("id") != sid])
 
 
 # ── Negotiation ──────────────────────────────────────────────────────────────
@@ -534,6 +661,9 @@ INCLUDE_COMPANIES: {companies}
 Return ONLY JSON:
 {{"suggestions": [{{"company":"","why":"","portals":["https://..."],"example_query":""}}]}}
 Only real, well-known companies. No invented URLs — if unsure, leave portals [].
+If the company hires through Greenhouse or Lever, include that board URL
+(https://boards.greenhouse.io/<slug> or https://jobs.lever.co/<slug>) — AI
+Missions pull every open role from those boards automatically.
 """
 
 
@@ -544,6 +674,121 @@ async def scan(body: ScanBody, user: User = Depends(get_current_user)):
         return _parse_json(raw)
     except Exception as e:
         raise HTTPException(500, f"Scan parse failed: {e}")
+
+
+# ── Portal Scan → AI Mission targets ─────────────────────────────────────────
+# Saved targets live in job_preferences: names in "target_companies" (the web
+# mission's Google site: queries) and verified Greenhouse/Lever boards in
+# "target_boards" (the web mission pulls every posting from them via API).
+
+_BOARD_URL = [
+    ("greenhouse", re.compile(r"(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([A-Za-z0-9_-]+)")),
+    ("lever", re.compile(r"jobs\.lever\.co/([A-Za-z0-9_-]+)")),
+]
+_BOARD_API = {
+    "greenhouse": "https://boards-api.greenhouse.io/v1/boards/{}/jobs",
+    "lever": "https://api.lever.co/v0/postings/{}?mode=json",
+}
+
+
+def parse_board(url: str) -> Optional[tuple]:
+    for kind, rx in _BOARD_URL:
+        m = rx.search(url or "")
+        if m and m.group(1).lower() not in {"embed", "jobs"}:
+            return kind, m.group(1).lower()
+    return None
+
+
+async def _open_jobs(kind: str, slug: str) -> Optional[int]:
+    """Open-role count from the board's public API, or None if the board doesn't
+    exist — the scan LLM sometimes invents portal URLs."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(_BOARD_API[kind].format(slug))
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        jobs = data.get("jobs") if kind == "greenhouse" else data
+        return len(jobs) if isinstance(jobs, list) else None
+    except Exception:
+        return None
+
+
+async def _profile(db: AsyncSession, user: User) -> UserProfile:
+    p = (await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(400, "Finish onboarding (upload a resume) first.")
+    return p
+
+
+class TargetIn(BaseModel):
+    company: str = Field(..., min_length=1, max_length=120)
+    portals: List[str] = Field(default_factory=list, max_length=10)
+
+
+class SaveTargetsBody(BaseModel):
+    targets: List[TargetIn] = Field(..., min_length=1, max_length=30)
+
+
+@router.get("/mission-targets")
+async def mission_targets(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    prefs = (await _profile(db, user)).job_preferences or {}
+    return {"companies": prefs.get("target_companies") or [], "boards": prefs.get("target_boards") or []}
+
+
+@router.post("/mission-targets")
+async def save_mission_targets(body: SaveTargetsBody, user: User = Depends(get_current_user),
+                               db: AsyncSession = Depends(get_db)):
+    """Save Portal Scan picks as AI Mission targets (merged, de-duplicated)."""
+    import asyncio
+    from sqlalchemy.orm.attributes import flag_modified
+    profile = await _profile(db, user)
+    prefs = dict(profile.job_preferences or {})
+    companies = list(prefs.get("target_companies") or [])
+    boards = list(prefs.get("target_boards") or [])
+    have = {c.lower() for c in companies}
+    for t in body.targets:
+        if t.company.strip().lower() not in have:
+            companies.append(t.company.strip())
+            have.add(t.company.strip().lower())
+    candidates = {}
+    for t in body.targets:
+        for url in t.portals:
+            b = parse_board(url)
+            if b and b not in {(x["kind"], x["slug"]) for x in boards}:
+                candidates.setdefault(b, t.company.strip())
+    counts = await asyncio.gather(*(_open_jobs(k, s) for k, s in candidates))
+    added, unverified = [], []
+    for ((kind, slug), company), n in zip(candidates.items(), counts):
+        if n is None:
+            unverified.append(f"{kind}:{slug}")
+        else:
+            entry = {"kind": kind, "slug": slug, "company": company, "open_jobs": n}
+            boards.append(entry)
+            added.append(entry)
+    prefs["target_companies"], prefs["target_boards"] = companies[:100], boards[:60]
+    profile.job_preferences = prefs
+    flag_modified(profile, "job_preferences")
+    await db.commit()
+    return {"companies": prefs["target_companies"], "boards": prefs["target_boards"],
+            "boards_added": added, "unverified_portals": unverified}
+
+
+@router.delete("/mission-targets/{company}")
+async def delete_mission_target(company: str, user: User = Depends(get_current_user),
+                                db: AsyncSession = Depends(get_db)):
+    from sqlalchemy.orm.attributes import flag_modified
+    profile = await _profile(db, user)
+    prefs = dict(profile.job_preferences or {})
+    key = company.strip().lower()
+    prefs["target_companies"] = [c for c in prefs.get("target_companies") or [] if c.lower() != key]
+    prefs["target_boards"] = [b for b in prefs.get("target_boards") or []
+                              if (b.get("company") or "").lower() != key and b.get("slug") != key]
+    profile.job_preferences = prefs
+    flag_modified(profile, "job_preferences")
+    await db.commit()
+    return {"companies": prefs["target_companies"], "boards": prefs["target_boards"]}
 
 
 # ── Portfolio Project Evaluation (project.md) ────────────────────────────────
@@ -725,7 +970,13 @@ Tone: professional, concise, never desperate. No corporate-speak.
 
 
 @router.post("/followup")
-async def followup(body: FollowupBody, user: User = Depends(get_current_user)):
+async def followup(body: FollowupBody, user: User = Depends(get_current_user),
+                   db: AsyncSession = Depends(get_db)):
+    app = await _own_app(db, user, body.application_id) if body.application_id else None
+    if app is not None and sum(1 for h in (app.history or [])
+                               if h.get("type") == followthrough.FOLLOWUP_EVENT) >= followthrough.MAX_FOLLOWUPS:
+        raise HTTPException(409, f"Already {followthrough.MAX_FOLLOWUPS} follow-ups on this "
+                                 "application — more reads as pestering. Move on or record the outcome.")
     raw = _ai(
         FOLLOWUP_PROMPT.format(
             company=body.company, role=body.role, status=body.status,
@@ -737,11 +988,144 @@ async def followup(body: FollowupBody, user: User = Depends(get_current_user)):
         out = _parse_json(raw)
     except Exception as e:
         raise HTTPException(500, f"Followup parse failed: {e}")
-    _FOLLOWUP_LOG.setdefault(str(user.id), []).insert(0, {
-        "id": str(uuid.uuid4()), "created_at": datetime.utcnow().isoformat(),
-        "company": body.company, "role": body.role, **out,
-    })
+    if app is not None:
+        # Persisted on the application (was an in-memory dict lost on restart);
+        # followups_due() counts these to cap follow-ups at MAX_FOLLOWUPS.
+        await tracking_service.log_event(db, app, followthrough.FOLLOWUP_EVENT,
+                                         f"Follow-up drafted ({out.get('urgency', '')})", out)
+        await db.commit()
     return out
+
+
+# ── After applying: quiet applications, skill gaps, outcomes from Gmail ──────
+
+async def _own_app(db: AsyncSession, user: User, app_id: str) -> Application:
+    try:
+        aid = uuid.UUID(str(app_id))
+    except ValueError:
+        raise HTTPException(400, "Bad application_id")
+    app = (await db.execute(select(Application).where(
+        Application.id == aid, Application.user_id == user.id))).scalar_one_or_none()
+    if not app:
+        raise HTTPException(404, "Application not found")
+    return app
+
+
+async def _app_dicts(db: AsyncSession, user: User) -> List[Dict[str, Any]]:
+    rows = (await db.execute(select(Application).where(Application.user_id == user.id))).scalars().all()
+    return [{"id": a.id, "company": a.company, "job_title": a.job_title, "status": a.status,
+             "applied_at": a.applied_at, "history": a.history, "missing_skills": a.missing_skills}
+            for a in rows]
+
+
+@router.get("/followups/due")
+async def followups_due(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Applications gone quiet past their cadence — draft one via POST /followup
+    with application_id. Drafts only; nothing is ever sent."""
+    return followthrough.followups_due(await _app_dicts(db, user))
+
+
+@router.get("/followups/{app_id}")
+async def followup_drafts(app_id: str, user: User = Depends(get_current_user),
+                          db: AsyncSession = Depends(get_db)):
+    app = await _own_app(db, user, app_id)
+    return [{"created_at": h.get("timestamp"), **(h.get("data") or {})}
+            for h in (app.history or []) if h.get("type") == followthrough.FOLLOWUP_EVENT]
+
+
+@router.get("/skill-gaps")
+async def skill_gaps(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return followthrough.skill_gaps(await _app_dicts(db, user))
+
+
+UPSKILL_PROMPT = """Build a learning plan for a job seeker from the skill gaps
+their own job applications revealed (weight = how often employers asked for it;
+roles that reached interview count double).
+
+CANDIDATE: {cv}
+GAPS (skill, weight): {gaps}
+HOURS PER WEEK AVAILABLE: {hours}
+
+Prioritise by weight and by how quickly each gap can be closed. Prefer free,
+well-known resources (official docs, freeCodeCamp, Coursera audit, YouTube
+courses from established channels) and name them specifically. Skip any gap
+the candidate already covers. Return ONLY JSON:
+{{
+  "plan": [{{"skill": "", "why": "", "resources": [""], "hours": 0, "proof_project": ""}}],
+  "total_weeks": 0,
+  "quick_wins": [""]
+}}"""
+
+
+class UpskillBody(BaseModel):
+    hours_per_week: int = Field(6, ge=1, le=60)
+
+
+@router.post("/skill-gaps/plan")
+async def skill_gap_plan(body: UpskillBody, user: User = Depends(get_current_user),
+                         db: AsyncSession = Depends(get_db)):
+    gaps = followthrough.skill_gaps(await _app_dicts(db, user))
+    if not gaps:
+        raise HTTPException(400, "No skill gaps recorded yet — apply to a few jobs first.")
+    raw = _ai(UPSKILL_PROMPT.format(cv=(await _cv_summary(db, user))[:2500] or "(none)",
+                                    gaps=json.dumps(gaps), hours=body.hours_per_week), user)
+    try:
+        return {"gaps": gaps, **_parse_json(raw)}
+    except Exception as e:
+        raise HTTPException(500, f"Plan parse failed: {e}")
+
+
+class GmailScanBody(BaseModel):
+    email: str
+    app_password: str = Field(..., min_length=16, max_length=32,
+                              description="Gmail app password; used for this scan only, never stored")
+    days: int = Field(30, ge=1, le=120)
+
+
+@router.post("/outcomes/gmail-scan")
+async def gmail_scan(body: GmailScanBody, user: User = Depends(get_current_user),
+                     db: AsyncSession = Depends(get_db)):
+    """Read recent Gmail (read-only IMAP) and PROPOSE status changes, citing the
+    source email. Nothing is written — approve via POST /outcomes/apply."""
+    import asyncio
+    import imaplib
+    try:
+        mails = await asyncio.to_thread(followthrough.fetch_gmail, body.email,
+                                        body.app_password.replace(" ", ""), body.days)
+    except imaplib.IMAP4.error:
+        raise HTTPException(401, "Gmail rejected the login — use an app password "
+                                 "(Google Account → Security → App passwords) with IMAP enabled.")
+    except OSError as e:
+        raise HTTPException(502, f"Could not reach Gmail: {type(e).__name__}")
+    return {"scanned": len(mails),
+            "proposals": followthrough.propose_outcomes(mails, await _app_dicts(db, user))}
+
+
+class OutcomeUpdate(BaseModel):
+    application_id: str
+    status: str
+    evidence: Optional[str] = ""
+
+
+class ApplyOutcomesBody(BaseModel):
+    updates: List[OutcomeUpdate] = Field(..., max_length=200)
+
+
+@router.post("/outcomes/apply")
+async def apply_outcomes(body: ApplyOutcomesBody, user: User = Depends(get_current_user),
+                         db: AsyncSession = Depends(get_db)):
+    """Apply the proposals the user approved."""
+    done = []
+    for u in body.updates:
+        try:
+            status = ApplicationStatus(u.status)
+        except ValueError:
+            raise HTTPException(400, f"Invalid status: {u.status}")
+        app = await _own_app(db, user, u.application_id)
+        await tracking_service.update_status(db, app, status, reason=f"From email: {u.evidence}"[:500])
+        done.append(u.application_id)
+    await db.commit()
+    return {"updated": done}
 
 
 # ── LinkedIn Outreach (contacto.md) ──────────────────────────────────────────

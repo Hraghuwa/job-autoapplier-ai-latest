@@ -73,6 +73,34 @@ def _allowed_phases(user: User, requested: List[int]) -> List[int]:
     return requested
 
 
+_PHASE_NEEDS_CREDS = {1: "linkedin", 2: "internshala", 3: "wellfound", 4: "naukri", 5: "unstop"}
+
+
+def _missing_credential(phases: List[int], creds: dict):
+    """Return (phase, platform) for the first phase lacking usable credentials,
+    or None if all are satisfied.
+
+    LinkedIn (phase 1) is satisfied by EITHER an email+password pair OR stored
+    session cookies — cookie injection is the supported LinkedIn auth (password
+    login fails LinkedIn's 2026 challenge), so requiring a password wrongly
+    blocked cookie-authenticated users from starting a run.
+    """
+    creds = creds or {}
+    for phase in phases:
+        platform = _PHASE_NEEDS_CREDS.get(phase)
+        if not platform:
+            continue
+        nested = creds.get(platform)
+        has_pw = isinstance(nested, dict) and bool(nested.get("email")) and bool(nested.get("password"))
+        if platform == "linkedin":
+            has_cookies = bool(creds.get("linkedin_cookies"))
+            if not (has_pw or has_cookies):
+                return (phase, platform)
+        elif not has_pw:
+            return (phase, platform)
+    return None
+
+
 @router.post("/run", response_model=RunResponse)
 async def run_agents(
     body: RunRequest,
@@ -95,23 +123,14 @@ async def run_agents(
     # we get a dict so the `.get(platform, {}).get("email")` chain below does not
     # crash with `'str' object has no attribute 'get'`.
     creds = _ensure_dict(profile.platform_passwords)
-    needs_creds = {
-        1: "linkedin",
-        2: "internshala",
-        3: "wellfound",
-        4: "naukri",
-        5: "unstop"
-    }
-
-    for phase in body.phases:
-        platform = needs_creds.get(phase)
-        if platform:
-            nested = creds.get(platform)
-            if not isinstance(nested, dict) or not nested.get("email") or not nested.get("password"):
-                raise HTTPException(
-                    400,
-                    detail=f"Set your {platform.capitalize()} credentials before running Phase {phase}."
-                )
+    missing = _missing_credential(body.phases, creds)
+    if missing:
+        phase, platform = missing
+        hint = (" (or connect LinkedIn cookies)" if platform == "linkedin" else "")
+        raise HTTPException(
+            400,
+            detail=f"Set your {platform.capitalize()} credentials{hint} before running Phase {phase}."
+        )
 
     phases = _allowed_phases(user, body.phases)
     if not phases:
@@ -420,7 +439,7 @@ async def analyze_run_logs(
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.system_gemini_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""You are an AI agent coach for a job auto-applier.
 
 The agent ran and produced these error log lines:

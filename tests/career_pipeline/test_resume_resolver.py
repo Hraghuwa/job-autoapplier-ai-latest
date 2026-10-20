@@ -99,3 +99,11 @@ def test_build_failure_returns_static(session_factory, tmp_path):
     path = resume_resolver.resolve_resume_path(cfg, jd_text="x")
     # On error we must fall back to static — never crash the apply pipeline.
     assert path == "/tmp/static_resume.pdf"
+
+
+# ── ATS gate: a tailored PDF that doesn't text-extract is never uploaded ────
+def test_unreadable_tailored_pdf_falls_back_to_static(session_factory, tmp_path, monkeypatch):
+    import backend.services.resume_pdf as rp
+    monkeypatch.setattr(rp, "parse_problems", lambda path, must_contain=(): ["only 0 characters"])
+    cfg = _cfg(uuid.uuid4(), session_factory, str(tmp_path / "tailored"))
+    assert resume_resolver.resolve_resume_path(cfg, jd_text="Python role.") == "/tmp/static_resume.pdf"

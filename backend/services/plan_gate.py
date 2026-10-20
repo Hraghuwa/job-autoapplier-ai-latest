@@ -2,12 +2,12 @@ from typing import Optional
 
 # ── Plan definitions ──────────────────────────────────────────────────────────
 # ai_tokens_monthly  : Gemini calls per calendar month (cover letter, form-fill AI, vision)
-# apply_credits_daily: apply actions per 48-hour window
+# apply_credits_daily: apply actions per day (all platforms; the per-phase DB quota and
+#                      apply_decision.rate_ok both enforce it)
 # web_search_platforms: all 30+ boards via Phase 2 (unlocked on pro)
 PLAN_LIMITS = {
     "free": {
         "platforms": ["linkedin"],
-        "applies_per_48hr": 20,
         "ai_tokens_monthly": 50,
         "apply_credits_daily": 20,
         "web_search": False,
@@ -20,7 +20,6 @@ PLAN_LIMITS = {
     },
     "pro": {
         "platforms": ["linkedin", "internshala", "naukri", "unstop", "wellfound", "web_search"],
-        "applies_per_48hr": 999999,
         "ai_tokens_monthly": 2000,
         "apply_credits_daily": 999999,
         "web_search": True,
@@ -33,7 +32,6 @@ PLAN_LIMITS = {
     },
     "team": {
         "platforms": ["linkedin", "internshala", "naukri", "unstop", "wellfound", "web_search"],
-        "applies_per_48hr": 999999,
         "ai_tokens_monthly": 5000,
         "apply_credits_daily": 999999,
         "web_search": True,
@@ -53,8 +51,44 @@ def check_plan_access(user_plan: str, feature: str) -> bool:
 
 
 def get_platform_limit(user_plan: str) -> int:
-    return PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])["applies_per_48hr"]
+    return PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])["apply_credits_daily"]
 
 
 def allowed_platforms(user_plan: str) -> list:
     return PLAN_LIMITS.get(user_plan, PLAN_LIMITS["free"])["platforms"]
+
+
+def uses_own_key(user) -> bool:
+    return bool(getattr(user, "gemini_key_encrypted", None) or getattr(user, "groq_key_encrypted", None))
+
+
+def refill_ai_tokens(user) -> None:
+    """Top the balance up to the plan's monthly allowance every 30 days (never
+    lowered, so purchased tokens survive). Mutates `user`; caller commits."""
+    from datetime import datetime, timedelta
+    plan = str(getattr(user, "plan", "free") or "free").split(".")[-1].lower()
+    monthly = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])["ai_tokens_monthly"]
+    now = datetime.utcnow()
+    if user.tokens_reset_at is None or user.tokens_reset_at <= now:
+        user.ai_tokens_balance = max(user.ai_tokens_balance or 0, monthly)
+        user.tokens_reset_at = now + timedelta(days=30)
+
+
+def consume_ai_token(user) -> None:
+    """Meter one AI call billed to the OPERATOR's key.
+
+    Users with their own Gemini/Groq key are not charged. Otherwise the call
+    costs one `ai_tokens_balance` unit; at 0 we refuse (402) so a single account
+    can't drain the system key. Balances top up monthly to the plan allowance
+    (never lowered, so purchased tokens survive the reset). Mutates `user`;
+    the request's get_db session commits it.
+    """
+    from datetime import datetime, timedelta
+    from fastapi import HTTPException
+
+    if user is None or uses_own_key(user):
+        return
+    refill_ai_tokens(user)
+    if (user.ai_tokens_balance or 0) <= 0:
+        raise HTTPException(402, "AI token balance exhausted. Add your own Gemini/Groq key in Settings, or upgrade.")
+    user.ai_tokens_balance -= 1
