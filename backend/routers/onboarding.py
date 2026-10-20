@@ -8,7 +8,7 @@ Step 4: POST /onboarding/autofill      — autofill bank + cover letter
 GET    /onboarding/status              — which steps are complete
 GET    /onboarding/test/{platform}     — validate stored credentials
 """
-from typing import Optional, Dict, Any, List
+from typing import Literal, Optional, Dict, Any, List
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -109,6 +109,8 @@ class PreferencesRequest(BaseModel):
     web_search_extra_sites: Optional[List[str]] = None
     google_login_wait_sec: Optional[int] = None
     disable_web_search: Optional[bool] = None
+    # Highest level missions apply for (job_targeting / fit_scorer read it).
+    target_seniority: Optional[Literal["intern", "entry", "associate", "mid", "senior"]] = None
 
 
 @router.post("/preferences")

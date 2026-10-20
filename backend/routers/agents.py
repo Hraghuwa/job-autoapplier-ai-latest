@@ -255,6 +255,8 @@ async def preflight(
         nested = creds.get(platform)
         if isinstance(nested, dict) and nested.get("email") and nested.get("password"):
             continue
+        if platform == "linkedin" and creds.get("linkedin_cookies"):
+            continue  # cookie login is the supported LinkedIn auth (same rule as /run)
         warnings.append(f"{platform}: no credentials (that phase will be skipped).")
 
     return {

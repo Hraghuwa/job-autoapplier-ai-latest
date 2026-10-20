@@ -163,7 +163,7 @@ def test_mcp_handshake_and_tool_list():
         {"jsonrpc": "2.0", "id": 3, "method": "nope"},
     ])
     assert [r["id"] for r in replies] == [1, 2, 3]   # the notification got no reply
-    assert replies[0]["result"]["capabilities"] == {"tools": {}}
+    assert replies[0]["result"]["capabilities"] == {"tools": {}, "prompts": {}}
     names = {t["name"] for t in replies[1]["result"]["tools"]}
     assert {"scan_portals", "save_mission_targets", "tailor_cv", "apply_cv_tailoring",
             "launch_mission", "record_outcome", "followups_due"} <= names
@@ -184,3 +184,149 @@ def test_mcp_tool_calls_map_to_api():
     assert api.calls[-1] == ("PATCH", "/jobs/a%20b/status", {"status": "interview", "note": "invite"})
     call("list_applications", {"status": "applied"}, 4)
     assert api.calls[-1] == ("GET", "/jobs?status=applied&limit=50", None)
+
+
+def test_mcp_profile_view_hides_internal_data_and_set_targets_saves():
+    class Api(FakeApi):
+        def call(self, method, path, body=None):
+            self.calls.append((method, path, body))
+            if path == "/users/profile":
+                return {"resume_url": "r.pdf",
+                        "extracted_data": {"summary": "Analyst", "skills": ["SQL"],
+                                           "_story_bank": [1], "_before_tailor_apply": {}},
+                        "autofill_bank": {"phone": "999"},
+                        "job_preferences": {"job_titles": ["Business Analyst"], "schedule": {"x": 1}}}
+            return {"message": "ok"}
+    api = Api()
+    view = jobagent_mcp._profile_view(api, {})
+    assert view == {"resume": {"summary": "Analyst", "skills": ["SQL"]}, "has_resume": True,
+                    "resume_file": "r.pdf",
+                    "targets": {"job_titles": ["Business Analyst"]}}  # no autofill/internal keys
+    out = jobagent_mcp._set_targets(api, {"job_titles": ["Business Analyst", "Data Analyst"],
+                                          "locations": ["Bengaluru", "Remote"], "target_seniority": "entry",
+                                          "employment_types": []})
+    assert ("POST", "/onboarding/preferences", {"job_titles": ["Business Analyst", "Data Analyst"],
+            "locations": ["Bengaluru", "Remote"], "target_seniority": "entry"}) in api.calls
+    assert out["saved"]["target_seniority"] == "entry"
+    with pytest.raises(jobagent_mcp.ApiError):
+        jobagent_mcp._set_targets(api, {})
+
+
+def test_preferences_accept_target_seniority():
+    from backend.routers.onboarding import PreferencesRequest
+    assert PreferencesRequest(target_seniority="entry").target_seniority == "entry"
+    with pytest.raises(Exception):
+        PreferencesRequest(target_seniority="cto")
+
+
+# ── MCP v2: coverage, safety annotations, composite logic, prompts ───────────
+
+class RouteApi(FakeApi):
+    """Fake API answering by (method, path-prefix)."""
+    def __init__(self, routes):
+        super().__init__()
+        self.routes = routes
+
+    def call(self, method, path, body=None):
+        self.calls.append((method, path, body))
+        for (m, prefix), val in self.routes.items():
+            if m == method and path.startswith(prefix):
+                return val(body) if callable(val) else val
+        return {}
+
+
+def _call(api, name, args):
+    return jobagent_mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": {"name": name, "arguments": args}}, {"api": api})["result"]
+
+
+def _text(res):
+    return json.loads(res["content"][0]["text"])
+
+
+def test_every_tool_annotated_and_real_actions_marked():
+    tools = jobagent_mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, {})["result"]["tools"]
+    by = {t["name"]: t for t in tools}
+    assert len(tools) >= 40
+    assert all("readOnlyHint" in t["annotations"] for t in tools)
+    assert by["daily_brief"]["annotations"]["readOnlyHint"] is True
+    for name in ("launch_mission", "set_schedule"):
+        assert by[name]["annotations"]["destructiveHint"] is True  # clients must confirm
+    # Secrets never pass through chat: no tools for passwords, cookies, API keys, account deletion.
+    assert not any(k in n for n in by for k in ("password", "cookie", "api_key", "delete_account", "gmail"))
+
+
+def test_real_launch_requires_confirmation():
+    api = RouteApi({("GET", "/agents/preflight"): {"errors": [], "warnings": []},
+                    ("GET", "/users/quota"): {"plan": "pro", "ai_tokens_balance": 5},
+                    ("GET", "/users/profile"): {"resume_url": "r.pdf", "extracted_data": {"skills": ["SQL"]}},
+                    ("POST", "/agents/run"): {"run_ids": ["r1"]}})
+    first = _text(_call(api, "launch_mission", {"missions": ["web_search"]}))
+    assert first["needs_confirmation"] is True and first["ready"] is True
+    assert not any(c[1] == "/agents/run" for c in api.calls)  # nothing submitted yet
+    _call(api, "launch_mission", {"missions": ["web_search"], "confirm": True})
+    assert api.calls[-1] == ("POST", "/agents/run", {"phases": [6], "dry_run": False})
+    _call(api, "launch_mission", {"missions": ["linkedin"], "dry_run": True})  # dry runs need no confirm
+    assert api.calls[-1] == ("POST", "/agents/run", {"phases": [1], "dry_run": True})
+
+
+def test_readiness_explains_fixes():
+    api = RouteApi({("GET", "/agents/preflight"): {"errors": ["No job titles or keywords set in your preferences."],
+                                                   "warnings": ["naukri: no credentials (that phase will be skipped)."]},
+                    ("GET", "/users/quota"): {"plan": "free", "ai_tokens_balance": 0, "scheduling_enabled": False},
+                    ("GET", "/users/usage"): {"applies_today": 3, "applies_limit": 20},
+                    ("GET", "/users/api-keys"): {"gemini": False, "groq": False},
+                    ("GET", "/users/profile"): {"resume_url": "r.pdf", "extracted_data": {}}})
+    r = _text(_call(api, "readiness_check", {}))
+    assert r["ready"] is False and "job-setup" in r["blockers"][0]["fix"]
+    assert r["missions_you_can_run"] == ["linkedin"]               # free plan
+    assert any("never parsed" in w for w in r["warnings"])
+    assert any("AI token balance is 0" in w for w in r["warnings"])
+    assert r["schedule"].startswith("Scheduling needs")
+
+
+def test_daily_brief_builds_todo():
+    from datetime import datetime as _dt
+    now = _dt.utcnow().isoformat()
+    api = RouteApi({("GET", "/agents/runs"): [{"status": "failed", "started_at": now, "applied_count": 2,
+                                               "prepared_count": 3}],
+                    ("GET", "/jobs?status=prepared"): [{"id": "a", "company": "Acme"}],
+                    ("GET", "/jobs?status=interview"): [{"id": "b", "company": "Beta"}],
+                    ("GET", "/career-ops/followups/due"): [{"application_id": "c"}],
+                    ("GET", "/users/quota"): {"ai_tokens_balance": 7}})
+    b = _text(_call(api, "daily_brief", {}))
+    assert b["last_24h"] == {"runs": 1, "applied": 2, "prepared": 3, "skipped": 0, "failed_runs": 1}
+    assert len(b["todo"]) == 4 and b["todo"][0].startswith("Submit 1 prepared")
+
+
+def test_tools_reuse_saved_job_description():
+    api = RouteApi({("GET", "/jobs/app1"): {"jd_text": "Need SQL", "company": "Acme", "job_title": "Analyst"},
+                    ("POST", "/career-ops/evaluate"): {"score": 4}})
+    _call(api, "evaluate_offer", {"application_id": "app1"})
+    assert api.calls[-1] == ("POST", "/career-ops/evaluate",
+                             {"jd_text": "Need SQL", "company": "Acme", "role": "Analyst"})
+    bad = _call(RouteApi({("GET", "/jobs/x"): {}}), "tailor_cv", {"application_id": "x"})
+    assert bad["isError"] and "no saved job description" in bad["content"][0]["text"]
+
+
+def test_rejection_patterns_built_from_tracker():
+    apps = [{"company": f"C{i}", "job_title": "Analyst", "status": "rejected", "missing_skills": ["SQL"]}
+            for i in range(6)]
+    api = RouteApi({("GET", "/jobs"): apps, ("POST", "/career-ops/patterns"): {"ok": 1}})
+    _call(api, "rejection_patterns", {})
+    sent = api.calls[-1][2]["applications"]
+    assert len(sent) == 6 and sent[0]["blockers"] == ["SQL"]
+    few = _call(RouteApi({("GET", "/jobs"): apps[:2]}), "rejection_patterns", {})
+    assert few["isError"]
+
+
+def test_prompts_expose_job_workflows():
+    lst = jobagent_mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "prompts/list"}, {})["result"]["prompts"]
+    names = {p["name"] for p in lst}
+    assert {"job-setup", "job-daily", "job-weekly", "job-apply", "job-interview"} <= names
+    got = jobagent_mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "prompts/get",
+                               "params": {"name": "job-setup", "arguments": {"args": "data analyst, Pune"}}}, {})
+    text = got["result"]["messages"][0]["content"]["text"]
+    assert "data analyst, Pune" in text and "$ARGUMENTS" not in text and not text.startswith("---")
+    assert "error" in jobagent_mcp.handle({"jsonrpc": "2.0", "id": 3, "method": "prompts/get",
+                                           "params": {"name": "nope"}}, {})
