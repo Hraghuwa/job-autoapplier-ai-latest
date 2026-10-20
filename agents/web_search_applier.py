@@ -1008,6 +1008,8 @@ def process_job(driver, job, config, ctx, cf=None, home=None):
             smart_form_filler.fill_all_form_fields(driver, config)
             google_form_filler.fill_web_form(driver, config)
         if asks:
+            config["_unanswered"] = [a.get("question") or a.get("label") or str(a) if isinstance(a, dict) else str(a)
+                                     for a in asks]
             print("    ⏸️  Needs your answers — tab left open (see ContextFill badge).")
             result = "review"
             return result

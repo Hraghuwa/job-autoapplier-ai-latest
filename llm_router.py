@@ -94,7 +94,8 @@ def _call_ollama(model: str, prompt: str, max_tokens: int, temperature: float) -
             host + "/api/generate", data=body,
             headers={"Content-Type": "application/json"}, method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        # Local models write long answers slowly (Career-Ops asks for ~2k tokens); 30s cut them off.
+        with urllib.request.urlopen(req, timeout=int(os.environ.get("OLLAMA_TIMEOUT_S", "120"))) as resp:
             data = json.loads(resp.read().decode())
         return (data.get("response") or "").strip() or None
     except Exception as e:

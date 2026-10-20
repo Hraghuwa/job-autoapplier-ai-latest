@@ -110,33 +110,32 @@ def _groq_generate(api_key: str, prompt: str) -> str:
 
 
 def _generate(prompt: str, user: User) -> str:
-    """Try Gemini first, fall back to Groq. Raise HTTPException if both fail."""
+    """Shared llm_router (local model → user's Gemini/Groq keys → system key), so
+    the resume tools work offline too and every call is logged in ai_requests."""
+    import os as _os, sys as _sys
+    _root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
+    if _root not in _sys.path:
+        _sys.path.insert(0, _root)
+    import llm_router
+    from backend.services.claude_native import maybe_brief
+
+    maybe_brief(prompt)  # ?brief=true → caller's LLM does it; no token spent
     consume_ai_token(user)
     gemini_key, groq_key = _resolve_keys(user)
-    errors = []
-
+    cfg = {"user_id": str(user.id)}
     if gemini_key:
-        try:
-            return _gemini_generate(gemini_key, prompt)
-        except Exception as e:
-            errors.append(f"gemini: {type(e).__name__}: {str(e)[:200]}")
-
+        cfg["gemini_api_key"] = gemini_key
     if groq_key:
-        try:
-            return _groq_generate(groq_key, prompt)
-        except Exception as e:
-            errors.append(f"groq: {type(e).__name__}: {str(e)[:200]}")
-
+        cfg["groq_api_key"] = groq_key
+    out = llm_router.generate(prompt, role="writer", config=cfg)
+    if out:
+        return out
     if not gemini_key and not groq_key:
         raise HTTPException(
             status_code=503,
             detail="AI engine not configured. Add a Gemini or Groq API key in Settings → API Keys, or set SYSTEM_GEMINI_KEY on the server.",
         )
-
-    raise HTTPException(
-        status_code=502,
-        detail=f"All AI providers failed. {' | '.join(errors)}",
-    )
+    raise HTTPException(status_code=502, detail=f"All AI providers failed. {llm_router.LAST_ERROR or ''}".strip())
 
 
 @router.get("/health")

@@ -138,10 +138,21 @@ app.include_router(users.router,      prefix="/users",      tags=["users"])
 app.include_router(payments.router,   prefix="/payments",   tags=["payments"])
 app.include_router(admin.router,      prefix="/admin",      tags=["admin"])
 app.include_router(resumes.router,    prefix="/resumes",    tags=["resumes"])
-app.include_router(ai.router,         prefix="/ai",         tags=["ai"])
+from fastapi import Depends as _Depends, Request as _Request
+from fastapi.responses import JSONResponse as _JSONResponse
+from backend.services.claude_native import BriefOnly, brief_mode, brief_response
+
+
+@app.exception_handler(BriefOnly)
+async def _brief_only(_req: _Request, exc: BriefOnly):
+    # ?brief=true: the endpoint built its prompt and stopped before any model call.
+    return _JSONResponse(brief_response(exc.prompt))
+
+
+app.include_router(ai.router,         prefix="/ai",         tags=["ai"], dependencies=[_Depends(brief_mode)])
 app.include_router(graph.router,      prefix="/graph",      tags=["graph"])
 app.include_router(bugs.router,       prefix="/bugs",       tags=["bugs"])
-app.include_router(career_ops.router, prefix="/career-ops", tags=["career-ops"])
+app.include_router(career_ops.router, prefix="/career-ops", tags=["career-ops"], dependencies=[_Depends(brief_mode)])
 app.include_router(applications.router, prefix="/applications", tags=["applications"])
 
 

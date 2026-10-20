@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, desc
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.dependencies import get_current_user, require_plan
@@ -295,7 +295,8 @@ async def list_runs(
     result = await db.execute(
         select(AgentRun)
         .where(AgentRun.user_id == user.id)
-        .order_by(desc(AgentRun.started_at))
+        # created_at first: queued runs have no started_at and sank below the limit.
+        .order_by(desc(func.coalesce(AgentRun.created_at, AgentRun.started_at)))
         .limit(20)
     )
     return [RunStatusResponse.model_validate(r) for r in result.scalars().all()]
@@ -439,9 +440,6 @@ async def analyze_run_logs(
     errors_text = "\n".join([f"- {log.message}" for log in error_logs[:30]])
 
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.system_gemini_key)
-        model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""You are an AI agent coach for a job auto-applier.
 
 The agent ran and produced these error log lines:
@@ -461,8 +459,17 @@ BAD rules (too vague — do NOT produce these):
 - "Handle errors better."
 
 Output ONLY the rules, one per line, no numbering, no extra commentary."""
-        response = model.generate_content(prompt)
-        advice = response.text.strip()
+        # Shared router (local model → user's key → system key) instead of a
+        # hard-wired system Gemini key, which made this 500 whenever it was invalid.
+        from backend.services.gemini_service import _call
+        user_key = None
+        if user.gemini_key_encrypted:
+            from backend.services.crypto_service import decrypt
+            user_key = decrypt(user.gemini_key_encrypted)
+        advice = _call(prompt, user_key)
+        if advice.startswith("__ERROR__"):
+            raise HTTPException(502, "Analysis failed: no AI provider answered. Add a Gemini/Groq key in "
+                                     "Settings or run a local model (Ollama).")
         default_limiter.register_apply(str(user.id), "analyze")  # count toward daily cap
 
         # Save to profile
@@ -477,5 +484,7 @@ Output ONLY the rules, one per line, no numbering, no extra commentary."""
             await db.commit()
             
         return {"message": "Analyzed successfully", "advice": advice}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Analysis failed: {str(e)}")

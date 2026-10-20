@@ -140,6 +140,8 @@ def _ai(prompt: str, user: Optional[User]) -> str:
     Falls back to the in-file Gemini/Groq direct calls only if `llm_router`
     is unimportable (defensive — should not happen in normal deploys).
     """
+    from backend.services.claude_native import maybe_brief
+    maybe_brief(prompt)  # ?brief=true → caller's LLM does it; no token spent
     consume_ai_token(user)
     import sys, os as _os
     _root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
@@ -375,11 +377,15 @@ async def evaluate_offer(
     except Exception as e:
         raise HTTPException(500, f"Could not parse evaluation JSON: {e}")
 
+    return await _store_evaluation(db, user, body.company, body.role, body.url, data)
+
+
+async def _store_evaluation(db, user, company, role, url, data: Dict[str, Any]) -> Dict[str, Any]:
     record = {
         "id": str(uuid.uuid4()),
         "user_id": str(user.id),
         "created_at": datetime.utcnow().isoformat(),
-        "url": body.url, "company": body.company, "role": body.role,
+        "url": url, "company": company, "role": role,
         "evaluation": data,
     }
     await _store(db, user, _EVAL_KEY, [record] + await _saved(db, user, _EVAL_KEY))
@@ -390,12 +396,27 @@ async def evaluate_offer(
         existing = {st.get("title", "").lower() for st in bank}
         for s in data["blocks"]["F_interview_prep"]["stories"]:
             if s.get("title") and s["title"].lower() not in existing:
-                bank.append({"id": str(uuid.uuid4()), **s, "source": body.company or "eval"})
+                bank.append({"id": str(uuid.uuid4()), **s, "source": company or "eval"})
                 existing.add(s["title"].lower())
         await _store(db, user, _STORY_KEY, bank)
     except Exception:
         pass
     return record
+
+
+class SaveEvaluationBody(BaseModel):
+    evaluation: Dict[str, Any]
+    company: Optional[str] = None
+    role: Optional[str] = None
+    url: Optional[str] = None
+
+
+@router.post("/evaluations")
+async def save_evaluation(body: SaveEvaluationBody, user: User = Depends(get_current_user),
+                          db: AsyncSession = Depends(get_db)):
+    """Store an evaluation written by the caller's own LLM (Claude-native mode).
+    Same storage as /evaluate, including STAR stories → story bank."""
+    return await _store_evaluation(db, user, body.company, body.role, body.url, body.evaluation)
 
 
 @router.get("/evaluations")
@@ -973,10 +994,8 @@ Tone: professional, concise, never desperate. No corporate-speak.
 async def followup(body: FollowupBody, user: User = Depends(get_current_user),
                    db: AsyncSession = Depends(get_db)):
     app = await _own_app(db, user, body.application_id) if body.application_id else None
-    if app is not None and sum(1 for h in (app.history or [])
-                               if h.get("type") == followthrough.FOLLOWUP_EVENT) >= followthrough.MAX_FOLLOWUPS:
-        raise HTTPException(409, f"Already {followthrough.MAX_FOLLOWUPS} follow-ups on this "
-                                 "application — more reads as pestering. Move on or record the outcome.")
+    if app is not None:
+        _check_followup_cap(app)
     raw = _ai(
         FOLLOWUP_PROMPT.format(
             company=body.company, role=body.role, status=body.status,
@@ -989,12 +1008,87 @@ async def followup(body: FollowupBody, user: User = Depends(get_current_user),
     except Exception as e:
         raise HTTPException(500, f"Followup parse failed: {e}")
     if app is not None:
-        # Persisted on the application (was an in-memory dict lost on restart);
-        # followups_due() counts these to cap follow-ups at MAX_FOLLOWUPS.
-        await tracking_service.log_event(db, app, followthrough.FOLLOWUP_EVENT,
-                                         f"Follow-up drafted ({out.get('urgency', '')})", out)
-        await db.commit()
+        await _save_followup(db, app, out)
     return out
+
+
+def _check_followup_cap(app: Application) -> None:
+    if sum(1 for h in (app.history or []) if h.get("type") == followthrough.FOLLOWUP_EVENT) >= followthrough.MAX_FOLLOWUPS:
+        raise HTTPException(409, f"Already {followthrough.MAX_FOLLOWUPS} follow-ups on this "
+                                 "application — more reads as pestering. Move on or record the outcome.")
+
+
+async def _save_followup(db: AsyncSession, app: Application, draft: Dict[str, Any]) -> None:
+    # Persisted on the application (was an in-memory dict lost on restart);
+    # followups_due() counts these to cap follow-ups at MAX_FOLLOWUPS.
+    await tracking_service.log_event(db, app, followthrough.FOLLOWUP_EVENT,
+                                     f"Follow-up drafted ({draft.get('urgency', '')})", draft)
+    await db.commit()
+
+
+class FollowupDraftIn(BaseModel):
+    urgency: str = "WAITING"
+    email_draft: Dict[str, str] = Field(default_factory=dict)  # {subject, body}
+    linkedin_draft: str = ""
+    next_followup_in_days: Optional[int] = None
+    rationale: str = ""
+
+
+@router.post("/followups/{app_id}/draft")
+async def save_followup_draft(app_id: str, body: FollowupDraftIn, user: User = Depends(get_current_user),
+                              db: AsyncSession = Depends(get_db)):
+    """Store a follow-up drafted by the caller's own LLM. Same cap as /followup; never sent."""
+    app = await _own_app(db, user, app_id)
+    _check_followup_cap(app)
+    await _save_followup(db, app, body.model_dump())
+    return {"saved": True}
+
+
+# ── Answer bank: what missions type into application forms ───────────────────
+# Screening questions Indian job forms ask most; missions answer these from the
+# bank without any AI call. Claude fills them once from the resume + the user.
+STANDARD_QUESTIONS = [
+    "Total years of experience", "Relevant years of experience", "Current CTC (annual, INR)",
+    "Expected CTC (annual, INR)", "Notice period (days)", "Earliest joining date",
+    "Current location", "Preferred locations", "Willing to relocate", "Open to remote / hybrid / on-site",
+    "Authorized to work in India", "Highest qualification", "Graduation year", "CGPA / percentage",
+    "LinkedIn profile URL", "Portfolio / GitHub URL", "Languages known", "Reason for job change",
+    "Why do you want to work here (template)", "Willing to sign a service bond", "Comfortable with shifts / weekends",
+    "Have a laptop and stable internet",
+]
+
+
+def _norm(q: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (q or "").lower()).strip()
+
+
+@router.get("/answer-bank")
+async def answer_bank(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Saved answers + every question still unanswered (standard ones and the ones
+    missions actually hit). Fill gaps via POST /onboarding/autofill (merges)."""
+    p = (await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))).scalar_one_or_none()
+    bank = {k: v for k, v in ((p.autofill_bank or {}) if p else {}).items() if v not in (None, "")}
+    have = {_norm(k) for k in bank}
+    seen: Dict[str, Dict[str, Any]] = {}
+    for a in (await db.execute(select(Application).where(Application.user_id == user.id))).scalars():
+        for h in a.history or []:
+            if isinstance(h, dict) and h.get("type") == "needs_answers":
+                for q in (h.get("data") or {}).get("questions") or []:
+                    k = _norm(q)
+                    if k and k not in have:
+                        seen.setdefault(k, {"question": q, "times_asked": 0, "companies": []})
+                        seen[k]["times_asked"] += 1
+                        if a.company and a.company not in seen[k]["companies"]:
+                            seen[k]["companies"].append(a.company)
+    return {
+        "answers": bank,
+        "unanswered_from_missions": sorted(seen.values(), key=lambda x: -x["times_asked"]),
+        "standard_questions_missing": [q for q in STANDARD_QUESTIONS if _norm(q) not in have],
+        "candidate": (await _cv_summary(db, user))[:4000],
+        "how_to_answer": ("Answer only from the candidate's resume or what the user tells you; never invent "
+                          "numbers like CTC or notice period — ask. Keep answers short, in the form a job form "
+                          "expects (e.g. '30', 'Yes', 'Bengaluru'). Use the question text as the key."),
+    }
 
 
 # ── After applying: quiet applications, skill gaps, outcomes from Gmail ──────

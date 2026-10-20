@@ -165,8 +165,8 @@ def test_mcp_handshake_and_tool_list():
     assert [r["id"] for r in replies] == [1, 2, 3]   # the notification got no reply
     assert replies[0]["result"]["capabilities"] == {"tools": {}, "prompts": {}}
     names = {t["name"] for t in replies[1]["result"]["tools"]}
-    assert {"scan_portals", "save_mission_targets", "tailor_cv", "apply_cv_tailoring",
-            "launch_mission", "record_outcome", "followups_due"} <= names
+    assert {"jobagent_scan_portals", "jobagent_save_mission_targets", "jobagent_tailor_cv", "jobagent_apply_cv_tailoring",
+            "jobagent_launch_mission", "jobagent_record_outcome", "jobagent_followups_due"} <= names
     assert all(t["inputSchema"]["type"] == "object" for t in replies[1]["result"]["tools"])
     assert replies[2]["error"]["code"] == -32601
 
@@ -176,14 +176,14 @@ def test_mcp_tool_calls_map_to_api():
     state = {"api": api}
     call = lambda name, args, i: jobagent_mcp.handle(
         {"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": name, "arguments": args}}, state)
-    assert not call("launch_mission", {"missions": ["web_search", "linkedin"], "dry_run": True}, 1)["result"].get("isError")
+    assert not call("jobagent_launch_mission", {"missions": ["web_search", "linkedin"], "dry_run": True}, 1)["result"].get("isError")
     assert api.calls[-1] == ("POST", "/agents/run", {"phases": [6, 1], "dry_run": True})
-    bad = call("launch_mission", {"missions": ["monster"]}, 2)["result"]
+    bad = call("jobagent_launch_mission", {"missions": ["monster"]}, 2)["result"]
     assert bad["isError"] and "missions must be from" in bad["content"][0]["text"]
-    call("record_outcome", {"application_id": "a b", "status": "interview", "note": "invite"}, 3)
+    call("jobagent_record_outcome", {"application_id": "a b", "status": "interview", "note": "invite"}, 3)
     assert api.calls[-1] == ("PATCH", "/jobs/a%20b/status", {"status": "interview", "note": "invite"})
-    call("list_applications", {"status": "applied"}, 4)
-    assert api.calls[-1] == ("GET", "/jobs?status=applied&limit=50", None)
+    call("jobagent_list_applications", {"status": "applied"}, 4)
+    assert api.calls[-1] == ("GET", "/jobs?status=applied&limit=21", None)  # one extra row → has_more
 
 
 def test_mcp_profile_view_hides_internal_data_and_set_targets_saves():
@@ -249,8 +249,8 @@ def test_every_tool_annotated_and_real_actions_marked():
     by = {t["name"]: t for t in tools}
     assert len(tools) >= 40
     assert all("readOnlyHint" in t["annotations"] for t in tools)
-    assert by["daily_brief"]["annotations"]["readOnlyHint"] is True
-    for name in ("launch_mission", "set_schedule"):
+    assert by["jobagent_daily_brief"]["annotations"]["readOnlyHint"] is True
+    for name in ("jobagent_launch_mission", "jobagent_set_schedule"):
         assert by[name]["annotations"]["destructiveHint"] is True  # clients must confirm
     # Secrets never pass through chat: no tools for passwords, cookies, API keys, account deletion.
     assert not any(k in n for n in by for k in ("password", "cookie", "api_key", "delete_account", "gmail"))
@@ -261,12 +261,12 @@ def test_real_launch_requires_confirmation():
                     ("GET", "/users/quota"): {"plan": "pro", "ai_tokens_balance": 5},
                     ("GET", "/users/profile"): {"resume_url": "r.pdf", "extracted_data": {"skills": ["SQL"]}},
                     ("POST", "/agents/run"): {"run_ids": ["r1"]}})
-    first = _text(_call(api, "launch_mission", {"missions": ["web_search"]}))
+    first = _text(_call(api, "jobagent_launch_mission", {"missions": ["web_search"]}))
     assert first["needs_confirmation"] is True and first["ready"] is True
     assert not any(c[1] == "/agents/run" for c in api.calls)  # nothing submitted yet
-    _call(api, "launch_mission", {"missions": ["web_search"], "confirm": True})
+    _call(api, "jobagent_launch_mission", {"missions": ["web_search"], "confirm": True})
     assert api.calls[-1] == ("POST", "/agents/run", {"phases": [6], "dry_run": False})
-    _call(api, "launch_mission", {"missions": ["linkedin"], "dry_run": True})  # dry runs need no confirm
+    _call(api, "jobagent_launch_mission", {"missions": ["linkedin"], "dry_run": True})  # dry runs need no confirm
     assert api.calls[-1] == ("POST", "/agents/run", {"phases": [1], "dry_run": True})
 
 
@@ -277,7 +277,7 @@ def test_readiness_explains_fixes():
                     ("GET", "/users/usage"): {"applies_today": 3, "applies_limit": 20},
                     ("GET", "/users/api-keys"): {"gemini": False, "groq": False},
                     ("GET", "/users/profile"): {"resume_url": "r.pdf", "extracted_data": {}}})
-    r = _text(_call(api, "readiness_check", {}))
+    r = _text(_call(api, "jobagent_readiness_check", {}))
     assert r["ready"] is False and "job-setup" in r["blockers"][0]["fix"]
     assert r["missions_you_can_run"] == ["linkedin"]               # free plan
     assert any("never parsed" in w for w in r["warnings"])
@@ -294,7 +294,7 @@ def test_daily_brief_builds_todo():
                     ("GET", "/jobs?status=interview"): [{"id": "b", "company": "Beta"}],
                     ("GET", "/career-ops/followups/due"): [{"application_id": "c"}],
                     ("GET", "/users/quota"): {"ai_tokens_balance": 7}})
-    b = _text(_call(api, "daily_brief", {}))
+    b = _text(_call(api, "jobagent_daily_brief", {}))
     assert b["last_24h"] == {"runs": 1, "applied": 2, "prepared": 3, "skipped": 0, "failed_runs": 1}
     assert len(b["todo"]) == 4 and b["todo"][0].startswith("Submit 1 prepared")
 
@@ -302,10 +302,10 @@ def test_daily_brief_builds_todo():
 def test_tools_reuse_saved_job_description():
     api = RouteApi({("GET", "/jobs/app1"): {"jd_text": "Need SQL", "company": "Acme", "job_title": "Analyst"},
                     ("POST", "/career-ops/evaluate"): {"score": 4}})
-    _call(api, "evaluate_offer", {"application_id": "app1"})
+    _call(api, "jobagent_evaluate_offer", {"application_id": "app1"})
     assert api.calls[-1] == ("POST", "/career-ops/evaluate",
                              {"jd_text": "Need SQL", "company": "Acme", "role": "Analyst"})
-    bad = _call(RouteApi({("GET", "/jobs/x"): {}}), "tailor_cv", {"application_id": "x"})
+    bad = _call(RouteApi({("GET", "/jobs/x"): {}}), "jobagent_tailor_cv", {"application_id": "x"})
     assert bad["isError"] and "no saved job description" in bad["content"][0]["text"]
 
 
@@ -313,10 +313,10 @@ def test_rejection_patterns_built_from_tracker():
     apps = [{"company": f"C{i}", "job_title": "Analyst", "status": "rejected", "missing_skills": ["SQL"]}
             for i in range(6)]
     api = RouteApi({("GET", "/jobs"): apps, ("POST", "/career-ops/patterns"): {"ok": 1}})
-    _call(api, "rejection_patterns", {})
+    _call(api, "jobagent_rejection_patterns", {})
     sent = api.calls[-1][2]["applications"]
     assert len(sent) == 6 and sent[0]["blockers"] == ["SQL"]
-    few = _call(RouteApi({("GET", "/jobs"): apps[:2]}), "rejection_patterns", {})
+    few = _call(RouteApi({("GET", "/jobs"): apps[:2]}), "jobagent_rejection_patterns", {})
     assert few["isError"]
 
 
@@ -330,3 +330,47 @@ def test_prompts_expose_job_workflows():
     assert "data analyst, Pune" in text and "$ARGUMENTS" not in text and not text.startswith("---")
     assert "error" in jobagent_mcp.handle({"jsonrpc": "2.0", "id": 3, "method": "prompts/get",
                                            "params": {"name": "nope"}}, {})
+
+
+# ── MCP best-practice checks ─────────────────────────────────────────────────
+
+def test_tool_names_prefixed_and_server_named():
+    init = jobagent_mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                "params": {"protocolVersion": "2025-06-18"}}, {})["result"]
+    assert init["serverInfo"]["name"] == "jobagent_mcp"
+    tools = jobagent_mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, {})["result"]["tools"]
+    assert all(t["name"].startswith("jobagent_") for t in tools)
+    assert len({t["name"] for t in tools}) == len(tools)
+
+
+def test_protocol_version_negotiation():
+    v = lambda asked: jobagent_mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                           "params": {"protocolVersion": asked}}, {})["result"]["protocolVersion"]
+    assert v("2025-03-26") == "2025-03-26"                   # supported → echoed
+    assert v("2099-01-01") == jobagent_mcp.PROTOCOL_VERSION  # unknown → ours
+
+
+def test_missing_required_arg_is_actionable():
+    res = _call(FakeApi(), "jobagent_mission_logs", {})
+    assert res["isError"] and "missing run_id" in res["content"][0]["text"]
+
+
+def test_pagination_metadata():
+    rows = [{"id": str(i)} for i in range(6)]
+    api = RouteApi({("GET", "/jobs"): lambda b: rows})
+    page = _text(_call(api, "jobagent_list_applications", {"limit": 5}))
+    assert page["count"] == 5 and page["has_more"] is True and page["next_offset"] == 5
+    assert api.calls[-1][1] == "/jobs?limit=6"
+    api2 = RouteApi({("GET", "/jobs"): lambda b: rows[:2]})
+    last = _text(_call(api2, "jobagent_list_applications", {"limit": 5, "offset": 5}))
+    assert last["has_more"] is False and last["next_offset"] is None and api2.calls[-1][1] == "/jobs?limit=6&offset=5"
+
+
+def test_structured_content_and_size_cap():
+    small = jobagent_mcp._result({"a": 1})
+    assert small["structuredContent"] == {"a": 1}
+    assert "structuredContent" not in jobagent_mcp._result([1, 2])   # spec: objects only
+    big = jobagent_mcp._result({"x": "y" * (jobagent_mcp.CHARACTER_LIMIT + 10)})
+    text = big["content"][0]["text"]
+    assert len(text) < jobagent_mcp.CHARACTER_LIMIT + 300 and "truncated" in text
+    assert "structuredContent" not in big

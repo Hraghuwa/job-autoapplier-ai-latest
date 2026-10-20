@@ -84,6 +84,9 @@ def fill(driver, root, config, label="ContextFill"):
     items = []
     for it in (_parse_json(out or "").get("items") or []):
         f = known.pop(str(it.get("id")), None)  # each scanned field gets at most one action
+        if f and it.get("action") != "fill" and f.get("label"):
+            # Left for the user → recorded so Claude can add it to the answer bank.
+            config.setdefault("_unanswered", []).append(it.get("question") or f["label"])
         if f and it.get("action") == "fill" and str(it.get("value", "")).strip():
             items.append({"id": f["id"], "action": "fill", "value": str(it["value"])})
             if f.get("label"):

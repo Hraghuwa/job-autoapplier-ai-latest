@@ -1,8 +1,9 @@
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 import uuid
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,7 +81,8 @@ async def analytics(
         .where(Application.user_id == user.id)
         .group_by(Application.status)
     )
-    by_status = {str(row[0]): row[1] for row in stat_r.all()}
+    # str(enum) is "ApplicationStatus.applied" — the response-rate lookup below never matched.
+    by_status = {getattr(row[0], "value", str(row[0])): row[1] for row in stat_r.all()}
 
     # Response rate (shortlisted + interview + offer / total)
     positive = sum(by_status.get(s, 0) for s in ["shortlisted", "interview", "offer"])
@@ -168,23 +170,32 @@ async def update_status(
 
     # Auto-generate interview prep when moving to shortlisted/interview
     if body.status in ("shortlisted", "interview") and not app.interview_prep:
-        try:
-            from backend.services.gemini_service import generate_interview_prep
-            from backend.models.profile import UserProfile
-            from sqlalchemy import select as sa_select
-            prof_r = await db.execute(sa_select(UserProfile).where(UserProfile.user_id == user.id))
-            profile = prof_r.scalar_one_or_none()
-            n = 10 if user.plan != "free" else 3
-            resume_summary = (await _submitted_materials(db, app)
-                              or (str(profile.extracted_data or {}) if profile else ""))
-            app.interview_prep = generate_interview_prep(
-                resume_summary, app.jd_text or "", app.company, n_questions=n
-            )
-        except Exception:
-            pass
+        await _build_interview_prep(db, app, user)
 
     await db.commit()
     return ApplicationOut.model_validate(app)
+
+
+async def _prep_inputs(db: AsyncSession, app: Application, user: User):
+    from backend.models.profile import UserProfile
+    prof_r = await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))
+    profile = prof_r.scalar_one_or_none()
+    resume_summary = (await _submitted_materials(db, app)
+                      or (str(profile.extracted_data or {}) if profile else ""))
+    return resume_summary, (10 if user.plan != "free" else 3)
+
+
+async def _build_interview_prep(db: AsyncSession, app: Application, user: User) -> None:
+    """Fill app.interview_prep from what was submitted (fallback: the parsed resume).
+    Best-effort: a failed AI call leaves it empty so the next request retries."""
+    try:
+        from backend.services.gemini_service import generate_interview_prep
+        resume_summary, n = await _prep_inputs(db, app, user)
+        prep = generate_interview_prep(resume_summary, app.jd_text or "", app.company, n_questions=n)
+        if prep.get("questions"):
+            app.interview_prep = prep
+    except Exception:
+        pass
 
 
 async def _submitted_materials(db: AsyncSession, app: Application) -> str:
@@ -211,9 +222,33 @@ async def _submitted_materials(db: AsyncSession, app: Application) -> str:
     return "\n".join(parts)
 
 
+class InterviewPrepIn(BaseModel):
+    questions: List[Dict[str, Any]] = Field(..., min_length=1, max_length=30)
+    company_brief: str = ""
+    red_flags: List[str] = Field(default_factory=list)
+
+
+@router.put("/{job_id}/interview-prep")
+async def save_interview_prep(
+    job_id: str,
+    body: InterviewPrepIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Store interview prep written by the caller's own LLM (Claude-native mode)."""
+    app = (await db.execute(select(Application).where(
+        Application.id == uuid.UUID(job_id), Application.user_id == user.id))).scalar_one_or_none()
+    if not app:
+        raise HTTPException(404, "Job not found")
+    app.interview_prep = body.model_dump()
+    await db.commit()
+    return {"saved": True, "questions": len(body.questions)}
+
+
 @router.get("/{job_id}/interview-prep")
 async def interview_prep(
     job_id: str,
+    brief: bool = Query(False, description="Return the prompt for your own LLM instead of generating here"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -227,7 +262,16 @@ async def interview_prep(
     if not app:
         raise HTTPException(404, "Job not found")
 
-    n = 10 if user.plan != "free" else 3
+    if not app.interview_prep and brief:
+        from backend.services.claude_native import brief_response
+        from backend.services.gemini_service import interview_prep_prompt
+        resume_summary, n = await _prep_inputs(db, app, user)
+        return brief_response(interview_prep_prompt(resume_summary, app.jd_text or "", app.company, n))
+    if not app.interview_prep:
+        # Rows created by the agent (or imported) never went through a status
+        # change, so they had no prep and this returned {}. Build it on demand.
+        await _build_interview_prep(db, app, user)
+        await db.commit()
     prep = app.interview_prep or {}
 
     if user.plan == "free":

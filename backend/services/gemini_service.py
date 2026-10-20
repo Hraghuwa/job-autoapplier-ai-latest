@@ -122,12 +122,9 @@ Output plain text only, no markdown, no subject line."""
     return result if not result.startswith("__ERROR__") else ""
 
 
-def generate_interview_prep(resume_summary: str, jd_text: str, company: str,
-                             n_questions: int = 10,
-                             user_key: Optional[str] = None) -> Dict[str, Any]:
-    """Generate interview questions + answers + company brief."""
+def interview_prep_prompt(resume_summary: str, jd_text: str, company: str, n_questions: int = 10) -> str:
     from backend.services.untrusted import DATA_RULE, fence
-    prompt = f"""Generate interview preparation for this candidate applying to {company}.
+    return f"""Generate interview preparation for this candidate applying to {company}.
 Base model answers on the candidate material below — when it includes the
 submitted resume/cover note, stay consistent with exactly what was sent.
 {DATA_RULE.format(tag="job_posting")}
@@ -141,6 +138,12 @@ Return ONLY valid JSON with:
 
 JSON only, no markdown."""
 
+
+def generate_interview_prep(resume_summary: str, jd_text: str, company: str,
+                             n_questions: int = 10,
+                             user_key: Optional[str] = None) -> Dict[str, Any]:
+    """Generate interview questions + answers + company brief."""
+    prompt = interview_prep_prompt(resume_summary, jd_text, company, n_questions)
     result = _call(prompt, user_key)
     try:
         if "```" in result:

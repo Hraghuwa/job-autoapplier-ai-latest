@@ -744,6 +744,9 @@ def _save_application(session, user_id: str, platform: str, ctx: Optional[dict])
             missing_skills=ctx.get("missing_skills") or None,
             cover_note_used=ctx.get("cover_note_used"),
             tailored_resume_id=tr_id,
+            history=([{"timestamp": datetime.utcnow().isoformat(), "type": "needs_answers",
+                       "message": f"{len(ctx['questions'])} question(s) need your answer",
+                       "data": {"questions": ctx["questions"]}}] if ctx.get("questions") else []),
         )
         session.add(app)
         session.commit()

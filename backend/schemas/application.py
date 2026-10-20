@@ -45,6 +45,8 @@ class ApplicationDetail(ApplicationOut):
     jd_text: Optional[str]
     match_reason: Optional[str]
     interview_prep: Optional[dict]
+    cover_note_used: Optional[str] = None
+    needs_answers: List[str] = []  # form questions the mission couldn't answer
 
     @classmethod
     def model_validate(cls, obj, **kwargs):
@@ -55,6 +57,10 @@ class ApplicationDetail(ApplicationOut):
                 jd_text=obj.jd_text,
                 match_reason=obj.match_reason,
                 interview_prep=obj.interview_prep,
+                cover_note_used=getattr(obj, "cover_note_used", None),
+                needs_answers=[q for h in (obj.history or []) if isinstance(h, dict)
+                               and h.get("type") == "needs_answers"
+                               for q in (h.get("data") or {}).get("questions") or []],
             )
         return super().model_validate(obj, **kwargs)
 

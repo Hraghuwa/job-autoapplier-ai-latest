@@ -86,13 +86,16 @@ def report_job(config: Dict[str, Any], status: str, *, title: str = "", company:
             "match_score": fit.get("score"), "missing_skills": fit.get("missing") or [],
             "cover_note_used": config.get("_tailored_cover_note") or None,
             "tailored_resume_id": config.get("_tailored_resume_id") or None,
+            # Questions the form asked that no saved answer covered → the user's
+            # answer bank (Claude fills it so the next mission answers them).
+            "questions": [str(q)[:300] for q in (config.get("_unanswered") or []) if q][:30],
         }
         print(JOB_MARKER + json.dumps(rec, ensure_ascii=False), flush=True)
     except Exception:
         pass
     finally:
         # Per-job context must not leak into the next job's record.
-        for k in ("_last_fit", "_tailored_cover_note", "_tailored_resume_id"):
+        for k in ("_last_fit", "_tailored_cover_note", "_tailored_resume_id", "_unanswered"):
             config.pop(k, None)
 
 
