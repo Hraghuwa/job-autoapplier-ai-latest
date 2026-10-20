@@ -1,265 +1,232 @@
-# JobAgent — AI Job-Search Autopilot
+# JobAgent
 
-JobAgent finds relevant jobs, fills and submits applications in a real browser, tailors your CV per job, and tracks everything through to interview prep and follow-ups. It ships as a web app (Next.js + FastAPI), a Celery browser-agent worker, a Claude MCP server, and a Chrome form-fill extension.
+AI-assisted job search automation: discovery, fit scoring, CV tailoring, browser-driven applications and outcome tracking, exposed through a web app, a REST API and a Claude MCP server.
 
-> **Safety model:** every apply passes a *fit gate* (skip poor matches), per-platform rate limits, a 90-day dedup skiplist and an adaptive human-like delay. Tabs can be left open for your review before submit.
+![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688?logo=fastapi&logoColor=white)
+![Next.js](https://img.shields.io/badge/frontend-Next.js-000000?logo=nextdotjs&logoColor=white)
+![Celery](https://img.shields.io/badge/workers-Celery-37814A?logo=celery&logoColor=white)
+![Selenium](https://img.shields.io/badge/automation-Selenium-43B02A?logo=selenium&logoColor=white)
 
----
+## Table of contents
 
-## Contents
-1. [Architecture](#architecture)
-2. [Quick start](#quick-start)
-3. [Features](#features)
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+3. [Getting started](#getting-started)
 4. [Agent phases](#agent-phases)
-5. [Backend API](#backend-api)
-6. [Backend services](#backend-services-backendservices)
-7. [Agent modules](#agent-modules-agents)
-8. [Frontend pages](#frontend-pages)
-9. [MCP server (Claude)](#mcp-server-claude)
-10. [Chrome extension](#chrome-extension)
-11. [Plans & billing](#plans--billing)
-12. [Configuration](#configuration)
-13. [Tests, deploy & docs](#tests-deploy--docs)
+5. [Repository layout](#repository-layout)
+6. [API reference](#api-reference)
+7. [Module reference](#module-reference)
+8. [MCP server and Chrome extension](#mcp-server-and-chrome-extension)
+9. [Plans and limits](#plans-and-limits)
+10. [Configuration](#configuration)
+11. [Testing and CI](#testing-and-ci)
+12. [Deployment](#deployment)
+13. [Security and responsible use](#security-and-responsible-use)
 
----
+## Overview
+
+| Capability | Description |
+|---|---|
+| Discovery | Google search, career-page crawling, public board APIs and JobSpy (LinkedIn, Indeed, Naukri, Google Jobs). |
+| Fit gate | Scores each posting against the profile (title, must-have skills, seniority, historical callback rate) and skips weak matches before applying. |
+| CV tailoring | Converts a job description into a structured signature and renders an ATS-safe PDF. Every bullet traces to the source profile, so nothing is invented. Results are cached per JD and profile version. |
+| Application | LinkedIn Easy Apply, Internshala, Wellfound, Naukri, Unstop, and generic ATS pages (Lever, Greenhouse, Workday). |
+| Form filling | Deterministic label rules, then a reusable answer bank, then an LLM fallback. Supports multi-step forms, uploads, Google Forms and Typeform. |
+| Tracking | Kanban pipeline, analytics, response rates per resume and archetype, interview prep, follow-up cadence and Gmail-based outcome proposals. |
+| Career-Ops | A-G offer evaluation, offer comparison, negotiation scripts, STAR story bank and skill-gap study plans. |
+| AI Missions | Scan portals, save target companies, then apply to them one tab at a time. |
+| Safeguards | Per-platform rate limits, 90-day dedup, adaptive jittered delays and CAPTCHA detection. |
+| Platform | Cron scheduling, knowledge graph, admin console, Razorpay and Stripe billing, Resend email notifications. |
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    UI[Next.js frontend] -- REST / WebSocket --> API[FastAPI]
+    MCP[MCP server] -- REST --> API
+    API --> DB[(PostgreSQL / SQLite)]
+    API -- enqueue --> Q[(Redis)]
+    Q --> W[Celery worker]
+    W -- subprocess per phase --> A[Selenium agents]
+    A --> L[llm_router: Ollama, Groq, Gemini]
+    A -- progress events --> Q
+    Q -- pub/sub --> API
 ```
-Next.js frontend ──REST/WebSocket──▶ FastAPI backend ──▶ Postgres / SQLite
-                                         │  enqueue
-                                         ▼
-                                  Redis ─▶ Celery worker (queue: agents)
-                                         │  spawns per-phase subprocess
-                                         ▼
-                           agents/*  (Selenium / undetected-chromedriver)
-                                         │ LLM calls
-                                         ▼
-                      llm_router: Ollama → Groq → Gemini  (never raises)
-```
 
-- **Live progress:** the worker prints agent lines → classified into events → pushed over Redis pub/sub to the `/ws/{user_id}` WebSocket.
-- **Isolation:** each phase runs in its own subprocess (`agents/run_phase_subprocess.py`) because the appliers use a module-global `CONFIG`.
-- **Resilience:** `agent_supervisor` auto-starts a worker, fails stale runs, and exposes a health check. Celery Beat fires saved cron schedules every 5 min.
+- **Isolation:** each phase runs in its own subprocess (`agents/run_phase_subprocess.py`), so the appliers' module-global config cannot leak between users.
+- **Resilience:** `agent_supervisor` starts a worker when none is listening, fails stale runs and exposes `/agents/healthcheck`. Celery Beat evaluates saved cron schedules every 5 minutes.
+- **LLM routing:** `llm_router.py` selects a provider per role (`form_fill`, `writer`) and falls back across Ollama, Groq and Gemini. It never raises; callers handle `None` or an empty string.
+- **Secrets:** platform credentials are Fernet-encrypted at rest. Scraped text is fenced before it reaches a prompt.
 
-## Quick start
+## Getting started
 
-Requires Python 3.9+, Node 18+, Redis, Google Chrome.
+Prerequisites: Python 3.9+, Node 18+, Redis, Google Chrome.
 
 ```bash
-bash start.sh          # generates backend/.env, seeds DB + admin, starts Redis, API (:8000), worker, frontend (:3000)
+bash start.sh
 ```
 
-Manual:
+This creates `backend/.env`, seeds the database and an admin user, starts Redis, the API (`:8000`), a Celery worker and the frontend (`:3000`).
+
+Manual setup:
+
 ```bash
 pip install -r requirements.txt
-cp backend/.env.example backend/.env       # set SECRET_KEY, FERNET_KEY, GEMINI_API_KEY ...
+cp backend/.env.example backend/.env       # set SECRET_KEY, FERNET_KEY, GEMINI_API_KEY
 python scripts/seed_local.py
+
 uvicorn backend.main:app --port 8000
-celery -A backend.workers.celery_app worker -Q agents,default   # or ./start_worker.sh
-celery -A backend.workers.celery_app beat                        # scheduled runs
+celery -A backend.workers.celery_app worker -Q agents,default
+celery -A backend.workers.celery_app beat  # required for scheduled runs
+
 cd frontend && npm install && npm run dev
 ```
-Then: register → **Onboarding** (upload resume, set preferences, add platform credentials) → **Automation** → run.
 
-Standalone CLI (no web app): fill `agents/config.py`, then `python agents/main.py` or `python agents/run_all_phases.py`.
-
----
-
-## Features
-
-| Area | What it does |
-|---|---|
-| **Resume onboarding** | Upload PDF → SHA-256 dedup → Gemini parses into structured profile (summary, skills, experience, education). |
-| **Auto-apply** | LinkedIn Easy Apply, Internshala, Wellfound, Naukri, Unstop, and any company/ATS page (Lever, Greenhouse, Workday, generic). |
-| **Job discovery** | Google mega-search, platform scrapers, career-page crawler, public board APIs, and JobSpy (LinkedIn/Indeed/Naukri/Google Jobs). |
-| **Smart form filling** | Label→answer rules, an `autofill_bank` of your reusable answers, then LLM fallback; handles text, number, textarea, dropdown, radio, checkbox, resume upload, multi-step forms, Google Forms/Typeform. |
-| **Fit gate** | Scores each JD against your profile (title match, must-have skills, seniority, your real callback rate) and skips weak matches. |
-| **CV tailoring** | JD → structured signature → tailored, hallucination-guarded, ATS-safe PDF (cached per JD + profile version). |
-| **Cover notes** | JD-aware "why this role" note with a reviewer pass; static fallback. |
-| **AI Missions** | Portal scan → saved target companies/boards → agent applies to them one tab at a time. |
-| **Career-Ops** | A–G offer evaluation, comparison, negotiation scripts, STAR story bank, skill gaps, follow-ups, outcome detection from Gmail. |
-| **Tracking** | Kanban pipeline, analytics, response rates by resume/archetype, interview prep per application. |
-| **Scheduling** | Cron schedules for runs (Pro). |
-| **Knowledge graph** | Visual graph of your profile/applications with persisted node positions. |
-| **Admin** | User/plan management, revenue, active agents, platform health, metrics. |
-| **Payments** | Razorpay (INR) and Stripe (USD) with signed webhooks. |
-
----
+Typical flow: register, upload a resume under Onboarding, add platform credentials, then start a run from Automation. Without the web app, edit `agents/config.py` and run `python agents/main.py`.
 
 ## Agent phases
 
-Run via `POST /agents/run` with a list of phases (filtered by plan, checked against stored credentials).
+Started with `POST /agents/run`. Requested phases are filtered by plan and checked for stored credentials.
 
-| # | Phase | Entry |
+| Phase | Target | Entry point |
 |---|---|---|
-| 1 | LinkedIn Easy Apply (cookies or password) | `run_phase1.py` |
+| 1 | LinkedIn Easy Apply (session cookies or password) | `run_phase1.py` |
 | 2 | Internshala | `orchestrator.run_internshala_phase` |
 | 3 | Wellfound | `orchestrator.run_wellfound_phase` |
 | 4 | Naukri | `orchestrator.run_naukri_phase` |
 | 5 | Unstop | `orchestrator.run_unstop_phase` |
-| 6 | Web search (Google + ATS pages, 30+ boards) | `orchestrator.run_web_search_phase` |
-| 7 | Auto-fill every open tab | `orchestrator.run_form_fill_phase` |
+| 6 | Web search (Google, 30+ boards, ATS pages) | `orchestrator.run_web_search_phase` |
+| 7 | Fill every open tab | `orchestrator.run_form_fill_phase` |
 
-Pause is honoured cooperatively (`agent_stop.should_stop`, DB/Redis flag polled by the subprocess).
+Pause is cooperative: the subprocess polls a Redis/DB flag and `agent_stop.should_stop()`.
 
----
+## Repository layout
 
-## Backend API
+```
+backend/           FastAPI app: routers/, services/, models/, workers/
+agents/            Selenium appliers, job finder, form fillers, ContextFill bridge
+frontend/          Next.js (App Router), Tailwind, shadcn/ui
+mcp_server/        stdio MCP server
+chrome_extension/  Manifest V3 auto-fill extension
+llm_router.py      Role-based LLM routing with fallback
+docs/  tests/  scripts/
+```
 
-FastAPI app in `backend/main.py`. All routes except auth/health/webhooks need a JWT Bearer token. Also: `GET /health`, `WS /ws/{user_id}`.
+## API reference
 
-**`/auth`** — `POST /register`, `POST /login`, `POST /refresh`, `GET /me`, `POST /promote-self` (bootstrap admin with secret).
+Interactive docs are served at `/docs`. All routes require a JWT bearer token except auth, `/health` and payment webhooks. Live run events stream over `WS /ws/{user_id}`.
 
-**`/onboarding`** — `POST /resume` (upload+parse), `POST /preferences`, `POST|GET /credentials` (Fernet-encrypted), `GET /credentials-status`, `GET /test/{platform}`, `POST /autofill` (autofill bank), `POST|GET|DELETE /linkedin-cookies` (+`-status`), `GET /status`.
+| Prefix | Endpoints |
+|---|---|
+| `/auth` | `POST /register`, `/login`, `/refresh`, `/promote-self`; `GET /me` |
+| `/onboarding` | `POST /resume`, `/preferences`, `/credentials`, `/autofill`, `/linkedin-cookies`; `GET /status`, `/credentials-status`, `/linkedin-cookies-status`, `/test/{platform}`; `DELETE /linkedin-cookies` |
+| `/agents` | `POST /run`, `/pause/{run_id}`, `/schedule`, `/runs/{run_id}/analyze`; `GET /healthcheck`, `/preflight`, `/status/{run_id}`, `/runs`, `/schedule`, `/runs/{run_id}/logs` |
+| `/jobs` | `GET ""`, `/analytics`, `/{id}`, `/{id}/interview-prep`; `PATCH /{id}/status` |
+| `/applications` | `GET /response-rates/by-resume`, `/response-rates/by-archetype` |
+| `/resumes` | CRUD, `POST /{id}/duplicate`, section CRUD, `PUT /{id}/sections/reorder` |
+| `/ai` | `POST /enhance-summary`, `/enhance-bullet`, `/generate-bullets`, `/cover-letter`, `/cover-letter/free-preview`; `GET /health` |
+| `/career-ops` | `/evaluate`, `/evaluations`, `/compare`, `/tailor-cv` (`/apply`, `/undo`), `/story-bank`, `/negotiation`, `/scan`, `/mission-targets`, `/project-eval`, `/training-eval`, `/deep-research`, `/patterns`, `/contact-strategy`, `/followup`, `/followups/due`, `/skill-gaps` (`/plan`), `/outcomes/gmail-scan`, `/outcomes/apply`, `/health` |
+| `/users` | `GET/PATCH /profile`; `POST/DELETE /gemini-key`, `/groq-key`; `GET /api-keys`, `/usage`, `/quota`, `/referral`; `DELETE /account` |
+| `/payments` | `GET /plans`, `/config`; Razorpay `create-order`, `verify`, `webhook`; Stripe `create-session`, `webhook` |
+| `/admin` | `GET /users`, `/revenue`, `/agents/active`, `/platform-health`, `/metrics`; `PATCH /users/{id}/plan`; `POST /impersonate/{id}` |
+| `/graph`, `/bugs` | Knowledge graph, stats and node positions; bug report and list |
 
-**`/agents`** — `POST /run`, `GET /healthcheck`, `GET /preflight`, `GET /status/{run_id}`, `GET /runs`, `POST /pause/{run_id}`, `POST|GET /schedule`, `GET /runs/{run_id}/logs`, `POST /runs/{run_id}/analyze` (LLM diagnosis of a run).
+## Module reference
 
-**`/jobs`** — `GET ""` (list/filter), `GET /analytics`, `GET /{id}`, `PATCH /{id}/status` (kanban move + email notice), `GET /{id}/interview-prep`.
-
-**`/applications`** — `GET /response-rates/by-resume`, `GET /response-rates/by-archetype`.
-
-**`/resumes`** — CRUD, `POST /{id}/duplicate`, and section CRUD + `PUT /{id}/sections/reorder` for the resume builder.
-
-**`/ai`** — `GET /health`, `POST /enhance-summary`, `/enhance-bullet`, `/generate-bullets`, `/cover-letter`, `/cover-letter/free-preview`.
-
-**`/career-ops`** — `POST /evaluate`, `GET /evaluations`, `POST /compare`, `POST /tailor-cv` (+`/apply`, `/undo`), story bank (`GET|POST /story-bank`, `DELETE /story-bank/{sid}`), `POST /negotiation`, `POST /scan`, mission targets (`GET|POST /mission-targets`, `DELETE /mission-targets/{company}`), `POST /project-eval`, `/training-eval`, `/deep-research`, `/patterns`, `/contact-strategy`, follow-ups (`POST /followup`, `GET /followups/due`, `GET /followups/{app_id}`), `GET /skill-gaps`, `POST /skill-gaps/plan`, `POST /outcomes/gmail-scan`, `POST /outcomes/apply`, `GET /health`.
-
-**`/users`** — `GET|PATCH /profile`, `POST|DELETE /gemini-key`, `POST|DELETE /groq-key` (bring-your-own keys), `GET /api-keys`, `GET /usage`, `GET /quota`, `GET /referral`, `DELETE /account`.
-
-**`/payments`** — `GET /plans`, `GET /config`, Razorpay (`/razorpay/create-order|verify|webhook`), Stripe (`/stripe/create-session|webhook`), legacy `/create-order`, `/verify`.
-
-**`/graph`** — `GET ""`, `GET /stats`, `PUT|DELETE /positions`.
-
-**`/bugs`** — `POST /report`, `GET /list`.
-
-**`/admin`** (admin only) — `GET /users`, `PATCH /users/{id}/plan`, `POST /impersonate/{id}`, `GET /revenue`, `/agents/active`, `/platform-health`, `/metrics`.
-
----
-
-## Backend services (`backend/services/`)
+### Backend services (`backend/services/`)
 
 | Module | Responsibility |
 |---|---|
-| `agent_supervisor` | Redis/worker checks, auto-spawn worker, recover & fail stale runs, watchdog loop, `healthcheck` (selenium, Chrome, Ollama). |
-| `apply_decision` | `should_apply` gate, `report_job` (structured line the worker turns into an Application), `rate_ok` / `rate_register`. |
-| `fit_scorer` | `score_fit`: title match, must-have coverage, seniority fit, ±10 adjustment from your own callback rate. |
-| `jd_analyser` | JD → `JDSignature` with a hallucination filter; cached by JD hash. |
-| `resume_tailor` | Produces a `TailoredResume`; every bullet traces to a source bullet; safe untailored fallback. |
-| `resume_pdf` | ReportLab ATS-safe PDF render + `parse_problems` parseability check. |
-| `tailored_resume_store` | `get_or_build` cache keyed by (user, JD hash, profile version). |
-| `resume_resolver` | Picks tailored PDF or falls back to the static resume. |
-| `resume_parser` / `gemini_service` | Save + dedup + parse resume; match score, cover letter, interview prep. |
-| `cover_note` | JD-aware note + reviewer pass; `resolve_cover_note`. |
-| `rate_limits` | In-memory and Redis per-user/per-platform limiters with failure counts. |
-| `backoff` | Jittered, ban-aware inter-apply delay (`polite_sleep`, `delay_for`). |
-| `skiplist` | 90-day apply cooldown; `SkipSet` backs the appliers' `applied_urls`. |
-| `plan_gate` | Plan limits, platform access, monthly AI-token refill/consume. |
-| `followthrough` | Follow-ups due, skill gaps, Gmail (IMAP) outcome classification — proposals only, never auto-applied. |
-| `response_rates` | Callback rates per tailored resume / archetype. |
-| `run_metrics` / `llm_usage` | Per-platform run metrics; per-call token & cost capture. |
-| `linkedin_cookies` | Parse Cookie-Editor export, validate `li_at`, snapshot refreshed cookies. |
-| `crypto_service` | Fernet encrypt/decrypt for credentials. |
-| `untrusted` | `fence` / `looks_injected` — prompt-injection defence for scraped text. |
-| `email_service` | Resend emails: welcome, run complete, status change, receipt. |
-| `graph_service`, `tracking_service` | Knowledge graph and application tracking helpers. |
+| `fit_scorer`, `apply_decision` | Fit scoring and the apply/skip gate; structured job reporting for the worker |
+| `jd_analyser` | JD to `JDSignature`, with a hallucination filter and hash-keyed cache |
+| `resume_tailor`, `resume_pdf`, `tailored_resume_store`, `resume_resolver` | Tailoring, ATS-safe PDF rendering and parse check, cache, and fallback to the static resume |
+| `cover_note` | JD-aware cover note with a reviewer pass and static fallback |
+| `rate_limits`, `backoff`, `skiplist` | In-memory or Redis limiter, jittered delays, 90-day dedup |
+| `plan_gate` | Plan limits and monthly AI-token metering |
+| `followthrough`, `response_rates` | Follow-up cadence, skill gaps, IMAP outcome proposals, callback statistics |
+| `agent_supervisor` | Worker lifecycle, stale-run recovery, dependency health check |
+| `run_metrics`, `llm_usage` | Per-platform run metrics, per-call token and cost capture |
+| `crypto_service`, `untrusted`, `linkedin_cookies` | Fernet encryption, prompt-injection fencing, session cookie handling |
+| `gemini_service`, `resume_parser`, `email_service`, `graph_service`, `tracking_service` | Resume parsing and AI helpers, notifications, graph, tracking |
 
-Workers: `workers/agent_tasks.py` (`run_phase_task`, `check_schedules`, quota checks, event classification, stop signalling), `workers/celery_app.py` (queues + Beat).
+Workers: `workers/agent_tasks.py` (`run_phase_task`, `check_schedules`, quota checks, event classification) and `workers/celery_app.py` (queues, Beat schedule).
 
----
+### Agents (`agents/`)
 
-## Agent modules (`agents/`)
-
-| Module | Role |
+| Module | Responsibility |
 |---|---|
-| `orchestrator.py` | Per-phase runners, Chrome driver creation (server mode, profiles), teardown. |
-| `linkedin_applier.py` | Cookie/password login, job-card loop, Easy Apply modal filling, external-apply handling, title relevance. |
-| `internshala_applier.py`, `other_platforms.py` (Unstop, Naukri), `wellfound_applier.py` | Login, paginated search, apply, per-site cover notes, CAPTCHA detection. |
-| `web_search_applier.py` | Google job search → ATS detection (Lever/Greenhouse/Workday/generic) → apply, one job/tab at a time via ContextFill. |
-| `job_finder.py` | Mega-search, platform tab search, career-page crawl, board APIs, JobSpy bridge. |
-| `jobspy_fetch.py` | Separate-interpreter (Py ≥3.10) JobSpy runner returning JSON postings. |
-| `job_targeting.py` | Pure rules to reject postings pre-open (level, tech/non-tech, location). |
-| `smart_form_filler.py` | Field matching & filling engine for all input types, resume upload, fit gate, multi-step walker. |
-| `google_form_filler.py` | Google Forms, Typeform and generic external forms. |
-| `contextfill_bridge.py` / `contextfill_page.py` | Drive the ContextFill extension / run its scanner in-page, mapping fields via the LLM. |
-| `agent_vision.py` | Gemini vision: screenshot → find Apply button, analyse forms, read JD. |
-| `agent_stop.py` | Cooperative pause. |
-| `run_phase_subprocess.py`, `run_phase1.py`, `run_all_phases.py`, `main.py`, `run_wellfound.py` | Subprocess entry, CLI runners, timed multi-phase run. |
-| `url_utils.py`, `config.py` | URL normalisation; standalone CLI config. |
+| `orchestrator` | Phase runners and Chrome driver construction |
+| `linkedin_applier` | Cookie/password login, job-card loop, Easy Apply modal, external apply |
+| `internshala_applier`, `other_platforms`, `wellfound_applier` | Internshala, Unstop and Naukri, Wellfound |
+| `web_search_applier` | Google search, ATS detection (Lever, Greenhouse, Workday, generic), one tab at a time |
+| `job_finder`, `jobspy_fetch`, `job_targeting` | Discovery, JobSpy bridge (separate Python 3.10+ interpreter), pre-open posting filter |
+| `smart_form_filler`, `google_form_filler` | Field matching and filling, Google Forms, Typeform, generic forms |
+| `contextfill_bridge`, `contextfill_page` | LLM-assisted field mapping through ContextFill |
+| `agent_vision` | Gemini vision for locating Apply buttons and analysing forms |
+| `run_phase_subprocess`, `agent_stop` | Subprocess entry point and pause handling |
 
-`llm_router.py` (root) — role-based routing (`form_fill`, `writer`) across Ollama → Groq → Gemini; returns `None`/`""` instead of raising.
+### Frontend (`frontend/app/(app)/`)
 
----
+`dashboard`, `automation`, `jobs` (kanban and detail), `analytics`, `career-ops`, `graph`, `credentials`, `onboarding`, `settings` and `settings/billing`, `admin`. Shared client code: `lib/api.ts` (axios with JWT), `lib/ws.ts` (live events), `lib/auth.ts`.
 
-## Frontend pages
+## MCP server and Chrome extension
 
-Next.js App Router, Tailwind + shadcn/ui (`frontend/app`).
-
-| Route | Purpose |
-|---|---|
-| `/` | Landing page. |
-| `/login`, `/register` | Auth. |
-| `/onboarding` | Resume upload, preferences, guided setup. |
-| `/dashboard` | Stats, recent applications, live agent feed. |
-| `/automation` | Pick phases, start/pause runs, schedules, live logs and toasts. |
-| `/credentials` | Platform logins, LinkedIn cookies, autofill answers, API keys. |
-| `/jobs`, `/jobs/[id]` | Drag-and-drop kanban, search, detail with interview prep. |
-| `/analytics` | Funnel and response-rate charts. |
-| `/career-ops` | Tabs: Evaluate, Tailor, Scan, Story Bank, Negotiate, and more. |
-| `/graph` | Interactive knowledge graph. |
-| `/settings`, `/settings/billing` | Profile, keys, usage, plans and payments. |
-| `/admin` | Admin console. |
-
-Shared: `lib/api.ts` (axios + JWT), `lib/auth.ts`, `lib/ws.ts` (live events), `BugReportButton`, `TokenBadge`, `GraphMiniMap`, error boundary.
-
----
-
-## MCP server (Claude)
-
-`mcp_server/jobagent_mcp.py` is a stdio MCP server so Claude can run your job search. Run `python mcp_server/jobagent_mcp.py login` once to store credentials.
+`mcp_server/jobagent_mcp.py` exposes JobAgent to Claude over stdio. Authenticate once with `python mcp_server/jobagent_mcp.py login`.
 
 Tools: `get_profile`, `set_job_targets`, `scan_portals`, `save_mission_targets`, `list_mission_targets`, `remove_mission_target`, `tailor_cv`, `apply_cv_tailoring`, `undo_cv_tailoring`, `launch_mission`, `mission_status`, `mission_logs`, `stop_mission`, `list_applications`, `record_outcome`, `interview_prep`, `followups_due`, `draft_followup`, `skill_gaps`, `study_plan`, `evaluate_offer`.
 
-Claude Code slash commands live in `.claude/commands/`: `job-setup`, `job-apply`, `job-daily`, `job-weekly`, `job-interview`.
+Claude Code commands in `.claude/commands/`: `job-setup`, `job-apply`, `job-daily`, `job-weekly`, `job-interview`.
 
-## Chrome extension
+`chrome_extension/` is a Manifest V3 extension that fills the active tab's application form from a saved profile. Build with `python build_extension.py`.
 
-`chrome_extension/` (Manifest V3, "Smart Fill"): popup stores your profile in `data.js`; `content.js` fills the active tab's application form. Build with `python build_extension.py`.
-
----
-
-## Plans & billing
+## Plans and limits
 
 | | Free | Pro | Team |
 |---|---|---|---|
-| Platforms | LinkedIn | All 6 | All 6 |
-| Apply credits/day | 20 | Unlimited | Unlimited |
-| AI tokens/month | 50 | 2,000 | 5,000 |
-| Web search, cover letters, scheduling, analytics, kanban | – | ✔ | ✔ |
-| Tabs | 20 | 100 | 100 |
+| Platforms | LinkedIn | All | All |
+| Applies per day | 20 | Unlimited | Unlimited |
+| AI tokens per month | 50 | 2,000 | 5,000 |
+| Web search, cover letters, scheduling, analytics, kanban | No | Yes | Yes |
+| Open tabs | 20 | 100 | 100 |
 
-Pro: ₹499/mo or ₹3,999/yr (Razorpay), $9.99/mo or $79.99/yr (Stripe). Apply-credit packs are sold one-off. Users can bring their own Gemini/Groq keys to avoid spending operator tokens.
+Pro: INR 499/month or INR 3,999/year (Razorpay); USD 9.99/month or USD 79.99/year (Stripe). Users may supply their own Gemini or Groq key instead of consuming operator tokens.
 
 ## Configuration
 
-Set in `backend/.env` (templates: `backend/.env.example`, `.env.prod.example`, `frontend/.env.local.example`).
+Settings load from `backend/.env`. Templates: `backend/.env.example`, `.env.prod.example`, `frontend/.env.local.example`.
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL`, `REDIS_URL` | Storage / queue (SQLite local, Postgres prod). |
-| `SECRET_KEY`, `FERNET_KEY` | JWT signing / credential encryption. `SECRET_KEY` is derived from `FERNET_KEY` if unset. |
-| `GEMINI_API_KEY`, `GROQ_API_KEY`, `OLLAMA_HOST` (+ `*_FORM_MODEL`, `*_WRITER_MODEL`), `JOBAGENT_LLM_ORDER` | LLM providers and routing. |
-| `CHROME_BIN`, `CHROMEDRIVER_PATH`, `JOBAGENT_SERVER_MODE` | Browser setup / headless server mode. |
-| `JOBSPY_PYTHON`, `CONTEXTFILL_DIR`, `CONTEXTFILL_CHROME` | JobSpy interpreter, ContextFill extension. |
-| `JOBAGENT_INPROC_PHASE`, `DISABLE_AGENT_SUPERVISOR`, `AGENT_WORKER_CONCURRENCY`, `AGENT_STALE_TIMEOUT_MIN`, `AGENT_WATCHDOG_INTERVAL_S` | Worker behaviour. |
-| `ADMIN_BOOTSTRAP_SECRET` | Allows `/auth/promote-self`. |
+| `DATABASE_URL`, `REDIS_URL` | Database (SQLite for local, PostgreSQL for production) and queue |
+| `SECRET_KEY`, `FERNET_KEY` | JWT signing and credential encryption. `SECRET_KEY` is derived from `FERNET_KEY` when unset |
+| `GEMINI_API_KEY`, `GROQ_API_KEY`, `OLLAMA_HOST`, `JOBAGENT_LLM_ORDER` | LLM providers and priority |
+| `CHROME_BIN`, `CHROMEDRIVER_PATH`, `JOBAGENT_SERVER_MODE` | Browser binary and headless server mode |
+| `JOBSPY_PYTHON`, `CONTEXTFILL_DIR` | JobSpy interpreter and ContextFill extension location |
+| `JOBAGENT_INPROC_PHASE`, `DISABLE_AGENT_SUPERVISOR`, `AGENT_WORKER_CONCURRENCY`, `AGENT_STALE_TIMEOUT_MIN` | Worker behaviour |
+| `ADMIN_BOOTSTRAP_SECRET` | Enables `/auth/promote-self` |
 
-Payment (Razorpay/Stripe) and email (Resend) keys are read by their routers/services.
+Razorpay, Stripe and Resend credentials are read by the payments router and email service.
 
-## Tests, deploy & docs
+## Testing and CI
 
-- **Tests:** `pytest tests/` (API, auth, security, dedup, field mapping, safety gate, payments webhook, career pipeline, browser); frontend: `cd frontend && npm test`. CI: `.github/workflows/ci.yml`.
-- **Deploy:** `Procfile`/`railway.json`/`nixpacks.toml` (Railway), `docker-compose[.prod].yml`, `backend/Dockerfile[.worker]`, `frontend/vercel.json`, `Caddyfile`. The worker needs Chrome — see `docs/WORKER.md`.
-- **More docs:** `docs/` — `ADR-001-web-search-contextfill.md`, `CAREER_OPS_INTEGRATION.md`, `DATABASE.md`, `DEPLOY_ORACLE.md`, `C2_CONCURRENCY_PLAN.md`, `SYSTEM_AUDIT.md`, `SECURITY_INCIDENT_C1.md`; roadmap in `PLAN.md`, `TODO.md`.
+```bash
+pytest tests/                     # backend: API, auth, security, dedup, field mapping, safety gate, payments, career pipeline, browser
+cd frontend && npx jest           # frontend
+```
 
-> ⚠️ Automating applications may violate some platforms' terms of service. Use sensible limits, keep your credentials private, and review what is submitted.
+GitHub Actions (`.github/workflows/ci.yml`) runs the backend suite and an import check on pull requests and on pushes to `main`.
+
+## Deployment
+
+- **API:** Railway (`Procfile`, `railway.json`, `nixpacks.toml`) or Docker (`docker-compose.prod.yml`, `backend/Dockerfile`).
+- **Worker:** `backend/Dockerfile.worker` bundles Chromium and chromedriver. `GET /agents/healthcheck` reports whether selenium and a Chrome binary are present. See [docs/WORKER.md](docs/WORKER.md).
+- **Frontend:** Vercel (`frontend/vercel.json`).
+
+Further documentation in [docs/](docs/): [ADR-001](docs/ADR-001-web-search-contextfill.md), [Career-Ops](docs/CAREER_OPS_INTEGRATION.md), [database](docs/DATABASE.md), [Oracle deploy](docs/DEPLOY_ORACLE.md), [concurrency plan](docs/C2_CONCURRENCY_PLAN.md), [system audit](docs/SYSTEM_AUDIT.md). Roadmap: [PLAN.md](PLAN.md), [TODO.md](TODO.md).
+
+## Security and responsible use
+
+- Never commit `.env` files, `config.py` with real credentials, browser profiles or `*.db` files.
+- Automated applications may violate a platform's terms of service. Keep rate limits enabled, use your own accounts, and review what is submitted.
+- Report vulnerabilities privately to the repository owner rather than in a public issue.
