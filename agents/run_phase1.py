@@ -57,7 +57,14 @@ def main():
             if _stop and _stop.is_set():
                 print("  [Phase 1] 🛑 Stop requested — exiting agent loop.")
                 break
-            count = run_linkedin_agent(agent, i, len(agents), tracker, shared_driver=driver)
+            # One daily cap for the whole phase, shared by every role agent
+            # (applied + prepared-for-review both count).
+            remaining = CONFIG["max_jobs_per_day"] - total_applied - CONFIG.get("_li_prepared", 0)
+            if remaining <= 0:
+                print(f"  [Phase 1] ✅ Daily cap of {CONFIG['max_jobs_per_day']} reached — remaining role agents skipped.")
+                break
+            count = run_linkedin_agent(agent, i, len(agents), tracker, shared_driver=driver,
+                                       max_jobs=remaining)
             total_applied += count
             if i < len(agents):
                 if _stop and _stop.is_set():

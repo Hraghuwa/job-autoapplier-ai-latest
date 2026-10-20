@@ -903,6 +903,22 @@ def _google_urls(driver, config, seen_norms, limit, applied_urls=()):
     return out[:limit]
 
 
+def _caps_ok(config):
+    try:
+        from backend.services.apply_decision import rate_ok
+    except Exception:
+        return True
+    return rate_ok(config, "web_search")
+
+
+def _caps_register(config):
+    try:
+        from backend.services.apply_decision import rate_register
+        rate_register(config, "web_search")
+    except Exception:
+        pass
+
+
 def _fit_ok(config, title, jd):
     """LLM fit gate (jd_analyser + fit_scorer). Fail-open when the backend isn't importable."""
     try:
@@ -960,6 +976,7 @@ def process_job(driver, job, config, ctx, cf=None, home=None):
                 result = "skipped"
                 return result
         jd = job.get("jd") or smart_form_filler._capture_jd_text(driver, {}) or ""
+        job["title"], job["jd"] = title, jd  # report_job needs them after this returns
         ok, why = _fit_ok(config, title, jd)
         if not ok:
             print(f"    ⏭ Skipping '{title[:50]}' ({why})")
@@ -1077,9 +1094,23 @@ def run_pipeline(driver, config, applied_urls=None, cf=None):
         if should_stop() or not is_driver_alive(driver):
             print("[Web Search] ⏹  Stopping.")
             break
+        if not _caps_ok(config):
+            break
         print(f"\n  [{i}/{len(jobs)}] {job['url'][:90]}")
         res = process_job(driver, job, config, ctx, cf=cf, home=home)
-        processed.append(job["url"])
+        # 'failed' (a crash/timeout) is retried next run; applied, review and
+        # skipped go on the cooldown so the same JD isn't re-scored every run.
+        if res != "failed":
+            processed.append(job["url"])
+        if res in ("applied", "review"):
+            _caps_register(config)
+            try:
+                from backend.services.apply_decision import report_job
+                report_job(config, "applied" if res == "applied" else "prepared",
+                           title=job.get("title", ""), company=job.get("company", ""),
+                           url=job["url"], jd_text=job.get("jd"))
+            except Exception:
+                pass
         if res == "applied":
             applied += 1
             print(f"  ✅ Applied ({applied} so far)")

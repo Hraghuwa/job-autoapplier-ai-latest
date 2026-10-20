@@ -11,6 +11,7 @@ from backend.database import Base
 
 
 class ApplicationStatus(str, PyEnum):
+    prepared = "prepared"  # agent filled the form; the user still has to submit it
     applied = "applied"
     viewed = "viewed"
     shortlisted = "shortlisted"

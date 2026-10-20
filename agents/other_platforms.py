@@ -51,7 +51,28 @@ def is_driver_alive(driver):
         return False
 
 
-def check_for_captcha(driver):
+CAPTCHA_WAIT_S = 600
+
+
+def _caps_ok(config, platform):
+    try:
+        from backend.services.apply_decision import rate_ok
+    except Exception:
+        return True
+    return rate_ok(config or {}, platform)
+
+
+def _record(config, platform, status, title, url):
+    """Count against the caps and emit the structured job record."""
+    try:
+        from backend.services.apply_decision import rate_register, report_job
+        rate_register(config or {}, platform)
+        report_job(config or {}, status, title=title, url=url)
+    except Exception:
+        pass
+
+
+def check_for_captcha(driver, config=None):
     """
     Check for common CAPTCHA / Security challenge elements.
     If found, alert the user and wait.
@@ -90,8 +111,18 @@ def check_for_captcha(driver):
         print("The script will wait for you to proceed.")
         print("!" * 60 + "\n")
         
-        # Wait until the challenge elements are gone
+        # Wait until the challenge elements are gone — bounded, and Stop works,
+        # so an unattended server run can't hang here forever.
+        stop = (config or {}).get("_stop_event")
+        deadline = time.time() + CAPTCHA_WAIT_S
         while True:
+            if stop is not None and stop.is_set():
+                break
+            if time.time() > deadline:
+                print(f"❌ CAPTCHA not solved within {CAPTCHA_WAIT_S // 60} min — stopping this phase.")
+                if stop is not None:
+                    stop.set()
+                break
             time.sleep(5)
             still_there = False
             for sel in captcha_selectors:
@@ -226,7 +257,7 @@ def unstop_apply(driver, keywords, locations, max_jobs, applied_count,
                     print(f"\n  📋 [{keyword_applied+1}] {title}")
                     
                     # ── CAPTCHA CHECK ──
-                    check_for_captcha(driver)
+                    check_for_captcha(driver, config)
 
                     # Step 2: Find apply/register button
                     try:
@@ -247,14 +278,21 @@ def unstop_apply(driver, keywords, locations, max_jobs, applied_count,
                             continue
 
                         if dry_run:
+                            # Dry runs must not put real jobs on the cooldown.
                             print("  [DRY RUN] ✅ Would apply here")
                             applied_count += 1
                             keyword_applied += 1
-                            new_urls.append(url)
-                            applied_urls.add(url)
                             driver.close()
                             driver.switch_to.window(driver.window_handles[0])
                             continue
+
+                        if not _caps_ok(config, "unstop"):
+                            try:
+                                driver.close()
+                                driver.switch_to.window(driver.window_handles[0])
+                            except Exception:
+                                pass
+                            return applied_count, new_urls
 
                         # Step 3: Click Apply
                         print(f"  🎯 Clicking Apply...")
@@ -293,8 +331,12 @@ def unstop_apply(driver, keywords, locations, max_jobs, applied_count,
                                 submitted = result == "submitted"
 
                         if is_review:
+                            _record(config, "unstop", "prepared", title, url)
+                            new_urls.append(url)
+                            applied_urls.add(url)
                             print(f"  ⏸️  Left tab open for user review.")
                         elif submitted:
+                            _record(config, "unstop", "applied", title, url)
                             print(f"  ✅ Applied successfully!")
                             applied_count += 1
                             keyword_applied += 1
@@ -445,7 +487,7 @@ def naukri_apply(driver, keywords, locations, max_jobs, applied_count,
                     print(f"\n  📋 [{keyword_applied+1}] {title}")
                     
                     # ── CAPTCHA CHECK ──
-                    check_for_captcha(driver)
+                    check_for_captcha(driver, config)
 
                     # Step 2: Find apply button
                     try:
@@ -468,14 +510,21 @@ def naukri_apply(driver, keywords, locations, max_jobs, applied_count,
                             continue
 
                         if dry_run:
+                            # Dry runs must not put real jobs on the cooldown.
                             print("  [DRY RUN] ✅ Would apply here")
                             applied_count += 1
                             keyword_applied += 1
-                            new_urls.append(url)
-                            applied_urls.add(url)
                             driver.close()
                             driver.switch_to.window(driver.window_handles[0])
                             continue
+
+                        if not _caps_ok(config, "naukri"):
+                            try:
+                                driver.close()
+                                driver.switch_to.window(driver.window_handles[0])
+                            except Exception:
+                                pass
+                            return applied_count, new_urls
 
                         # Step 3: Click Apply
                         print(f"  🎯 Clicking Apply...")
@@ -514,8 +563,12 @@ def naukri_apply(driver, keywords, locations, max_jobs, applied_count,
                                 submitted = result == "submitted"
 
                         if is_review:
+                            _record(config, "naukri", "prepared", title, url)
+                            new_urls.append(url)
+                            applied_urls.add(url)
                             print(f"  ⏸️  Left tab open for user review.")
                         elif submitted:
+                            _record(config, "naukri", "applied", title, url)
                             print(f"  ✅ Applied successfully!")
                             applied_count += 1
                             keyword_applied += 1

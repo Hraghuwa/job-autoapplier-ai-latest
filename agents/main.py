@@ -41,9 +41,25 @@ import web_search_applier
 # ─────────────────────────────────────────────
 TRACKER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "applied_jobs.json")
 
+
+def _tracker_file():
+    """Per-user tracker in server runs (it was one file shared by every user, so
+    one user's applications made the agent skip those jobs for everyone).
+    The bare CLI (no user_id) keeps the legacy agents/applied_jobs.json."""
+    uid = "".join(c for c in str(CONFIG.get("user_id") or "") if c.isalnum() or c in "-_")
+    if not uid:
+        return TRACKER_FILE
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads", "trackers")
+    os.makedirs(root, exist_ok=True)
+    return os.path.join(root, f"applied_jobs_{uid}.json")
+
+
 def load_tracker():
-    if os.path.exists(TRACKER_FILE):
-        with open(TRACKER_FILE) as f:
+    path = _tracker_file()
+    if not os.path.exists(path) and os.path.exists(TRACKER_FILE):
+        path = TRACKER_FILE  # first run after the per-user split: seed from the shared file
+    if os.path.exists(path):
+        with open(path) as f:
             data = json.load(f)
         if "applied_urls" not in data:
             data["applied_urls"] = []
@@ -51,7 +67,7 @@ def load_tracker():
     return {"total": 0, "cycles": 0, "jobs": [], "applied_urls": []}
 
 def save_tracker(tracker):
-    with open(TRACKER_FILE, "w") as f:
+    with open(_tracker_file(), "w") as f:
         try:
             import fcntl
             fcntl.flock(f, fcntl.LOCK_EX)
@@ -228,7 +244,7 @@ def safe_quit(driver):
 # ─────────────────────────────────────────────
 #  PHASE 1: LINKEDIN AUTO-APPLY (per agent)
 # ─────────────────────────────────────────────
-def run_linkedin_agent(agent, agent_num, total_agents, tracker, shared_driver=None):
+def run_linkedin_agent(agent, agent_num, total_agents, tracker, shared_driver=None, max_jobs=None):
     """Run one role agent on LinkedIn only. Auto-applies.
     If shared_driver is provided, reuses it (no new login needed).
     """
@@ -243,14 +259,19 @@ def run_linkedin_agent(agent, agent_num, total_agents, tracker, shared_driver=No
 
     agent_config = dict(CONFIG)
     agent_config["keywords"] = agent_keywords
+    agent_config["_li_prepared"] = 0
 
     applied_urls = get_applied_urls(tracker)
     applied_count = 0
     owns_driver = shared_driver is None  # only quit if we created it
 
-    linkedin_pwd = CONFIG["linkedin"]["password"]
-    if not linkedin_pwd or linkedin_pwd.startswith("YOUR_"):
-        print(f"  [LinkedIn] ⏭️  Skipping (password not set).")
+    linkedin_pwd = CONFIG["linkedin"].get("password", "")
+    cookies_json = CONFIG.get("linkedin_cookies", "")
+    has_pwd = bool(linkedin_pwd) and not linkedin_pwd.startswith("YOUR_")
+    # Phase 1 logs in once (password OR cookies) and passes shared_driver;
+    # this check only matters when we have to log in ourselves.
+    if shared_driver is None and not (has_pwd or cookies_json):
+        print(f"  [LinkedIn] ⏭️  Skipping (no password or session cookies set).")
         return 0
 
     driver = shared_driver
@@ -259,7 +280,7 @@ def run_linkedin_agent(agent, agent_num, total_agents, tracker, shared_driver=No
             driver = create_driver(headless=CONFIG.get("headless", False))
             print(f"  [LinkedIn] 🔐 Logging in...")
             login_ok = linkedin_applier.login(
-                driver, CONFIG["linkedin"]["email"], linkedin_pwd
+                driver, CONFIG["linkedin"].get("email", ""), linkedin_pwd, cookies_json=cookies_json
             )
             if not login_ok:
                 print(f"  [LinkedIn] ⏭️  Login failed, skipping.")
@@ -270,11 +291,17 @@ def run_linkedin_agent(agent, agent_num, total_agents, tracker, shared_driver=No
 
         print(f"  [LinkedIn] 🎯 Applying to {agent_name} roles...")
         applied_count = linkedin_applier.run(
-            driver, agent_config, 0, CONFIG["max_jobs_per_day"],
+            driver, agent_config, 0, max_jobs if max_jobs is not None else CONFIG["max_jobs_per_day"],
             applied_urls=applied_urls
         )
+        prepared = agent_config.get("_li_prepared", 0)
+        if not agent_config.get("dry_run"):
+            add_applied_urls(tracker, agent_config.get("_li_handled_urls", []))
+        # The phase-level cap spans all role agents (it was per agent).
+        CONFIG["_li_prepared"] = CONFIG.get("_li_prepared", 0) + prepared
 
-        print(f"  ✅ LinkedIn ({agent_name}): Applied to {applied_count} jobs")
+        print(f"  ✅ LinkedIn ({agent_name}): Applied to {applied_count} jobs, "
+              f"{prepared} ready for your review")
 
     except Exception as e:
         print(f"  ❌ LinkedIn error: {e}")

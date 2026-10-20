@@ -95,6 +95,19 @@ def ensure_application_columns() -> None:
                 conn.execute(text(
                     "ALTER TABLE applications ADD COLUMN cover_note_used TEXT"))
                 log.warning("Supervisor: added applications.cover_note_used")
+            # check_schedules dedups on agent_runs.created_at; older DBs lack it.
+            if "created_at" not in {c["name"] for c in insp.get_columns("agent_runs")}:
+                conn.execute(text("ALTER TABLE agent_runs ADD COLUMN created_at TIMESTAMP"))
+                log.warning("Supervisor: added agent_runs.created_at")
+            if "heartbeat_at" not in {c["name"] for c in insp.get_columns("agent_runs")}:
+                conn.execute(text("ALTER TABLE agent_runs ADD COLUMN heartbeat_at TIMESTAMP"))
+                log.warning("Supervisor: added agent_runs.heartbeat_at")
+            if "prepared_count" not in {c["name"] for c in insp.get_columns("agent_runs")}:
+                conn.execute(text("ALTER TABLE agent_runs ADD COLUMN prepared_count INTEGER DEFAULT 0"))
+                log.warning("Supervisor: added agent_runs.prepared_count")
+            if conn.dialect.name == "postgresql":
+                # Native enum on Postgres; SQLite stores the name as plain text.
+                conn.execute(text("ALTER TYPE applicationstatus ADD VALUE IF NOT EXISTS 'prepared'"))
     except Exception as e:
         # Engine may be async (sqlite+aiosqlite) — that's fine, create_all
         # in lifespan handles fresh DBs. Migration is for existing DBs only.
@@ -188,7 +201,10 @@ def ensure_worker_running() -> Optional[subprocess.Popen]:
 
     log_path = os.environ.get("AGENT_WORKER_LOG", "/tmp/worker.log")
     cmd = [py, "-m", "celery", "-A", "backend.workers.celery_app",
-           "worker", "--loglevel=info", "-Q", "agents,default",
+           # -B: this is the only worker when the supervisor spawns it, so it
+           # also runs beat (scheduled missions). Never run -B on two workers.
+           "worker", "-B", "-s", "/tmp/celerybeat-schedule",
+           "--loglevel=info", "-Q", "agents,default",
            "--concurrency", os.environ.get("AGENT_WORKER_CONCURRENCY", "1")]
 
     try:
@@ -240,9 +256,11 @@ def _fail_stale_runs() -> int:
             last = session.query(func.max(AgentLog.created_at)).filter(
                 AgentLog.run_id == run.id
             ).scalar()
-            # If no logs and started_at is past cutoff → stale.
-            # If logs exist but newest is past cutoff → stale.
-            newest = last or run.started_at
+            # Stale only when nothing at all happened past the cutoff: no
+            # classified log AND no output line (heartbeat). Logs alone missed
+            # long quiet stretches (CAPTCHA/login waits, JD fetches) and failed
+            # runs that were still working.
+            newest = max([t for t in (last, run.heartbeat_at, run.started_at) if t], default=None)
             if newest and newest < cutoff:
                 run.status = "failed"
                 run.completed_at = datetime.utcnow()

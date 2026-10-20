@@ -160,9 +160,17 @@ def generate(
     `config` is the agent CONFIG dict (carries per-user groq_api_key /
     gemini_api_key). Env vars are the fallback.
     """
+    global LAST_ERROR
     config = config or {}
+    if config.get("_llm_disabled"):
+        # The worker sets this when the user has no own key and no AI tokens
+        # left: the pipeline falls back to its non-AI paths instead of spending
+        # the operator's keys.
+        LAST_ERROR = "AI disabled for this run (token balance exhausted — add your own key)"
+        return None
     groq_key   = config.get("groq_api_key", "")   or os.environ.get("GROQ_API_KEY", "")
     gemini_key = config.get("gemini_api_key", "") or os.environ.get("GEMINI_API_KEY", "")
+    own = {"groq": bool(config.get("groq_api_key")), "gemini": bool(config.get("gemini_api_key"))}
 
     # Sensible defaults per role; callers can override.
     if max_tokens is None:
@@ -207,6 +215,9 @@ def generate(
                     output_tokens=_estimate_tokens(out),
                     latency_ms=int((_time.time() - started) * 1000),
                     user_id=str(user_id) if user_id else None,
+                    run_id=config.get("run_id"),
+                    billed_to=("local" if provider == "ollama"
+                               else "user" if own.get(provider) else "operator"),
                 )
             except Exception:
                 pass

@@ -192,8 +192,29 @@ def _parse_json(text: str) -> Dict[str, Any]:
 
 
 # In-memory caches (per-user). Survives process lifetime only — DB migration in v2.
-_STORY_BANK: Dict[str, List[Dict[str, Any]]] = {}
-_EVALUATIONS: Dict[str, List[Dict[str, Any]]] = {}
+# Story bank + evaluations live on the profile (were in-process dicts: lost on
+# every restart and invisible to other workers).
+_STORY_KEY, _EVAL_KEY = "_story_bank", "_evaluations"
+_SAVED_CAP = {_STORY_KEY: 200, _EVAL_KEY: 50}
+
+
+async def _saved(db: AsyncSession, user: User, key: str) -> List[Dict[str, Any]]:
+    p = (await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))).scalar_one_or_none()
+    items = ((p.extracted_data or {}) if p else {}).get(key)
+    return list(items) if isinstance(items, list) else []
+
+
+async def _store(db: AsyncSession, user: User, key: str, items: List[Dict[str, Any]]) -> None:
+    from sqlalchemy.orm.attributes import flag_modified
+    p = (await db.execute(select(UserProfile).where(UserProfile.user_id == user.id))).scalar_one_or_none()
+    if p is None:
+        p = UserProfile(user_id=user.id, extracted_data={})
+        db.add(p)
+    data = dict(p.extracted_data or {})
+    data[key] = items[:_SAVED_CAP[key]]
+    p.extracted_data = data
+    flag_modified(p, "extracted_data")
+    await db.commit()
 
 
 async def _cv_summary(db: AsyncSession, user: User) -> str:
@@ -361,23 +382,25 @@ async def evaluate_offer(
         "url": body.url, "company": body.company, "role": body.role,
         "evaluation": data,
     }
-    _EVALUATIONS.setdefault(str(user.id), []).insert(0, record)
+    await _store(db, user, _EVAL_KEY, [record] + await _saved(db, user, _EVAL_KEY))
 
     # Auto-accumulate STAR stories
     try:
+        bank = await _saved(db, user, _STORY_KEY)
+        existing = {st.get("title", "").lower() for st in bank}
         for s in data["blocks"]["F_interview_prep"]["stories"]:
-            bank = _STORY_BANK.setdefault(str(user.id), [])
-            existing = {st["title"].lower() for st in bank}
             if s.get("title") and s["title"].lower() not in existing:
                 bank.append({"id": str(uuid.uuid4()), **s, "source": body.company or "eval"})
+                existing.add(s["title"].lower())
+        await _store(db, user, _STORY_KEY, bank)
     except Exception:
         pass
     return record
 
 
 @router.get("/evaluations")
-async def list_evaluations(user: User = Depends(get_current_user)):
-    return _EVALUATIONS.get(str(user.id), [])
+async def list_evaluations(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return await _saved(db, user, _EVAL_KEY)
 
 
 # ── Multi-Offer Comparison (ofertas.md) ──────────────────────────────────────
@@ -565,22 +588,23 @@ async def undo_tailor(user: User = Depends(get_current_user), db: AsyncSession =
 # ── Story Bank (STAR + Reflection) ───────────────────────────────────────────
 
 @router.get("/story-bank")
-async def list_stories(user: User = Depends(get_current_user)):
-    return _STORY_BANK.get(str(user.id), [])
+async def list_stories(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return await _saved(db, user, _STORY_KEY)
 
 
 @router.post("/story-bank")
-async def add_story(body: StoryIn, user: User = Depends(get_current_user)):
-    bank = _STORY_BANK.setdefault(str(user.id), [])
+async def add_story(body: StoryIn, user: User = Depends(get_current_user),
+                    db: AsyncSession = Depends(get_db)):
     story = {"id": str(uuid.uuid4()), **body.model_dump()}
-    bank.append(story)
+    await _store(db, user, _STORY_KEY, await _saved(db, user, _STORY_KEY) + [story])
     return story
 
 
 @router.delete("/story-bank/{sid}", status_code=204)
-async def delete_story(sid: str, user: User = Depends(get_current_user)):
-    bank = _STORY_BANK.get(str(user.id), [])
-    _STORY_BANK[str(user.id)] = [s for s in bank if s["id"] != sid]
+async def delete_story(sid: str, user: User = Depends(get_current_user),
+                       db: AsyncSession = Depends(get_db)):
+    bank = await _saved(db, user, _STORY_KEY)
+    await _store(db, user, _STORY_KEY, [s for s in bank if s.get("id") != sid])
 
 
 # ── Negotiation ──────────────────────────────────────────────────────────────

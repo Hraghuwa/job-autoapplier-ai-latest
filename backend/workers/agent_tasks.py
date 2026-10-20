@@ -17,6 +17,7 @@ import json
 import re
 import traceback
 import threading
+import time
 from datetime import datetime, date, timedelta, timezone
 
 from celery import Task
@@ -165,7 +166,7 @@ def _check_quota(session, user_id: str, platform: str, plan: str) -> bool:
         UsageQuota.quota_date == today,
     ).first()
     current = quota.applies_count if quota else 0
-    limit = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])["applies_per_48hr"]
+    limit = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])["apply_credits_daily"]
     return current < limit
 
 
@@ -434,7 +435,7 @@ def _plan_apply_limit(user) -> int:
         plan = getattr(user, "plan", "free") or "free"
         plan = str(plan).split(".")[-1].lower()  # handle PlanEnum.free
         limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
-        return int(limits.get("apply_credits_daily", limits.get("applies_per_48hr", 20)))
+        return int(limits.get("apply_credits_daily", 20))
     except Exception:
         return 20
 
@@ -678,6 +679,21 @@ _JOB_CTX_PATTERNS = (
 )
 
 
+def parse_job_record(line: str) -> Optional[dict]:
+    """The structured line appliers print via apply_decision.report_job, or None."""
+    from backend.services.apply_decision import JOB_MARKER
+    line = (line or "").strip()
+    if not line.startswith(JOB_MARKER):
+        return None
+    try:
+        rec = json.loads(line[len(JOB_MARKER):])
+    except ValueError:
+        return None
+    if not isinstance(rec, dict) or rec.get("status") not in ("applied", "prepared"):
+        return None
+    return rec
+
+
 def parse_job_context(line: str) -> Optional[dict]:
     """Return {"title", "company", "url"} if the line announces a job, else None."""
     line = (line or "").strip()
@@ -692,9 +708,12 @@ def parse_job_context(line: str) -> Optional[dict]:
 
 
 def _save_application(session, user_id: str, platform: str, ctx: Optional[dict]) -> Optional[str]:
-    """Persist one applied job so /jobs and /jobs/analytics (the dashboard) see it."""
+    """Persist one applied/prepared job so /jobs and /jobs/analytics (the dashboard) see it.
+    `ctx` is either the legacy {title, company, url} scraped from text lines or a
+    full report_job record (adds status, jd_text, match_score, missing_skills,
+    cover_note_used, tailored_resume_id)."""
     import hashlib
-    from backend.models.application import Application
+    from backend.models.application import Application, ApplicationStatus
     ctx = ctx or {}
     title = (ctx.get("title") or ctx.get("url") or "Unknown role")[:255]
     company = (ctx.get("company") or "")[:255]
@@ -706,9 +725,26 @@ def _save_application(session, user_id: str, platform: str, ctx: Optional[dict])
             Application.user_id == uid, Application.job_hash == job_hash).first()
         # Only dedup real identities; "Unknown role" lines must not collapse together.
         if existing and (url or ctx.get("title")):
+            # A job first prepared, then submitted on a later run, moves forward.
+            if ctx.get("status") == "applied" and existing.status == ApplicationStatus.prepared:
+                existing.status = ApplicationStatus.applied
+                session.commit()
             return str(existing.id)
-        app = Application(user_id=uid, platform=platform, job_title=title,
-                          company=company, job_url=url, job_hash=job_hash)
+        tr_id = ctx.get("tailored_resume_id")
+        try:
+            tr_id = uuid.UUID(str(tr_id)) if tr_id else None
+        except ValueError:
+            tr_id = None
+        app = Application(
+            user_id=uid, platform=platform, job_title=title, company=company,
+            job_url=url, job_hash=job_hash,
+            status=ApplicationStatus(ctx.get("status") or "applied"),
+            jd_text=ctx.get("jd_text") or None,
+            match_score=ctx.get("match_score"),
+            missing_skills=ctx.get("missing_skills") or None,
+            cover_note_used=ctx.get("cover_note_used"),
+            tailored_resume_id=tr_id,
+        )
         session.add(app)
         session.commit()
         return str(app.id)
@@ -744,8 +780,10 @@ def classify_agent_line(line: str):
     is_login_blocked = has_challenge_marker or (has_failure and is_login_msg)
     is_error = has_failure and not is_login_msg
 
-    if ("External form filled" in line or "External form submitted" in line
-            or "✅ Applied" in line or "✅ SUCCESS" in line):
+    # (LinkedIn prints these AFTER its structured record, so they're never double-counted.)
+    if "External form filled" in line or "paused for review" in line:
+        return {"category": "prepared", "event": {"event": "prepared", "message": line}}
+    if "External form submitted" in line or "✅ Applied" in line or "✅ SUCCESS" in line:
         return {"category": "applied", "event": {"event": "applied", "message": line}}
     if "⏭" in line or "Already applied" in line or "Skipping" in line:
         return {"category": "skipped", "event": {"event": "skipped", "message": line}}
@@ -971,7 +1009,7 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
     skipped = 0
     errors = 0
     error_reasons: list = []  # collect error messages for post-run summary
-    stats = {"applied": 0, "skipped": 0, "errors": 0}
+    stats = {"applied": 0, "prepared": 0, "skipped": 0, "errors": 0}
 
     # Create a stop event for this run — used by the in-process path; the
     # subprocess path honours stop via the Redis pause:{run_id} key.
@@ -1010,8 +1048,33 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
         # Per-line handler: classify → log + publish + accumulate stats. Shared
         # by both executors so behaviour is identical regardless of path.
         job_ctx: dict = {}
+        last_beat = [0.0]
 
         def _handle_line(line):
+            # Any output = alive. Throttled so chatty phases don't write per line.
+            if time.time() - last_beat[0] > 30:
+                last_beat[0] = time.time()
+                try:
+                    _update_run(session, run_id, heartbeat_at=datetime.utcnow())
+                except Exception:
+                    session.rollback()
+            rec = parse_job_record(line)
+            if rec:
+                # Structured record from report_job — authoritative. From now on
+                # the legacy applied/prepared text lines are only log noise.
+                stats["structured"] = True
+                cat = rec["status"]
+                stats[cat] += 1
+                app_id = None if dry_run else _save_application(session, user_id, platform, rec)
+                msg = f"{'Applied' if cat == 'applied' else 'Prepared — review & submit'}: {rec.get('title') or rec.get('url')}"
+                _log_event(session, run_id, cat, msg, app_id)
+                job_ctx.clear()
+                _update_run(session, run_id, applied_count=stats["applied"],
+                            prepared_count=stats["prepared"], skipped_count=stats["skipped"],
+                            error_count=stats["errors"])
+                publish(user_id, {"event": cat, "message": msg, "run_id": run_id,
+                                  "job_title": rec.get("title", ""), "company": rec.get("company", "")})
+                return
             ctx = parse_job_context(line)
             if ctx:
                 job_ctx.clear()
@@ -1020,15 +1083,18 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
             if not res:
                 return
             cat = res["category"]
+            if cat in ("applied", "prepared") and stats.get("structured"):
+                cat = "ping"  # already counted from the structured record
             event = dict(res["event"])
             event["run_id"] = run_id
-            if cat == "applied":
-                stats["applied"] += 1
-                app_id = None if dry_run else _save_application(session, user_id, platform, job_ctx)
+            if cat in ("applied", "prepared"):
+                stats[cat] += 1
+                app_id = None if dry_run else _save_application(
+                    session, user_id, platform, {**job_ctx, "status": cat})
                 event["job_title"] = job_ctx.get("title", "")
                 event["company"] = job_ctx.get("company", "")
                 job_ctx.clear()
-                _log_event(session, run_id, "applied", line, app_id)
+                _log_event(session, run_id, cat, line, app_id)
             elif cat == "skipped":
                 stats["skipped"] += 1
                 _log_event(session, run_id, "skipped", line)
@@ -1042,16 +1108,45 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
                 error_reasons.append(line[:200])
             elif cat == "ping":
                 _log_event(session, run_id, "info", line)
-            if cat in ("applied", "skipped", "error", "login_challenge"):
+            if cat in ("applied", "prepared", "skipped", "error", "login_challenge"):
                 # Live counts — run cards read agent_runs, which was only
                 # written when the run finished.
                 _update_run(session, run_id, applied_count=stats["applied"],
+                            prepared_count=stats["prepared"],
                             skipped_count=stats["skipped"], error_count=stats["errors"])
             publish(user_id, event)
 
         config = _build_config(user, profile)
         config["run_id"] = run_id
         config["dry_run"] = bool(dry_run)
+        # AI metering: missions used to spend the operator's keys for free.
+        # Users without their own key spend ai_tokens_balance; at 0 the run
+        # still goes ahead with AI off (static cover note, untailored resume,
+        # fit gate defaults to apply) instead of failing.
+        from backend.services.plan_gate import refill_ai_tokens, uses_own_key
+        own_key = uses_own_key(user)
+        if not own_key:
+            try:
+                refill_ai_tokens(user)
+                session.commit()
+                if (user.ai_tokens_balance or 0) <= 0:
+                    config["_llm_disabled"] = True
+                    _log_event(session, run_id, "info",
+                               "AI features off for this run: AI token balance is used up. "
+                               "Add your own Gemini/Groq key in Settings to keep tailoring.")
+            except Exception as e:
+                session.rollback()
+                logger.warning("AI token check skipped: %s", e)
+        # Today's applications across all platforms → apply_decision.rate_ok
+        # enforces the plan's daily cap even when Redis (the limiter) is down.
+        try:
+            from backend.models.application import Application
+            midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            config["_applied_today"] = session.query(Application).filter(
+                Application.user_id == user.id, Application.applied_at >= midnight).count()
+        except Exception as e:
+            session.rollback()
+            logger.warning("applied-today count unavailable: %s", e)
         # Past callback rates per job archetype → fit_scorer nudges the score
         # toward roles that actually answered this user. Best-effort.
         try:
@@ -1069,13 +1164,30 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
 
         # A crashed/closed browser leaves no result file (applied=0) even
         # though applies were streamed — never report fewer than we saw.
-        applied = max(applied or 0, stats["applied"])
+        # With structured records the streamed count is exact (the applier's own
+        # return value may include prepared-but-unsubmitted forms).
+        applied = stats["applied"] if stats.get("structured") else max(applied or 0, stats["applied"])
+        prepared = stats["prepared"]
         skipped = stats["skipped"]
         errors = stats["errors"]
-        _increment_quota(session, user_id, platform, applied)
+        # Prepared forms still spend the platform's daily budget (ban risk is the same).
+        _increment_quota(session, user_id, platform, applied + prepared)
+        if not own_key:
+            try:
+                from backend.services.llm_usage import operator_calls_for_run
+                used = operator_calls_for_run(session, user.id, run_id)
+                if used:
+                    user.ai_tokens_balance = max(0, (user.ai_tokens_balance or 0) - used)
+                    session.commit()
+                    _log_event(session, run_id, "info", f"AI calls this run: {used} "
+                               f"(balance left: {user.ai_tokens_balance})")
+            except Exception as e:
+                session.rollback()
+                logger.warning("AI token debit skipped for run %s: %s", run_id, e)
         was_stopped = stop_event.is_set() or _redis_paused(run_id)
         final_status = "paused" if was_stopped else "completed"
-        _log_event(session, run_id, "info", f"Phase {phase} {'stopped' if was_stopped else 'completed'}. Applied: {applied}")
+        _log_event(session, run_id, "info", f"Phase {phase} {'stopped' if was_stopped else 'completed'}. "
+                   f"Applied: {applied}, prepared for your review: {prepared}")
         try:
             learned = _learn_from_run_logs(session, user_id, run_id)
             if learned:
@@ -1083,12 +1195,14 @@ def _run_phase_logic(user_id: str, phase: int, run_id: str, task_self=None, dry_
         except Exception as _learn_err:
             logger.warning("Self-learning skipped for run %s: %s", run_id, _learn_err)
         _update_run(session, run_id, status=final_status, completed_at=datetime.utcnow(),
-                    applied_count=applied, skipped_count=skipped, error_count=errors)
+                    applied_count=applied, prepared_count=prepared,
+                    skipped_count=skipped, error_count=errors)
         publish(user_id, {
             "type": "run_complete",
             "phase": phase,
             "run_id": run_id,
             "total_applied": applied,
+            "total_prepared": prepared,
             "total_skipped": skipped,
             "error_reasons": error_reasons[-10:],  # last 10 errors max
             "summary": f"Stopped by user — {applied} applied." if was_stopped else f"Phase {phase} done — {applied} applications submitted.",
@@ -1177,10 +1291,11 @@ def check_schedules():
 
             phases = schedule.get("phases", [])
             for phase in phases:
+                # started_at covers rows from before created_at existed.
                 run = session.query(AgentRun).filter(
                     AgentRun.user_id == user.id,
                     AgentRun.phase == phase,
-                    AgentRun.created_at >= since,
+                    (AgentRun.created_at >= since) | (AgentRun.started_at >= since),
                 ).first()
                 
                 if not run:
@@ -1189,13 +1304,16 @@ def check_schedules():
                         id=uuid.UUID(run_id),
                         user_id=user.id,
                         phase=phase,
+                        platform=PHASE_PLATFORM_MAP.get(phase, "unknown"),
                         status=RunStatus.queued,
                     )
                     session.add(new_run)
                     session.commit()
                     run_phase_task.apply_async(args=[str(user.id), phase, run_id], queue="agents")
                     logger.info(f"Scheduled phase {phase} for user {user.id}")
-    except Exception as e:
-        logger.error(f"Error checking schedules: {e}")
+    except Exception:
+        # Was logger.error(str) — an AttributeError here silently disabled every
+        # schedule for months. Keep the traceback.
+        logger.exception("Error checking schedules")
     finally:
         session.close()

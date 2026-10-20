@@ -31,9 +31,14 @@ class AgentRun(Base):
     celery_task_id: Mapped[Optional[str]] = mapped_column(String(255))
     status: Mapped[RunStatus] = mapped_column(Enum(RunStatus), default=RunStatus.queued)
 
+    # Set on insert; the scheduler dedups on it (started_at stays NULL while queued).
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    # Last time the run printed anything (the watchdog's liveness signal).
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     applied_count: Mapped[int] = mapped_column(Integer, default=0)
+    prepared_count: Mapped[int] = mapped_column(Integer, default=0)  # filled, awaiting the user's submit
     skipped_count: Mapped[int] = mapped_column(Integer, default=0)
     error_count: Mapped[int] = mapped_column(Integer, default=0)
     config_snapshot: Mapped[Optional[Dict]] = mapped_column(JSONB)

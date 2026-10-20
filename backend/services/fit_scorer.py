@@ -51,6 +51,7 @@ class FitDecision:
     vetoed: bool
     reasons: List[str] = field(default_factory=list)
     components: Dict[str, float] = field(default_factory=dict)
+    missing: List[str] = field(default_factory=list)  # must-haves the profile lacks
 
 
 def _as_skill_set(value: Any) -> set:
@@ -103,13 +104,10 @@ def _covers(term: str, haystack_words: set, haystack_text: str) -> bool:
     return False
 
 
-def _must_have_coverage(must_haves: List[str], profile: Dict[str, Any]) -> float:
-    if not must_haves:
-        return 1.0  # JD makes no hard demands → nothing to miss
+def _missing_must_haves(must_haves: List[str], profile: Dict[str, Any]) -> List[str]:
     text = _profile_text(profile)
     words = set(re.split(r"\W+", text))
-    hits = sum(1 for m in must_haves if _covers(m, words, text))
-    return hits / len(must_haves)
+    return [m for m in must_haves if not _covers(m, words, text)]
 
 
 def _title_match(keywords: List[str], title: Optional[str], profile: Dict[str, Any]) -> float:
@@ -187,7 +185,8 @@ def score_fit(jd_sig, profile: Dict[str, Any], *, title: Optional[str] = None,
                             "seniority_fit": 0.0, "red_flag_penalty": 1.0},
             )
 
-        cov = _must_have_coverage(must_haves, profile)
+        missing = _missing_must_haves(must_haves, profile)
+        cov = 1 - len(missing) / len(must_haves) if must_haves else 1.0
         tit = _title_match(keywords, title, profile)
         sen = _seniority_fit(seniority, profile)
         soft_penalty = 0.10 if red_flags else 0.0  # vague flags nudge down
@@ -216,6 +215,7 @@ def score_fit(jd_sig, profile: Dict[str, Any], *, title: Optional[str] = None,
                         "seniority_fit": round(sen, 3),
                         "red_flag_penalty": soft_penalty,
                         "outcome_points": outcome_pts},
+            missing=missing,
         )
     except Exception:
         # Decision engine must never break an applier — fail OPEN to a neutral

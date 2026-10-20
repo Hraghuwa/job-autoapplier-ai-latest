@@ -34,4 +34,5 @@ ENV PYTHONPATH=/app \
     CHROME_BIN=/usr/bin/chromium \
     CHROMEDRIVER_PATH=/usr/bin/chromedriver
 
-CMD ["celery", "-A", "backend.workers.celery_app", "worker", "--concurrency=4", "--loglevel=info", "-Q", "agents,default"]
+# -B runs beat (scheduled missions) in this worker. Run exactly ONE worker with -B.
+CMD ["celery", "-A", "backend.workers.celery_app", "worker", "-B", "-s", "/tmp/celerybeat-schedule", "--concurrency=4", "--loglevel=info", "-Q", "agents,default"]

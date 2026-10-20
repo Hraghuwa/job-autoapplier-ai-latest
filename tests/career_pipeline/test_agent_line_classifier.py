@@ -21,7 +21,9 @@ def test_blank_and_noise_return_none():
 
 def test_applied_markers():
     assert _cat("✅ Applied to Acme") == "applied"
-    assert _cat("External form filled for Foo") == "applied"
+    assert _cat("External form submitted for Foo") == "applied"
+    # Filled but not submitted is "prepared" — counting it as applied inflated runs.
+    assert _cat("External form filled for Foo") == "prepared"
 
 
 def test_skipped_markers():

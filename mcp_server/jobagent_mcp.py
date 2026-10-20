@@ -161,8 +161,9 @@ TOOLS = [
      lambda api, a: api.call("GET", f"/agents/runs/{urllib.parse.quote(a['run_id'])}/logs")),
     ("stop_mission", "Stop a running mission.", _s({"run_id": STR}, ["run_id"]),
      lambda api, a: api.call("POST", f"/agents/pause/{urllib.parse.quote(a['run_id'])}")),
-    ("list_applications", "Tracked applications, newest first.",
-     _s({"status": {"type": "string", "enum": ["applied", "viewed", "shortlisted", "interview", "offer", "rejected"]},
+    ("list_applications", "Tracked applications, newest first. 'prepared' = the agent filled the form "
+     "and left it open; the user still has to submit it.",
+     _s({"status": {"type": "string", "enum": ["prepared", "applied", "viewed", "shortlisted", "interview", "offer", "rejected"]},
          "search": {**STR, "description": "Company or title contains"}, "limit": INT}),
      lambda api, a: api.call("GET", _q("/jobs", status=a.get("status"), search=a.get("search"),
                                        limit=a.get("limit") or 50))),
@@ -170,7 +171,7 @@ TOOLS = [
      "Update an application's status (e.g. after reading an interview invite or rejection in the user's email). "
      "Put the evidence or interviewer feedback in note — it feeds the next round's interview prep.",
      _s({"application_id": STR,
-         "status": {"type": "string", "enum": ["applied", "viewed", "shortlisted", "interview", "offer", "rejected"]},
+         "status": {"type": "string", "enum": ["prepared", "applied", "viewed", "shortlisted", "interview", "offer", "rejected"]},
          "note": STR}, ["application_id", "status"]),
      lambda api, a: api.call("PATCH", f"/jobs/{urllib.parse.quote(a['application_id'])}/status",
                              {"status": a["status"], "note": a.get("note") or ""})),

@@ -15,6 +15,7 @@ import { DroppableColumn } from './_components/DroppableColumn'
 import { DraggableCard } from './_components/DraggableCard'
 
 const STATUS_VARIANTS: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
+  prepared: 'outline',  // agent filled the form — you still need to submit it
   applied: 'secondary',
   viewed: 'secondary',
   shortlisted: 'default',
@@ -23,7 +24,7 @@ const STATUS_VARIANTS: Record<string, 'default' | 'secondary' | 'destructive' | 
   rejected: 'destructive',
 }
 
-const KANBAN_COLS = ['applied', 'viewed', 'shortlisted', 'interview', 'offer', 'rejected']
+const KANBAN_COLS = ['prepared', 'applied', 'viewed', 'shortlisted', 'interview', 'offer', 'rejected']
 
 export default function JobsPage() {
   const { user } = useAuth()

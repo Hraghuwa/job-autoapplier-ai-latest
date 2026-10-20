@@ -428,6 +428,8 @@ def run_wellfound_phase():
             return 0
 
         print("  [Phase 3] ✅ Logged in — searching jobs...")
+        tracker = load_tracker()
+        skip = get_applied_urls(tracker)  # was set(): Wellfound re-applied every run
         applied, applied_urls = wellfound_applier.search_and_apply(
             driver,
             keywords=CONFIG["keywords"],
@@ -436,8 +438,14 @@ def run_wellfound_phase():
             applied_count=0,
             config=CONFIG,
             dry_run=CONFIG.get("dry_run", False),
-            applied_urls=set()
+            applied_urls=skip
         )
+        if not CONFIG.get("dry_run", False):
+            if hasattr(applied_urls, "applied_map"):
+                tracker["applied_at"] = applied_urls.applied_map
+                save_tracker(tracker)
+            else:
+                add_applied_urls(tracker, list(applied_urls))
 
         # Auto-fill any external tabs Wellfound redirected to
         _autofill_all_tabs(driver, "Phase 3")

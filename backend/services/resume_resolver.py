@@ -67,6 +67,7 @@ def resolve_resume_path(config: Dict[str, Any], *, jd_text: Optional[str] = None
             log.warning("resume_resolver: tailored PDF not ATS-readable (%s) — using static.",
                         "; ".join(problems))
             return static
+        config["_tailored_resume_id"] = str(entry.id)  # → Application.tailored_resume_id
         return entry.pdf_path
     except Exception as e:
         log.warning("resume_resolver: tailoring failed (%s) — falling back to static.", e)

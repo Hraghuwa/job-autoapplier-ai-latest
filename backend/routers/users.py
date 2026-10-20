@@ -142,7 +142,7 @@ async def usage(user: User = Depends(get_current_user), db: AsyncSession = Depen
         plan_str = user.plan.value if hasattr(user.plan, "value") else str(user.plan)
     
     limit_info = PLAN_LIMITS.get(plan_str, PLAN_LIMITS["free"])
-    limit = limit_info.get("applies_per_48hr", 20)
+    limit = limit_info.get("apply_credits_daily", 20)
     
     return UsageOut(
         tokens_used_today=user.tokens_used_today or 0,

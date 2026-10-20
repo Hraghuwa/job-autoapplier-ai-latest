@@ -8,6 +8,7 @@ Uses Gemini AI for intelligent form field answers.
 import time
 import random
 import os
+import re
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
@@ -1235,6 +1236,34 @@ def handle_external_application(driver, config, original_handles, linkedin_tab):
         return None
 
 
+def _handled(config, applied_count):
+    """Applied + prepared-for-review this run. Caps count both: with auto_submit
+    off nothing is ever 'applied', and counting only applies looped forever."""
+    return applied_count + config.get("_li_prepared", 0)
+
+
+def _rate(action, config):
+    """Shared caps (apply_decision.rate_ok / rate_register). Fail-open."""
+    try:
+        from backend.services.apply_decision import rate_ok, rate_register
+    except Exception:
+        return True
+    if action == "ok":
+        return rate_ok(config, "linkedin")
+    rate_register(config, "linkedin", success=(action == "register"))
+    return True
+
+
+def _report(config, status, title, url):
+    if url:
+        config.setdefault("_li_handled_urls", []).append(url)  # → tracker cooldown
+    try:
+        from backend.services.apply_decision import report_job
+        report_job(config, status, title=title, company=config.get("_li_company", ""), url=url)
+    except Exception:
+        pass
+
+
 def apply_from_search_page(driver, config, applied_count, max_jobs, current_keywords=None, dry_run=False):
     """
     Stay on the search results page.
@@ -1296,7 +1325,7 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
     processed = 0
     _stop = config.get("_stop_event")  # threading.Event — set when user clicks Stop
 
-    while card_index < total_count and applied_count < max_jobs:
+    while card_index < total_count and _handled(config, applied_count) < max_jobs:
         # ── Stop check: bail out immediately when user clicks Stop ──
         if _stop and _stop.is_set():
             print("  [LinkedIn] 🛑 Stop requested — exiting card loop.")
@@ -1384,6 +1413,18 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             except Exception:
                 config["current_jd_text"] = ""
 
+            _m = re.search(r"currentJobId=(\d+)|/jobs/view/(\d+)", driver.current_url or "")
+            _job_url = f"https://www.linkedin.com/jobs/view/{_m.group(1) or _m.group(2)}/" if _m else ""
+            try:
+                config["_li_company"] = driver.find_element(By.CSS_SELECTOR,
+                    "div.job-details-jobs-unified-top-card__company-name, "
+                    "div.jobs-unified-top-card__company-name").text.strip()[:120]
+            except Exception:
+                config["_li_company"] = ""
+            if _job_url and _job_url in config.get("_applied_urls", ()):
+                print(f"  ⏭️  Already applied (tracked): {job_title}")
+                continue
+
             # ── Duration filter: only for internship searches + user set explicit duration ──
             _intern_types = {"internship", "trainee", "fresher"}
             _searching_intern = any(t.lower() in _intern_types for t in config.get("employment_types", []))
@@ -1454,6 +1495,12 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
                 print(f"  ⏭️  Already applied to: {job_title}")
                 continue
 
+            # ── Rate limiter BEFORE clicking (prevents account bans) ─────────
+            # Was checked after the click, by which point an external form had
+            # already been filled/submitted past the cap.
+            if not _rate("ok", config):
+                return applied_count
+
             print(f"  🚀 APPLYING: {job_title}...")
             handles_before = set(driver.window_handles)
             linkedin_tab = driver.current_window_handle
@@ -1462,52 +1509,34 @@ def apply_from_search_page(driver, config, applied_count, max_jobs, current_keyw
             # Check if an external tab opened first (waits 3s itself)
             ext_result = handle_external_application(driver, config, handles_before, linkedin_tab)
 
-            # ── Rate limiter check (prevents account bans) ───────────────────
-            try:
-                from backend.services.rate_limits import default_limiter
-                _uid = str(config.get("user_id", ""))
-                _ok, _reason = default_limiter.can_apply(_uid, "linkedin", total_cap=config.get("plan_apply_limit"))
-                if not _ok:
-                    print(f"  🛑 Rate limit reached: {_reason}")
-                    return applied_count
-            except Exception:
-                pass  # limiter unavailable — proceed without it
-
             if ext_result in ("submitted", "filled"):
-                applied_count += 1
+                if ext_result == "submitted":
+                    applied_count += 1
+                    _report(config, "applied", job_title, _job_url)
+                else:
+                    config["_li_prepared"] = config.get("_li_prepared", 0) + 1
+                    _report(config, "prepared", job_title, _job_url)
+                _rate("register", config)
                 label = "submitted" if ext_result == "submitted" else "filled (review & submit)"
-                print(f"  📊 External form {label}: {applied_count}/{max_jobs}\n")
-                try:
-                    from backend.services.rate_limits import default_limiter
-                    _uid2 = str(config.get("user_id", ""))
-                    default_limiter.register_apply(_uid2, "linkedin")
-                    default_limiter.register_success(_uid2, "linkedin")  # reset consecutive-failure counter
-                except Exception:
-                    pass
+                print(f"  📊 External form {label}: {_handled(config, applied_count)}/{max_jobs}\n")
             else:
                 # No external tab — process LinkedIn Easy Apply modal
                 result = process_easy_apply_modal(driver, config, dry_run=dry_run)
 
                 if result == "review":
+                    config["_li_prepared"] = config.get("_li_prepared", 0) + 1
+                    _report(config, "prepared", job_title, _job_url)
+                    _rate("register", config)
                     print(f"  ⏸️  LinkedIn Easy Apply paused for review: {job_title}")
                 elif result == "submitted" or result == "closed":
                     applied_count += 1
+                    _report(config, "applied", job_title, _job_url)
+                    _rate("register", config)
                     print(f"  📊 Progress: {applied_count}/{max_jobs} applications\n")
-                    try:
-                        from backend.services.rate_limits import default_limiter
-                        _uid2 = str(config.get("user_id", ""))
-                        default_limiter.register_apply(_uid2, "linkedin")
-                        default_limiter.register_success(_uid2, "linkedin")  # reset consecutive-failure counter
-                    except Exception:
-                        pass
                 else:
                     print(f"  ⚠️  Could not complete: {job_title}")
                     dismiss_modal(driver)
-                    try:
-                        from backend.services.rate_limits import default_limiter
-                        default_limiter.register_failure(str(config.get("user_id", "")), "linkedin")
-                    except Exception:
-                        pass
+                    _rate("fail", config)
 
             # Adaptive delay between applications — escalates after consecutive
             # failures to dodge bot detection. Fail-open to a flat jittered wait.
@@ -1538,6 +1567,8 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
     """
     if applied_urls is None:
         applied_urls = set()
+    config["_applied_urls"] = applied_urls  # apply_from_search_page skips tracked jobs
+    config.setdefault("_li_prepared", 0)
     min_per_kw = config.get("min_per_keyword", 10)
     keyword_stats = {}
     _stop = config.get("_stop_event")  # threading.Event — set when user clicks Stop
@@ -1548,7 +1579,7 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
 
     cycle = 0
     while True:
-        if applied_count >= max_jobs:
+        if _handled(config, applied_count) >= max_jobs:
             print(f"[LinkedIn] ✅ Reached max_jobs={max_jobs}. Stopping.")
             break
         if _stop and _stop.is_set():
@@ -1560,7 +1591,7 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
 
         cycle_applied = 0
         for keyword in keywords:
-            if applied_count >= max_jobs or (_stop and _stop.is_set()):
+            if _handled(config, applied_count) >= max_jobs or (_stop and _stop.is_set()):
                 break
 
             kw_applied = 0
@@ -1571,12 +1602,12 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
             print(f"{'═' * 60}")
 
             for location in config.get("locations", ["India"]):
-                if applied_count >= max_jobs or (_stop and _stop.is_set()):
+                if _handled(config, applied_count) >= max_jobs or (_stop and _stop.is_set()):
                     break
 
                 # Paginate through multiple pages of search results
                 for page in range(5):  # Up to 5 pages per location
-                    if applied_count >= max_jobs or (_stop and _stop.is_set()):
+                    if _handled(config, applied_count) >= max_jobs or (_stop and _stop.is_set()):
                         break
 
                     start = page * 25  # LinkedIn uses 25 results per page
@@ -1626,12 +1657,12 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
                     driver.get(search_url)
                     time.sleep(5)
 
-                    before = applied_count
+                    before = _handled(config, applied_count)
                     applied_count = apply_from_search_page(
                         driver, config, applied_count, max_jobs,
                         current_keywords=[keyword], dry_run=dry_run
                     )
-                    page_applied = applied_count - before
+                    page_applied = _handled(config, applied_count) - before
                     kw_applied += page_applied
                     cycle_applied += page_applied
 
@@ -1648,9 +1679,14 @@ def run(driver, config, applied_count, max_jobs, applied_urls=None, dry_run=Fals
         # After one full cycle, brief pause then loop again unless stopped
         if _stop and _stop.is_set():
             break
-        if applied_count >= max_jobs:
+        if _handled(config, applied_count) >= max_jobs:
             break
-        print(f"\n[LinkedIn] ⏳ Cycle {cycle} complete ({cycle_applied} applied). Looping again in 10s…")
+        if cycle_applied == 0:
+            # A full pass over every keyword/location found nothing new — another
+            # pass would re-scan the same results forever.
+            print(f"[LinkedIn] ✅ No new matching jobs this cycle — stopping.")
+            break
+        print(f"\n[LinkedIn] ⏳ Cycle {cycle} complete ({cycle_applied} handled). Looping again in 10s…")
         time.sleep(10)
 
     print(f"\n{'═' * 60}")
