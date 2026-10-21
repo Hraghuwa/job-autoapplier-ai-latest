@@ -190,7 +190,9 @@ Workers: `workers/agent_tasks.py` (`run_phase_task`, `check_schedules`, quota ch
 
 `mcp_server/jobagent_mcp.py` exposes JobAgent to Claude over stdio. Authenticate once with `python mcp_server/jobagent_mcp.py login`.
 
-Tools: `get_profile`, `set_job_targets`, `scan_portals`, `save_mission_targets`, `list_mission_targets`, `remove_mission_target`, `tailor_cv`, `apply_cv_tailoring`, `undo_cv_tailoring`, `launch_mission`, `mission_status`, `mission_logs`, `stop_mission`, `list_applications`, `record_outcome`, `interview_prep`, `followups_due`, `draft_followup`, `skill_gaps`, `study_plan`, `evaluate_offer`.
+Tools: `get_profile`, `set_job_targets`, `scan_portals`, `save_mission_targets`, `list_mission_targets`, `remove_mission_target`, `tailor_cv`, `apply_cv_tailoring`, `undo_cv_tailoring`, `launch_mission`, `check_ready`, `schedule_daily_missions`, `get_schedule`, `progress_report`, `mission_status`, `mission_logs`, `stop_mission`, `list_applications`, `record_outcome`, `interview_prep`, `followups_due`, `draft_followup`, `skill_gaps`, `study_plan`, `evaluate_offer`.
+
+Daily auto-apply: ask Claude to "apply to LinkedIn, Wellfound and web-search jobs every day at 9:30 IST". It runs `check_ready`, then `schedule_daily_missions` (Pro plan, cron stored in UTC and picked up by Celery Beat). Every application is saved and `progress_report` returns totals, per-platform and per-status counts, response rate and recent run results.
 
 Claude Code commands in `.claude/commands/`: `job-setup`, `job-apply`, `job-daily`, `job-weekly`, `job-interview`.
 

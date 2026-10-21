@@ -110,6 +110,35 @@ def _phases(args):
     return [PHASES[n] for n in names]
 
 
+def _daily_cron(args):
+    """Turn {time: "HH:MM", utc_offset: "+05:30"} into a daily cron in server time (UTC)."""
+    if args.get("cron"):
+        return args["cron"]
+    try:
+        hh, mm = (int(x) for x in (args.get("time") or "09:00").split(":"))
+        off = args.get("utc_offset") or "+00:00"
+        sign = -1 if off.startswith("-") else 1
+        oh, om = (int(x) for x in off.lstrip("+-").split(":"))
+    except ValueError:
+        raise ApiError("time must be HH:MM and utc_offset like +05:30")
+    if not (0 <= hh < 24 and 0 <= mm < 60):
+        raise ApiError("time must be HH:MM (24h)")
+    total = (hh * 60 + mm - sign * (oh * 60 + om)) % (24 * 60)
+    return f"{total % 60} {total // 60} * * *"
+
+
+def _schedule_view(sched):
+    by_num = {v: k for k, v in PHASES.items()}
+    return {**sched, "missions": [by_num.get(p, p) for p in sched.get("phases") or []],
+            "note": "cron is in server time (UTC)"}
+
+
+def _progress(api, args):
+    stats = api.call("GET", "/jobs/analytics")
+    runs = api.call("GET", "/agents/runs") or []
+    return {"applications": stats, "recent_runs": runs[: args.get("runs") or 10]}
+
+
 def _s(props, required=()):
     return {"type": "object", "properties": props, "required": list(required)}
 
@@ -155,6 +184,29 @@ TOOLS = [
      _s({"missions": {"type": "array", "items": {"type": "string", "enum": sorted(PHASES)}},
          "dry_run": {**BOOL, "description": "Find and fill without submitting"}}, ["missions"]),
      lambda api, a: api.call("POST", "/agents/run", {"phases": _phases(a), "dry_run": bool(a.get("dry_run"))})),
+    ("check_ready",
+     "Pre-flight check before running missions: resume, job titles/keywords, and which platforms "
+     "(LinkedIn, Wellfound, ...) have saved logins. Missions without a login are skipped.", _s({}),
+     lambda api, a: api.call("GET", "/agents/preflight")),
+    ("schedule_daily_missions",
+     "Make JobAgent find and apply to jobs automatically every day (Pro plan). missions: any of linkedin, "
+     "internshala, wellfound, naukri, unstop, web_search, form_fill. Every application is saved and shows up in "
+     "list_applications / progress_report. Confirm with the user first: it submits real applications daily.",
+     _s({"missions": {"type": "array", "items": {"type": "string", "enum": sorted(PHASES)}},
+         "time": {**STR, "description": "Daily run time, HH:MM 24h, in the user's timezone (default 09:00)"},
+         "utc_offset": {**STR, "description": "User's UTC offset, e.g. +05:30 for India (default +00:00)"},
+         "cron": {**STR, "description": "Raw cron in server UTC time; overrides time/utc_offset"},
+         "enabled": {**BOOL, "description": "false pauses the daily schedule"}}, ["missions"]),
+     lambda api, a: {**api.call("POST", "/agents/schedule", {
+         "cron": _daily_cron(a), "phases": _phases(a), "enabled": a.get("enabled", True)}),
+         "missions": a["missions"]}),
+    ("get_schedule", "Show the user's daily auto-apply schedule.", _s({}),
+     lambda api, a: _schedule_view(api.call("GET", "/agents/schedule") or {})),
+    ("progress_report",
+     "Overall job-search progress: total applied, this week/month, per platform and status, response rate, "
+     "daily applies for 30 days, plus the latest mission runs with applied/skipped/error counts.",
+     _s({"runs": {**INT, "description": "How many recent runs to include (default 10)"}}),
+     _progress),
     ("mission_status", "Recent AI Mission runs with status and applied/skipped counts.", _s({}),
      lambda api, a: api.call("GET", "/agents/runs")),
     ("mission_logs", "Log lines from one mission run.", _s({"run_id": STR}, ["run_id"]),
@@ -164,9 +216,10 @@ TOOLS = [
     ("list_applications", "Tracked applications, newest first. 'prepared' = the agent filled the form "
      "and left it open; the user still has to submit it.",
      _s({"status": {"type": "string", "enum": ["prepared", "applied", "viewed", "shortlisted", "interview", "offer", "rejected"]},
+         "platform": {**STR, "description": "e.g. linkedin, wellfound, web_search"},
          "search": {**STR, "description": "Company or title contains"}, "limit": INT}),
-     lambda api, a: api.call("GET", _q("/jobs", status=a.get("status"), search=a.get("search"),
-                                       limit=a.get("limit") or 50))),
+     lambda api, a: api.call("GET", _q("/jobs", status=a.get("status"), platform=a.get("platform"),
+                                       search=a.get("search"), limit=a.get("limit") or 50))),
     ("record_outcome",
      "Update an application's status (e.g. after reading an interview invite or rejection in the user's email). "
      "Put the evidence or interviewer feedback in note — it feeds the next round's interview prep.",
@@ -210,9 +263,9 @@ def handle(msg, state):
         return {"jsonrpc": "2.0", "id": mid, "result": {
             "protocolVersion": version, "capabilities": {"tools": {}},
             "serverInfo": {"name": "jobagent", "version": "1.0.0"},
-            "instructions": "JobAgent automates the user's job search. Typical flow: scan_portals → "
+            "instructions": "JobAgent automates the user's job search. Typical flow: check_ready → scan_portals → "
                             "save_mission_targets → tailor_cv/apply_cv_tailoring (with the user's approval) → "
-                            "launch_mission → mission_status → record_outcome / followups_due / interview_prep. "
+                            "launch_mission (or schedule_daily_missions for every day) → progress_report / mission_status → record_outcome / followups_due / interview_prep. "
                             "Ask before launching a non-dry-run mission: it submits real applications."}}
     if method == "ping":
         return {"jsonrpc": "2.0", "id": mid, "result": {}}
