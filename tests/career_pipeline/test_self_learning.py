@@ -26,6 +26,9 @@ def session(monkeypatch):
     # hermetic regardless of any SYSTEM_GEMINI_KEY in the environment.
     from backend.config import settings
     monkeypatch.setattr(settings, "system_gemini_key", "", raising=False)
+    # ...and no local model: a running Ollama made this test call a real LLM.
+    import llm_router
+    monkeypatch.setattr(llm_router, "generate", lambda *a, **k: None)
     eng = create_engine("sqlite://")
     Base.metadata.create_all(eng)
     s = sessionmaker(bind=eng)()

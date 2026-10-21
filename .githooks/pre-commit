@@ -1,0 +1,12 @@
+#!/bin/sh
+# Block commits that contain secrets. Enable once per clone:
+#   git config core.hooksPath .githooks
+# Bypass only for a verified false positive: git commit --no-verify
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --staged --no-banner --redact || {
+    echo "✋ gitleaks found a possible secret in the staged changes — commit blocked."
+    exit 1
+  }
+else
+  echo "⚠️  gitleaks not installed (brew install gitleaks) — secret scan skipped."
+fi

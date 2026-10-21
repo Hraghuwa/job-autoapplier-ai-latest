@@ -16,11 +16,11 @@ from backend.services import linkedin_cookies as lc
 
 COOKIE_EDITOR_EXPORT = json.dumps([
     # Real Cookie-Editor shape (lots of garbage fields Selenium hates)
-    {"domain": ".linkedin.com", "expirationDate": 4860000000.0,
+    {"domain": ".linkedin.com", "expirationDate": 4860000000.0,  # gitleaks:allow (fake cookie fixture)
      "hostOnly": False, "httpOnly": True, "name": "li_at",
      "path": "/", "sameSite": "no_restriction", "secure": True,
      "session": False, "storeId": "0", "value": "AQED..."},
-    {"domain": ".linkedin.com", "expirationDate": 4860000000.0,
+    {"domain": ".linkedin.com", "expirationDate": 4860000000.0,  # gitleaks:allow (fake cookie fixture)
      "hostOnly": False, "httpOnly": False, "name": "JSESSIONID",
      "path": "/", "sameSite": "no_restriction", "secure": True,
      "session": False, "storeId": "0", "value": "\"ajax:1234\""},
