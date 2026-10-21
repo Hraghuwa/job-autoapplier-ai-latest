@@ -79,7 +79,20 @@ def _ollama_reachable() -> bool:
     return _ollama_alive_cache
 
 
-def _call_ollama(model: str, prompt: str, max_tokens: int, temperature: float) -> Optional[str]:
+def _installed_ollama_model() -> Optional[str]:
+    """Smallest locally pulled model — used when the configured one isn't installed (404)."""
+    try:
+        import urllib.request
+        import json
+        host = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+        with urllib.request.urlopen(host + "/api/tags", timeout=2) as r:
+            models = json.loads(r.read().decode()).get("models") or []
+        return min(models, key=lambda m: m.get("size", 0))["name"] if models else None
+    except Exception:
+        return None
+
+
+def _call_ollama(model: str, prompt: str, max_tokens: int, temperature: float, _retry: bool = True) -> Optional[str]:
     try:
         import urllib.request
         import json
@@ -99,6 +112,10 @@ def _call_ollama(model: str, prompt: str, max_tokens: int, temperature: float) -
             data = json.loads(resp.read().decode())
         return (data.get("response") or "").strip() or None
     except Exception as e:
+        if _retry and getattr(e, "code", None) == 404:
+            alt = _installed_ollama_model()
+            if alt and alt != model:
+                return _call_ollama(alt, prompt, max_tokens, temperature, _retry=False)
         _note_error("ollama", e)
         return None
 
