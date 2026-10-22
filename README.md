@@ -77,6 +77,35 @@ flowchart LR
 
 ## Getting started
 
+### Run it yourself (Docker, one command)
+
+The easiest way to use JobAgent: your own private copy on your own computer. Your data and job-site logins never leave your machine.
+
+1. Install and open [Docker Desktop](https://www.docker.com/products/docker-desktop/). On Windows, run the commands below in WSL or Git Bash.
+2. Get a free Gemini API key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). You can skip this step, but the AI features need the key.
+3. Run:
+
+```bash
+git clone https://github.com/Hraghuwa/job-autoapplier-ai-latest.git
+cd job-autoapplier-ai-latest
+bash setup.sh
+```
+
+4. Open **http://localhost:3000** and register. The first account you create is yours, and nobody else can see it.
+
+| Task | Command |
+|---|---|
+| Stop | `docker compose down` (your data is kept) |
+| Start again | `docker compose up -d` |
+| Update to latest | `git pull && docker compose up -d --build` |
+| See errors | `docker compose logs backend worker` |
+| Add/change Gemini key | edit `SYSTEM_GEMINI_KEY` in `backend/.env`, then `docker compose up -d` |
+| Delete everything | `docker compose down -v` (permanently deletes your data) |
+
+`setup.sh` generates every secret for you (database password, `SECRET_KEY`, `FERNET_KEY`) and never overwrites an existing `.env`.
+
+### Local development (without Docker)
+
 Prerequisites: Python 3.9+, Node 18+, Redis, Google Chrome.
 
 ```bash
