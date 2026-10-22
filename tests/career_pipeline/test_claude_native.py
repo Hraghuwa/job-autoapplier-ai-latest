@@ -209,3 +209,19 @@ def test_save_answers_merges_into_bank():
     out = _call(api, "jobagent_save_answers", {"answers": {"Expected CTC": "6 LPA"}})
     assert api.calls[-1] == ("POST", "/onboarding/autofill", {"autofill_bank": {"Expected CTC": "6 LPA"}})
     assert out == {"saved": ["Expected CTC"]}
+
+
+def test_refresh_picks_up_token_from_a_newer_login(tmp_path, monkeypatch):
+    # A long-running MCP server holds a stale refresh token after the user re-logs in;
+    # it must retry with the token now on disk instead of reporting "session expired".
+    cred = tmp_path / "creds.json"
+    cred.write_text(json.dumps({"api_url": "http://x", "refresh_token": "fresh"}))
+    monkeypatch.setattr(jobagent_mcp, "CRED_PATH", str(cred))
+    api = object.__new__(jobagent_mcp.Api)
+    api.base, api.refresh_token, api.access = "http://x", "stale", None
+    monkeypatch.setattr(api, "_raw", lambda m, p, body=None, token=None:
+                        (200, {"access_token": "A", "refresh_token": "R"})
+                        if body["refresh_token"] == "fresh" else (401, "expired"))
+    api._refresh()
+    assert api.access == "A"
+    assert json.loads(cred.read_text())["refresh_token"] == "R"

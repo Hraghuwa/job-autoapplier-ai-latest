@@ -72,8 +72,19 @@ class Api:
         except urllib.error.URLError as e:
             raise ApiError(f"Can't reach JobAgent at {self.base}: {e.reason}")
 
+    def _reload_creds(self):
+        """Pick up a newer token written by mcp_login (or another process)."""
+        try:
+            with open(CRED_PATH) as f:
+                self.refresh_token = json.load(f)["refresh_token"]
+        except (OSError, KeyError, ValueError):
+            pass
+
     def _refresh(self):
         status, data = self._raw("POST", "/auth/refresh", {"refresh_token": self.refresh_token})
+        if status != 200:
+            self._reload_creds()  # a re-login may have replaced our in-memory token
+            status, data = self._raw("POST", "/auth/refresh", {"refresh_token": self.refresh_token})
         if status != 200:
             raise ApiError("JobAgent session expired — run the login command again.")
         self.access, self.refresh_token = data["access_token"], data["refresh_token"]
