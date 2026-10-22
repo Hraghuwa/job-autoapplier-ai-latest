@@ -30,6 +30,7 @@ from datetime import datetime, timedelta
 from selenium import webdriver
 
 from config import CONFIG
+from browser_window import window_args, show_browser, park_off_screen
 import linkedin_applier
 import job_finder
 import google_form_filler
@@ -138,12 +139,14 @@ def create_driver(headless=False):
         import undetected_chromedriver as uc
         print("  🌐 Launching undetected-chromedriver...")
         options = uc.ChromeOptions()
-        # Never run headless — visible browser on user's machine bypasses all security checks
+        # Never run headless — a real window bypasses security checks. It sits
+        # off-screen unless the user turned on "Show browser".
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-popup-blocking")
-        options.add_argument("--start-maximized")   # Use maximized to ensure visibility
-        
+        for a in window_args(show_browser(CONFIG)):
+            options.add_argument(a)
+
         # Bypass some common blocks
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--no-sandbox")
@@ -163,6 +166,7 @@ def create_driver(headless=False):
             kwargs["version_main"] = chrome_version
 
         driver = uc.Chrome(**kwargs)
+        park_off_screen(driver, show_browser(CONFIG))
         print("  ✅ Browser launched successfully.")
         time.sleep(2)
         return driver
@@ -184,7 +188,8 @@ def create_driver(headless=False):
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--disable-notifications")
-        options.add_argument("--start-maximized")
+        for a in window_args(show_browser(CONFIG)):
+            options.add_argument(a)
         options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         options.add_experimental_option("useAutomationExtension", False)
 
@@ -195,7 +200,8 @@ def create_driver(headless=False):
             binary = next((p for p in candidates if os.path.isfile(p) and "NOTICES" not in p), wdm_path)
             os.chmod(binary, 0o755)
             driver = webdriver.Chrome(service=Service(binary), options=options)
-            
+            park_off_screen(driver, show_browser(CONFIG))
+
             print("  ✅ Standard Selenium driver launched.")
             try:
                 driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source":

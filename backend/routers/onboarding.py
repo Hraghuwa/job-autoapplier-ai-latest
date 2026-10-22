@@ -109,6 +109,8 @@ class PreferencesRequest(BaseModel):
     web_search_extra_sites: Optional[List[str]] = None
     google_login_wait_sec: Optional[int] = None
     disable_web_search: Optional[bool] = None
+    # Agent Chrome: False/unset = off-screen background, True = visible window.
+    show_browser: Optional[bool] = None
     # Highest level missions apply for (job_targeting / fit_scorer read it).
     target_seniority: Optional[Literal["intern", "entry", "associate", "mid", "senior"]] = None
 

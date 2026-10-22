@@ -52,6 +52,7 @@ interface RunStatusResponse {
 
 interface Profile {
   resume_url: string | null
+  job_preferences?: { show_browser?: boolean } | null
 }
 
 interface CredStatus {
@@ -274,6 +275,14 @@ export default function AutomationPage() {
     onError: () => setIsStarting(false)
   })
 
+  // Off = agent Chrome runs off-screen (background); on = visible window.
+  // Read when a phase starts, so it applies to the next launch.
+  const showBrowser = !!profile?.job_preferences?.show_browser
+  const showBrowserMutation = useMutation({
+    mutationFn: (show: boolean) => api.post('/onboarding/preferences', { show_browser: show }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['profile'] }),
+  })
+
   const stopMutation = useMutation({
     mutationFn: (id: string) => api.post(`/agents/pause/${id}`),
     onSuccess: () => {
@@ -457,6 +466,20 @@ export default function AutomationPage() {
                         <p className="text-xs text-muted-foreground">Agents will only apply to jobs with {'>'}60% match score.</p>
                     </div>
                 </div>
+                <label htmlFor="show-browser" className="flex items-center gap-2 cursor-pointer select-none">
+                    <Checkbox
+                        id="show-browser"
+                        checked={showBrowser}
+                        disabled={showBrowserMutation.isPending}
+                        onCheckedChange={(v) => showBrowserMutation.mutate(v === true)}
+                    />
+                    <span className="text-sm">
+                        Show browser
+                        <span className="block text-xs text-muted-foreground">
+                            {showBrowser ? 'Visible window' : 'Runs in background — follow Live Logs'}
+                        </span>
+                    </span>
+                </label>
                 <Button 
                     onClick={handleStart}
                     disabled={!isReady || selectedPhases.length === 0 || isStarting}

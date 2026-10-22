@@ -614,6 +614,9 @@ def _build_config(user, profile) -> dict:
         "min_per_keyword": 3,
         "delay_between_applies_sec": [10, 25],
         "headless": False,
+        # False = agent Chrome runs off-screen in the background (see
+        # agents/browser_window.py); True = visible window. Logs stream either way.
+        "show_browser": bool(prefs.get("show_browser", False)),
         "dry_run": False,
         "continuous_mode": True,
         "recently_posted": True,

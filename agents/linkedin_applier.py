@@ -357,6 +357,8 @@ def login(driver, email, password, cookies_json: str = None):
 
         # Non-headless (CLI): give the user time to solve the challenge manually
         print("[LinkedIn] ⚠️  Security challenge detected. Please solve it manually in the browser.")
+        from browser_window import bring_on_screen
+        bring_on_screen(driver)
         print("[LinkedIn] ⏳ Waiting 60 seconds for you to complete the challenge...")
         time.sleep(60)
         url = driver.current_url

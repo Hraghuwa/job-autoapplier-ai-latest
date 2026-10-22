@@ -63,6 +63,8 @@ def client(tmp_path, monkeypatch):
 
     app = FastAPI()
     app.include_router(career_ops.router, prefix="/career-ops")
+    from backend.routers import onboarding
+    app.include_router(onboarding.router, prefix="/onboarding")
     app.dependency_overrides[get_db] = _db
     app.dependency_overrides[get_current_user] = lambda: user
 
@@ -107,6 +109,25 @@ def test_mission_config_carries_target_boards(client):
     with S() as s:
         u = s.get(User, uid)
     assert _build_config(u, p)["web_search"]["target_boards"] == [{"kind": "lever", "slug": "acme"}]
+
+
+def test_build_config_show_browser_defaults_to_background(client):
+    _, S, uid = client
+    from backend.workers.agent_tasks import _build_config
+    p = _profile(S, uid)
+    with S() as s:
+        u = s.get(User, uid)
+    assert _build_config(u, p)["show_browser"] is False
+    p.job_preferences = {**p.job_preferences, "show_browser": True}
+    assert _build_config(u, p)["show_browser"] is True
+
+
+def test_show_browser_toggle_saves_via_preferences(client):
+    c, S, uid = client
+    assert c.post("/onboarding/preferences", json={"show_browser": True}).status_code == 200
+    assert _profile(S, uid).job_preferences["show_browser"] is True
+    c.post("/onboarding/preferences", json={"show_browser": False})
+    assert _profile(S, uid).job_preferences["show_browser"] is False
 
 
 def test_tailor_apply_and_undo(client, monkeypatch):

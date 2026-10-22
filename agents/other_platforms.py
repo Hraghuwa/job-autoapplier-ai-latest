@@ -110,7 +110,9 @@ def check_for_captcha(driver, config=None):
         print("Please solve it manually in the browser window.")
         print("The script will wait for you to proceed.")
         print("!" * 60 + "\n")
-        
+        from browser_window import bring_on_screen
+        bring_on_screen(driver)
+
         # Wait until the challenge elements are gone — bounded, and Stop works,
         # so an unattended server run can't hang here forever.
         stop = (config or {}).get("_stop_event")

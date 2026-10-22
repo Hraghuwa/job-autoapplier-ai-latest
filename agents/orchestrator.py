@@ -35,6 +35,7 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
 from config import CONFIG
+from browser_window import window_args, show_browser, park_off_screen
 from utils.performance import PERFORMANCE_TRACKER, COST_OPTIMIZER
 
 import linkedin_applier
@@ -103,10 +104,13 @@ def create_driver(profile_suffix="", contextfill=False):
     Testing; returns (driver, extension_id). Falls back to the normal driver and
     extension_id=None if the extension or Chrome for Testing is unavailable.
     """
+    win_args = window_args(show_browser(CONFIG))
     if contextfill:
         import contextfill_bridge
         opts = Options()
         opts.add_argument("--window-size=1280,900")
+        for a in win_args:
+            opts.add_argument(a)
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_argument("--disable-notifications")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -114,13 +118,17 @@ def create_driver(profile_suffix="", contextfill=False):
         ext_id = contextfill_bridge.add_to_options(opts, CONFIG)
         if ext_id:
             try:
-                return webdriver.Chrome(options=opts), ext_id  # Selenium Manager fetches Chrome for Testing
+                cf_driver = webdriver.Chrome(options=opts)  # Selenium Manager fetches Chrome for Testing
+                park_off_screen(cf_driver, show_browser(CONFIG))
+                return cf_driver, ext_id
             except Exception as e:
                 print(f"  ⚠️  ContextFill browser failed to start ({type(e).__name__}: {str(e)[:120]}) — using built-in filler")
         return create_driver(profile_suffix), None
 
     opts = Options()
     opts.add_argument("--window-size=1280,900")
+    for a in win_args:
+        opts.add_argument(a)
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-popup-blocking")
@@ -157,10 +165,7 @@ def create_driver(profile_suffix="", contextfill=False):
 
     driver = webdriver.Chrome(service=Service(binary), options=opts)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    try:
-        driver.set_window_position(50, 50)
-    except Exception:
-        pass
+    park_off_screen(driver, show_browser(CONFIG))
     time.sleep(2)
     return driver
 
