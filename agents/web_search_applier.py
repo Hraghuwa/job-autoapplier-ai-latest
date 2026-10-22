@@ -773,8 +773,8 @@ def search_and_apply(driver, config, applied_urls=None):
 
             # Google login wall → pause agent, wait for the user, then continue
             if _is_google_login_page(driver):
-                from browser_window import bring_on_screen
-                bring_on_screen(driver)
+                from browser_window import needs_you
+                needs_you(config)
                 logged_in =_wait_for_google_login(driver, max_wait_sec=google_login_wait_sec)
                 if not logged_in:
                     # Skip Google queries for the rest of the run — open tabs stay intact

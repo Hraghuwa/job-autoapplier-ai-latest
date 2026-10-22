@@ -35,7 +35,7 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
 from config import CONFIG
-from browser_window import window_args, show_browser, park_off_screen
+from browser_window import window_args, show_browser, send_to_background
 from utils.performance import PERFORMANCE_TRACKER, COST_OPTIMIZER
 
 import linkedin_applier
@@ -119,7 +119,7 @@ def create_driver(profile_suffix="", contextfill=False):
         if ext_id:
             try:
                 cf_driver = webdriver.Chrome(options=opts)  # Selenium Manager fetches Chrome for Testing
-                park_off_screen(cf_driver, show_browser(CONFIG))
+                send_to_background(cf_driver, show_browser(CONFIG))
                 return cf_driver, ext_id
             except Exception as e:
                 print(f"  ⚠️  ContextFill browser failed to start ({type(e).__name__}: {str(e)[:120]}) — using built-in filler")
@@ -165,7 +165,7 @@ def create_driver(profile_suffix="", contextfill=False):
 
     driver = webdriver.Chrome(service=Service(binary), options=opts)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    park_off_screen(driver, show_browser(CONFIG))
+    send_to_background(driver, show_browser(CONFIG))
     time.sleep(2)
     return driver
 

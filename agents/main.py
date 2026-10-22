@@ -30,7 +30,7 @@ from datetime import datetime, timedelta
 from selenium import webdriver
 
 from config import CONFIG
-from browser_window import window_args, show_browser, park_off_screen
+from browser_window import window_args, show_browser, send_to_background
 import linkedin_applier
 import job_finder
 import google_form_filler
@@ -166,7 +166,7 @@ def create_driver(headless=False):
             kwargs["version_main"] = chrome_version
 
         driver = uc.Chrome(**kwargs)
-        park_off_screen(driver, show_browser(CONFIG))
+        send_to_background(driver, show_browser(CONFIG))
         print("  ✅ Browser launched successfully.")
         time.sleep(2)
         return driver
@@ -200,7 +200,7 @@ def create_driver(headless=False):
             binary = next((p for p in candidates if os.path.isfile(p) and "NOTICES" not in p), wdm_path)
             os.chmod(binary, 0o755)
             driver = webdriver.Chrome(service=Service(binary), options=options)
-            park_off_screen(driver, show_browser(CONFIG))
+            send_to_background(driver, show_browser(CONFIG))
 
             print("  ✅ Standard Selenium driver launched.")
             try:

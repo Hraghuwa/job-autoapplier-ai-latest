@@ -1,14 +1,16 @@
 """Background vs visible agent browser (the "Show browser" toggle).
 
-Background = a real (non-headless) Chrome parked off-screen, so it never covers
-the user's work but still passes bot checks, and isn't throttled while hidden.
+Background = a real (non-headless) Chrome parked off-screen that never takes
+focus from the user, still passes bot checks, and isn't throttled while hidden.
+Nothing pops up unless the user turned on "Show browser".
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "agents")))
 
-from browser_window import window_args, bring_on_screen, park_off_screen
+import browser_window
+from browser_window import window_args, send_to_background, needs_you
 
 
 def test_background_parks_window_off_screen():
@@ -36,8 +38,10 @@ def test_visible_shows_window_on_screen():
 
 
 class _FakeDriver:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, browser_pid=None):
         self.pos, self.fail = None, fail
+        if browser_pid:
+            self.browser_pid = browser_pid
 
     def set_window_position(self, x, y):
         if self.fail:
@@ -45,27 +49,94 @@ class _FakeDriver:
         self.pos = (x, y)
 
 
-def test_bring_on_screen_moves_hidden_window_for_captcha():
-    d = _FakeDriver()
-    bring_on_screen(d)
-    assert d.pos == (50, 50)
+def _no_guard(monkeypatch, tmp_path):
+    started = []
+    monkeypatch.setattr(browser_window, "_REGISTRY", str(tmp_path / "pids"))
+    monkeypatch.setattr(browser_window, "_start_guard", lambda: started.append(1))
+    monkeypatch.setattr(browser_window.sys, "platform", "darwin")
+    return started
 
 
-def test_bring_on_screen_never_raises():
-    bring_on_screen(_FakeDriver(fail=True))
-    bring_on_screen(None)
-
-
-def test_park_off_screen_moves_window_after_launch():
+def test_send_to_background_moves_window_after_launch(monkeypatch, tmp_path):
     # macOS clamps the --window-position launch flag (a sliver stays visible);
     # a post-launch move goes fully off-screen.
+    _no_guard(monkeypatch, tmp_path)
     d = _FakeDriver()
-    park_off_screen(d, show_browser=False)
+    send_to_background(d, show_browser=False)
     assert d.pos == (-32000, -32000)
 
 
-def test_park_off_screen_noop_when_visible():
-    d = _FakeDriver()
-    park_off_screen(d, show_browser=True)
-    assert d.pos is None
-    park_off_screen(_FakeDriver(fail=True), show_browser=False)  # never raises
+def test_send_to_background_registers_chrome_and_guards_focus(monkeypatch, tmp_path):
+    # Chrome grabs focus on launch and on every tab switch; the guard hands it back.
+    started = _no_guard(monkeypatch, tmp_path)
+    send_to_background(_FakeDriver(browser_pid=4242), show_browser=False)
+    assert "4242" in (tmp_path / "pids").read_text().split()
+    assert started == [1]
+
+
+def test_send_to_background_noop_when_visible(monkeypatch, tmp_path):
+    started = _no_guard(monkeypatch, tmp_path)
+    d = _FakeDriver(browser_pid=4242)
+    send_to_background(d, show_browser=True)
+    assert d.pos is None and started == []
+    send_to_background(_FakeDriver(fail=True), show_browser=False)  # never raises
+
+
+class _CdpDriver(_FakeDriver):
+    """Records commands like a selenium driver's execute / execute_cdp_cmd."""
+    def __init__(self):
+        super().__init__(browser_pid=4242)
+        self.cdp = []
+
+    def execute(self, command, params=None):
+        return {"value": None}
+
+    def execute_cdp_cmd(self, cmd, args):
+        self.cdp.append((cmd, args))
+
+
+def test_hidden_pages_still_render_after_tab_switch(monkeypatch, tmp_path):
+    # A hidden Chrome reports visibilityState=hidden and stalls rAF/transitions,
+    # which can freeze animated apply modals. Focus emulation keeps every tab
+    # the agent works in "visible" — re-applied whenever it switches/opens a tab.
+    _no_guard(monkeypatch, tmp_path)
+    d = _CdpDriver()
+    send_to_background(d, show_browser=False)
+    focus = ("Emulation.setFocusEmulationEnabled", {"enabled": True})
+    assert d.cdp == [focus]
+    d.execute("switchToWindow", {"handle": "t2"})
+    d.execute("newWindow", {"type": "tab"})
+    d.execute("get", {"url": "https://x"})
+    assert d.cdp == [focus, focus, focus]
+
+
+def test_no_focus_guard_off_macos(monkeypatch, tmp_path):
+    started = _no_guard(monkeypatch, tmp_path)
+    monkeypatch.setattr(browser_window.sys, "platform", "linux")
+    send_to_background(_FakeDriver(browser_pid=4242), show_browser=False)
+    assert started == []
+
+
+def test_needs_you_never_touches_the_window_in_background(capsys):
+    # A CAPTCHA must not pop the browser over the user's work — log it instead.
+    needs_you({"show_browser": False})
+    assert "Show browser" in capsys.readouterr().out
+
+
+def test_needs_you_silent_when_window_already_visible(capsys):
+    needs_you({"show_browser": True})
+    assert capsys.readouterr().out == ""
+
+
+def test_registry_drops_dead_pids(monkeypatch, tmp_path):
+    # macOS reuses PIDs: a stale entry could later match one of the user's apps.
+    _no_guard(monkeypatch, tmp_path)
+    (tmp_path / "pids").write_text(f"999999\n{os.getpid()}\n")
+    send_to_background(_FakeDriver(browser_pid=4242), show_browser=False)
+    pids = (tmp_path / "pids").read_text().split()
+    assert "999999" not in pids and str(os.getpid()) in pids
+
+
+def test_guard_only_ever_hides_chrome():
+    assert "chrome" in browser_window._GUARD_JS.lower()
+    assert "bundleIdentifier" in browser_window._GUARD_JS
