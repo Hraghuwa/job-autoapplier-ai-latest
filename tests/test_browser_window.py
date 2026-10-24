@@ -4,6 +4,7 @@ Background = a real (non-headless) Chrome parked off-screen that never takes
 focus from the user, still passes bot checks, and isn't throttled while hidden.
 Nothing pops up unless the user turned on "Show browser".
 """
+import pytest
 import os
 import sys
 
@@ -47,6 +48,11 @@ class _FakeDriver:
         if self.fail:
             raise RuntimeError("window gone")
         self.pos = (x, y)
+
+
+@pytest.fixture(autouse=True)
+def _never_spawn_real_guard(monkeypatch):
+    monkeypatch.setattr(browser_window, "_start_guard", lambda: None)
 
 
 def _no_guard(monkeypatch, tmp_path):
@@ -139,10 +145,21 @@ def test_popup_script_drops_window_features():
 
 
 def test_guard_returns_focus_to_the_users_previous_app():
-    # Hiding alone lets macOS pick ANY app (seen: the user's own Chrome instead
-    # of Outlook). The guard remembers the user's last app and re-activates it.
+    # A hide makes macOS activate a random app ~0.3 s later, which the guard
+    # then took for the user's (seen: Claude instead of TextEdit). The guard
+    # re-activates the most recent non-agent app and never hides.
     js = browser_window._GUARD_JS
-    assert "activateWithOptions" in js and "last" in js
+    assert "activateWithOptions" in js and "recent" in js
+    assert ".hide" not in js
+
+
+def test_guard_starts_before_chrome_launches(monkeypatch, tmp_path):
+    # Chrome steals focus while launching; the guard must already know the user's app.
+    started = _no_guard(monkeypatch, tmp_path)
+    window_args(show_browser=False)
+    assert started == [1]
+    window_args(show_browser=True)
+    assert started == [1]
 
 
 def test_no_focus_guard_off_macos(monkeypatch, tmp_path):

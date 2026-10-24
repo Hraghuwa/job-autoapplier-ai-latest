@@ -7,6 +7,7 @@ running at full speed; progress is visible in the run's live logs.
 Nothing pops up or steals focus unless the user turns on "Show browser".
 """
 import os
+import select
 import subprocess
 import sys
 import tempfile
@@ -25,31 +26,36 @@ _REGISTRY = os.path.join(tempfile.gettempdir(), "jobagent_background_chrome.pids
 _guard = None
 
 # macOS: Chrome activates itself on launch, tab switches and new windows. This
-# loop hides an agent Chrome the moment it becomes frontmost and re-activates
-# the app the user was last in (hiding alone lets macOS pick any app — seen: the
-# user's own Chrome instead of Outlook). In-process AppKit calls via JXA — no
-# Automation/Accessibility permission needed. Exits when its parent (the agent
-# process) dies.
+# loop re-activates the app the user was last in the moment an agent Chrome
+# becomes frontmost. It starts before Chrome launches so it already knows that
+# app. No hide: a hide is async and makes macOS activate yet another app ~0.3 s
+# later, which the guard then mistook for the user's app (seen: Claude instead
+# of TextEdit). In-process AppKit calls via JXA — no Automation/Accessibility
+# permission needed. Exits when its parent (the agent process) dies.
 _GUARD_JS = r"""
 ObjC.import('AppKit'); ObjC.import('signal');
 function run(argv) {
   const reg = argv[0], parent = Number(argv[1]);
-  let last = null;
+  // Recent non-agent front apps, newest first. An agent Chrome can be front
+  // before its PID is registered, so it may land here briefly; skip it later.
+  let recent = [];
   while ($.kill(parent, 0) === 0) {
     const front = $.NSWorkspace.sharedWorkspace.frontmostApplication;
     if (front && !front.isNil()) {
       const txt = $.NSString.stringWithContentsOfFileEncodingError(reg, 4, null);
       const agents = txt.isNil() ? [] : ObjC.unwrap(txt).split(/\s+/).filter(Boolean).map(Number);
+      const pid = front.processIdentifier;
       const bundle = ObjC.unwrap(front.bundleIdentifier) || '';
-      if (agents.indexOf(front.processIdentifier) >= 0 && /chrome/i.test(bundle)) {
-        front.hide;
-        if (last && !last.terminated) last.activateWithOptions(0);
-      } else {
-        last = front;
+      if (agents.indexOf(pid) >= 0 && /chrome/i.test(bundle)) {
+        const back = recent.find(a => !a.terminated && agents.indexOf(a.processIdentifier) < 0);
+        if (back) back.activateWithOptions(0);
+      } else if (!recent.length || recent[0].processIdentifier !== pid) {
+        if (!recent.length) console.log('ready');  // window_args waits for this
+        recent = [front, ...recent.filter(a => a.processIdentifier !== pid)].slice(0, 5);
       }
     }
     // Spin the run loop (a plain sleep freezes frontmostApplication at its first value).
-    $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.05));
+    $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.02));
   }
 }
 """
@@ -67,8 +73,14 @@ _POPUPS_AS_TABS_JS = """
 
 
 def window_args(show_browser: bool) -> list:
+    """Called by every launch site before Chrome starts."""
     if show_browser:
         return ["--window-position=50,50"]
+    if sys.platform == "darwin":
+        try:
+            _start_guard()  # learn the user's app before Chrome grabs focus
+        except Exception:
+            pass
     return [OFF_SCREEN, *_NO_THROTTLE]
 
 
@@ -117,7 +129,11 @@ def _start_guard() -> None:
     if _guard is None or _guard.poll() is not None:
         _guard = subprocess.Popen(["osascript", "-l", "JavaScript", "-e", _GUARD_JS,
                                    _REGISTRY, str(os.getpid())],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # JXA boots in ~1 s; wait until the guard has seen the user's app, or
+        # Chrome's launch steal lands before it knows where to send focus back.
+        if select.select([_guard.stderr], [], [], 3)[0]:
+            _guard.stderr.readline()
 
 
 _FOCUS_EMULATION = ("Emulation.setFocusEmulationEnabled", {"enabled": True})
