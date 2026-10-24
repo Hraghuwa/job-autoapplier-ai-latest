@@ -103,11 +103,46 @@ def test_hidden_pages_still_render_after_tab_switch(monkeypatch, tmp_path):
     d = _CdpDriver()
     send_to_background(d, show_browser=False)
     focus = ("Emulation.setFocusEmulationEnabled", {"enabled": True})
-    assert d.cdp == [focus]
+    focus_calls = lambda: [c for c in d.cdp if c[0] == focus[0]]
+    assert focus_calls() == [focus]
     d.execute("switchToWindow", {"handle": "t2"})
     d.execute("newWindow", {"type": "tab"})
     d.execute("get", {"url": "https://x"})
-    assert d.cdp == [focus, focus, focus]
+    assert focus_calls() == [focus, focus, focus]
+
+
+def test_site_popups_become_tabs_in_every_tab(monkeypatch, tmp_path):
+    # A site popup (window.open with width/height) opens a NEW on-screen window
+    # and activates Chrome over the user's app. Dropping the features makes it a
+    # tab in the hidden off-screen window. Re-applied per tab, like focus.
+    _no_guard(monkeypatch, tmp_path)
+    d = _CdpDriver()
+    send_to_background(d, show_browser=False)
+    popup = lambda: [c for c in d.cdp if c[0] == "Page.addScriptToEvaluateOnNewDocument"]
+    assert len(popup()) == 1 and "window.open" in popup()[0][1]["source"]
+    d.execute("switchToWindow", {"handle": "t2"})
+    assert len(popup()) == 2
+
+
+def test_popup_script_drops_window_features():
+    import json
+    import subprocess
+    js = f"""
+    const calls = [];
+    globalThis.window = {{ open: (...a) => {{ calls.push(a); return 'w'; }} }};
+    {browser_window._POPUPS_AS_TABS_JS}
+    const r = window.open('https://apply.example', 'pop', 'width=600,height=500');
+    console.log(JSON.stringify({{calls, r}}));
+    """
+    out = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+    assert out == {"calls": [["https://apply.example", "_blank"]], "r": "w"}
+
+
+def test_guard_returns_focus_to_the_users_previous_app():
+    # Hiding alone lets macOS pick ANY app (seen: the user's own Chrome instead
+    # of Outlook). The guard remembers the user's last app and re-activates it.
+    js = browser_window._GUARD_JS
+    assert "activateWithOptions" in js and "last" in js
 
 
 def test_no_focus_guard_off_macos(monkeypatch, tmp_path):
@@ -140,3 +175,11 @@ def test_registry_drops_dead_pids(monkeypatch, tmp_path):
 def test_guard_only_ever_hides_chrome():
     assert "chrome" in browser_window._GUARD_JS.lower()
     assert "bundleIdentifier" in browser_window._GUARD_JS
+
+
+def test_guard_sees_the_live_front_app():
+    # In a JXA loop, NSWorkspace.frontmostApplication only refreshes when the run
+    # loop runs; delay() froze it at its first value (guard either hid the agent
+    # forever, bouncing the user between apps, or never acted). Spin the run loop.
+    js = browser_window._GUARD_JS
+    assert "runUntilDate" in js and "delay(" not in js

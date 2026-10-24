@@ -24,26 +24,45 @@ _NO_THROTTLE = [
 _REGISTRY = os.path.join(tempfile.gettempdir(), "jobagent_background_chrome.pids")
 _guard = None
 
-# macOS: Chrome activates itself on launch and on every tab switch. This loop
-# hides an agent Chrome the moment it becomes frontmost; macOS then hands focus
-# back to the app the user was in. In-process AppKit calls via JXA — no
+# macOS: Chrome activates itself on launch, tab switches and new windows. This
+# loop hides an agent Chrome the moment it becomes frontmost and re-activates
+# the app the user was last in (hiding alone lets macOS pick any app — seen: the
+# user's own Chrome instead of Outlook). In-process AppKit calls via JXA — no
 # Automation/Accessibility permission needed. Exits when its parent (the agent
 # process) dies.
 _GUARD_JS = r"""
 ObjC.import('AppKit'); ObjC.import('signal');
 function run(argv) {
   const reg = argv[0], parent = Number(argv[1]);
+  let last = null;
   while ($.kill(parent, 0) === 0) {
     const front = $.NSWorkspace.sharedWorkspace.frontmostApplication;
     if (front && !front.isNil()) {
       const txt = $.NSString.stringWithContentsOfFileEncodingError(reg, 4, null);
       const agents = txt.isNil() ? [] : ObjC.unwrap(txt).split(/\s+/).filter(Boolean).map(Number);
       const bundle = ObjC.unwrap(front.bundleIdentifier) || '';
-      if (agents.indexOf(front.processIdentifier) >= 0 && /chrome/i.test(bundle)) front.hide;
+      if (agents.indexOf(front.processIdentifier) >= 0 && /chrome/i.test(bundle)) {
+        front.hide;
+        if (last && !last.terminated) last.activateWithOptions(0);
+      } else {
+        last = front;
+      }
     }
-    delay(0.05);
+    // Spin the run loop (a plain sleep freezes frontmostApplication at its first value).
+    $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.05));
   }
 }
+"""
+
+# Sites open "Apply" / sign-in popups with window.open(url, name, "width=..").
+# Those become NEW on-screen windows (the off-screen launch position only
+# applies to the first window) and activate Chrome over the user's work.
+# Dropping the features turns them into tabs inside the hidden window.
+_POPUPS_AS_TABS_JS = """
+(() => {
+  const open = window.open;
+  window.open = function (url) { return open.call(window, url, '_blank'); };
+})();
 """
 
 
@@ -113,6 +132,9 @@ def _keep_pages_visible(driver) -> None:
     def focus():
         try:
             driver.execute_cdp_cmd(*_FOCUS_EMULATION)
+            # Applies to the tab's next page loads; agents navigate after switching.
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
+                                   {"source": _POPUPS_AS_TABS_JS})
         except Exception:
             pass
 
