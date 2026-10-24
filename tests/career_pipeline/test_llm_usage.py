@@ -68,12 +68,12 @@ def test_record_usage_skips_without_user(session_factory):
 def test_record_usage_writes_row(session_factory):
     ok = record_usage(provider="gemini", model="gemini-2.0-flash", role="writer",
                       prompt_tokens=1000, output_tokens=500, latency_ms=900,
-                      user_id="u-123", session_factory=session_factory)
+                      user_id="0b5e7c3a-1f2d-4e6b-9a8c-7d6e5f4a3b2c", session_factory=session_factory)
     assert ok is True
     from backend.models.resume import AIRequest
     s = session_factory()
     row = s.query(AIRequest).one()
-    assert row.user_id == "u-123"
+    assert row.user_id == "0b5e7c3a-1f2d-4e6b-9a8c-7d6e5f4a3b2c"
     assert row.type == "llm:writer"
     assert row.tokens_used == 1500
     assert row.latency_ms == 900

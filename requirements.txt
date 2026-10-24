@@ -3,6 +3,7 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 sqlalchemy[asyncio]>=2.0.0
 asyncpg
+psycopg2-binary
 aiosqlite
 pydantic-settings>=2.0.0
 pydantic[email]>=2.0.0
@@ -18,6 +19,7 @@ razorpay
 resend
 httpx
 networkx>=3.0
+numpy  # networkx layouts (graph page) need it
 pyotp
 python-dotenv
 croniter>=2.0.0  # accurate cron matching for scheduled agent runs (audit M4)

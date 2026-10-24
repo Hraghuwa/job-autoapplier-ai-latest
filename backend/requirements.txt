@@ -5,6 +5,7 @@ uvicorn[standard]>=0.29.0
 # ── Database ─────────────────────────────────────────────────────────────────
 sqlalchemy[asyncio]>=2.0.0
 asyncpg                    # PostgreSQL async driver (production)
+psycopg2-binary            # sync driver for Celery tasks on PostgreSQL
 aiosqlite                  # SQLite async driver (local dev)
 alembic
 
@@ -41,3 +42,4 @@ httpx
 
 # ── Graph ───────────────────────────────────────────────────────────────────
 networkx
+numpy  # networkx layouts (graph page) need it

@@ -2,7 +2,7 @@
 import enum
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, Integer, Text, ForeignKey, DateTime, Enum, Float, JSON
+from sqlalchemy import Column, String, Boolean, Integer, Text, ForeignKey, DateTime, Enum, Float, JSON, Uuid
 from sqlalchemy.orm import relationship
 from backend.database import Base
 
@@ -21,7 +21,7 @@ class Resume(Base):
     __tablename__ = 'resumes'
 
     id = Column(String, primary_key=True, default=gen_uuid)
-    user_id = Column(String, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Uuid(as_uuid=False), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     title = Column(String, nullable=False, default="Untitled Resume")
     template_id = Column(String, ForeignKey('resume_templates.id', ondelete='SET NULL'), nullable=True)
     content = Column(JSON, default=dict)
@@ -98,7 +98,7 @@ class CoverLetter(Base):
     __tablename__ = 'cover_letters'
 
     id = Column(String, primary_key=True, default=gen_uuid)
-    user_id = Column(String, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Uuid(as_uuid=False), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     resume_id = Column(String, ForeignKey('resumes.id', ondelete='SET NULL'), nullable=True)
     title = Column(String, nullable=False, default="Untitled Cover Letter")
     target_company = Column(String, nullable=True)
@@ -117,7 +117,7 @@ class AIRequest(Base):
     __tablename__ = 'ai_requests'
 
     id = Column(String, primary_key=True, default=gen_uuid)
-    user_id = Column(String, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Uuid(as_uuid=False), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     type = Column(String, nullable=False)
     input_data = Column(JSON, nullable=False)
     output_data = Column(JSON, nullable=True)

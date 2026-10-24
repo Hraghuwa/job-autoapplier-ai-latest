@@ -45,6 +45,11 @@ services:
     ports:
       - "8000:8000"
     env_file: backend/.env
+    environment:
+      # Override backend/.env, which may hold host-only values (SQLite path,
+      # localhost Redis) from running the backend outside Docker.
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-jobagent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-jobagent}
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,6 +73,11 @@ services:
     security_opt:
       - seccomp:unconfined    # allows Chrome sandbox
     env_file: backend/.env
+    environment:
+      # Override backend/.env, which may hold host-only values (SQLite path,
+      # localhost Redis) from running the backend outside Docker.
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-jobagent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-jobagent}
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
