@@ -171,75 +171,9 @@ def close_popups(driver):
         pass
 
 
-def _is_title_relevant(job_title, keyword):
-    """
-    Check if a job title is relevant to the current search keyword.
-    RULES:
-      1. Must be an intern/trainee role (not full-time)
-      2. Must NOT be a blocked role (engineer, developer, HR, sales, etc.)
-      3. Must match at least one wanted management/strategy/AI term
-    """
-    title_lower = job_title.lower().strip()
-    if not title_lower:
-        return False
-
-    # ── RULE 1: Must be an intern/trainee role ──
-    intern_terms = ["intern", "trainee", "apprentice"]
-    is_intern = any(t in title_lower for t in intern_terms)
-    if not is_intern:
-        return False
-
-    # ── RULE 2: BLOCKLIST — roles the user does NOT want ──
-    blocked_roles = [
-        "engineer", "developer", "devops", "sre", "backend", "frontend",
-        "full stack", "fullstack", "software", "sde", "web dev",
-        "designer", "graphic design", "ui/ux", "ux", "ui design",
-        "visual design", "motion design", "illustration",
-        "content writ", "content market", "copywriter", "seo",
-        "video edit", "editor", "photographer", "photo shoot", "fashion",
-        "sales", "lead gen", "lead generation", "telesales", "bdr",
-        "human resource", "hr ", "hr intern", "recruiter", "talent acquisition",
-        "customer support", "customer service", "support exec",
-        "data entry", "typist", "clerk", "accounting", "bookkeep",
-        "legal", "compliance officer", "shopify", "wordpress",
-        "android", "ios developer", "flutter", "react native",
-        "qa ", "quality assurance", "tester", "testing",
-        "community manager", "social media",
-        "marketing", "brand",
-    ]
-    for blocked in blocked_roles:
-        if blocked in title_lower:
-            return False
-
-    # ── RULE 3: ALLOWLIST — management/strategy/AI intern roles ──
-    wanted_terms = [
-        "management", "manager", "managing",
-        "founder", "chief of staff", "ceo office",
-        "strateg", "strategy", "strategist",
-        "business develop", "biz dev", "bd intern",
-        "consult", "advisory",
-        "operations", "ops intern", "ops associate",
-        "product", "pm intern",
-        "ai ", "artificial intelligence", "machine learning",
-        "growth", "gtm", "go-to-market",
-        "venture", "investment",
-        "analyst", "research",
-        "general management", "gm intern",
-        "tech", "digital",
-    ]
-    for term in wanted_terms:
-        if term in title_lower:
-            return True
-
-    # Also check keyword-specific terms
-    kw_lower = keyword.lower()
-    for word in kw_lower.split():
-        if word not in ("intern", "interns", "internship", "associate", "trainee",
-                        "the", "a", "an", "in", "at", "for", "of"):
-            if word in title_lower:
-                return True
-
-    return False
+# Same saved-title matcher LinkedIn uses: follows the user's job titles and
+# employment types instead of a hard-coded intern/blocklist.
+from linkedin_applier import _is_title_relevant
 
 
 # ─────────────────────────────────────────────
@@ -434,28 +368,37 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
             print("[Wellfound] ❌ Browser died. Stopping.")
             return applied_count, new_urls
 
-        # Build search URL
-        kw_encoded = keyword.replace(" ", "+")
-        search_url = f"https://wellfound.com/jobs?keywords={kw_encoded}"
+        # Wellfound ignores /jobs?keywords= (returns the same generic feed for
+        # every keyword); its search pages are /role/<slug> and
+        # /role/l/<slug>/<location>.
+        import re as _re
+        _slug = lambda s: _re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+        role = _slug(keyword)
+        loc = next((_slug(l) for l in (locations or []) if l and "remote" not in l.lower()), "")
+        urls = ([f"https://wellfound.com/role/l/{role}/{loc}"] if loc else []) + [f"https://wellfound.com/role/{role}"]
 
         print(f"\n{'═' * 60}")
         print(f"🔍 WELLFOUND: Searching '{keyword}'")
-        print(f"   URL: {search_url}")
         print(f"{'═' * 60}")
 
-        driver.get(search_url)
-        time.sleep(5)
-        close_popups(driver)
+        job_links = []
+        for search_url in urls:
+            print(f"   URL: {search_url}")
+            driver.get(search_url)
+            time.sleep(5)
+            close_popups(driver)
 
-        # Scroll down to load more results
-        for _ in range(5):
-            driver.execute_script("window.scrollBy(0, 800);")
-            time.sleep(1)
-        driver.execute_script("window.scrollTo(0, 0);")
-        time.sleep(2)
+            # Scroll down to load more results
+            for _ in range(5):
+                driver.execute_script("window.scrollBy(0, 800);")
+                time.sleep(1)
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(2)
 
-        # Collect job listing URLs
-        job_links = _collect_job_links(driver)
+            # Collect job listing URLs
+            job_links = _collect_job_links(driver)
+            if job_links:
+                break
         print(f"  Found {len(job_links)} job listings")
 
         if not job_links:
@@ -479,8 +422,9 @@ def search_and_apply(driver, keywords, locations, max_jobs, applied_count,
             print(f"\n  📋 [{keyword_applied + 1}] {job_title} @ {company_name}")
 
             # ── TITLE RELEVANCE CHECK ──
-            if not _is_title_relevant(job_title, keyword):
-                print(f"  ⏭️  Skipping (not relevant): {job_title}")
+            _ok, _why = _is_title_relevant(job_title, config.get("keywords") or [keyword], config)
+            if not _ok:
+                print(f"  ⏭️  Skipping (not relevant): {job_title} ({_why})")
                 continue
 
             if dry_run:
@@ -576,28 +520,15 @@ def _collect_job_links(driver):
     # Wellfound job URLs follow patterns like:
     #   /jobs/ID-JOB-TITLE
     #   /company/COMPANY/jobs/ID
+    # Numeric ID required so nav links like /jobs/applied never match.
     job_url_pattern = re.compile(
-        r"wellfound\.com/(jobs/[a-zA-Z0-9_-]+"
-        r"|company/[a-zA-Z0-9_-]+/jobs/[a-zA-Z0-9_-]+)"
+        r"wellfound\.com/(jobs/\d+"
+        r"|company/[a-zA-Z0-9_-]+/jobs/\d+)"
     )
 
-    # Step 1: Try the Wellfound-specific job link class (most reliable)
-    primary_selectors = [
-        "a.styles_jobLink__US40J",
-    ]
-
-    # Step 2: Fallback — grab links from the main content area only
-    fallback_selectors = [
-        "main a[href*='/jobs/']",
-        "[class*='jobList'] a[href*='/jobs/']",
-        "[class*='JobList'] a[href*='/jobs/']",
-        "[class*='result'] a[href*='/jobs/']",
-        "[role='main'] a[href*='/jobs/']",
-    ]
-
-    all_selectors = primary_selectors + fallback_selectors
-
-    for sel in all_selectors:
+    # Wellfound's Tailwind markup has no <main>, no hashed jobLink class and no
+    # list wrappers, so scope by href only — the strict pattern does the filtering.
+    for sel in ["a[href*='/jobs/']"]:
         try:
             elements = driver.find_elements(By.CSS_SELECTOR, sel)
             for el in elements:
@@ -639,7 +570,8 @@ def _collect_job_links(driver):
                 # Extract company name
                 company = ""
                 try:
-                    parent = el.find_element(By.XPATH, "./ancestor::div[.//h2]")
+                    # [last()] = nearest card; without it XPath returns the outermost div
+                    parent = el.find_element(By.XPATH, "(./ancestor::div[.//h2])[last()]")
                     h2 = parent.find_element(By.TAG_NAME, "h2")
                     company = h2.text.strip()
                 except:
@@ -725,7 +657,7 @@ def _apply_on_job_page(driver, config, job_title, company_name, default_note):
     try:
         try:
             from backend.services.resume_resolver import resolve_resume_path
-            jd_text = config.get("current_jd_text") or job_description or ""
+            jd_text = config.get("current_jd_text") or ""
             resume_path = resolve_resume_path(config, jd_text=jd_text)
         except Exception:
             resume_path = config.get("resume_path", "")
