@@ -6,6 +6,7 @@ LinkedIn / Naukri bot checks. The anti-throttling flags keep a hidden window
 running at full speed; progress is visible in the run's live logs.
 Nothing pops up or steals focus unless the user turns on "Show browser".
 """
+import hashlib
 import os
 import select
 import subprocess
@@ -46,7 +47,9 @@ function run(argv) {
       const agents = txt.isNil() ? [] : ObjC.unwrap(txt).split(/\s+/).filter(Boolean).map(Number);
       const pid = front.processIdentifier;
       const bundle = ObjC.unwrap(front.bundleIdentifier) || '';
-      if (agents.indexOf(pid) >= 0 && /chrome/i.test(bundle)) {
+      // Chrome for Testing is only ever an agent browser, and counts before its
+      // PID is registered (uc reports it ~4 s after launch).
+      if ((agents.indexOf(pid) >= 0 && /chrome/i.test(bundle)) || bundle === 'com.google.chrome.for.testing') {
         const back = recent.find(a => !a.terminated && agents.indexOf(a.processIdentifier) < 0);
         if (back) back.activateWithOptions(0);
       } else if (!recent.length || recent[0].processIdentifier !== pid) {
@@ -81,7 +84,60 @@ def window_args(show_browser: bool) -> list:
             _start_guard()  # learn the user's app before Chrome grabs focus
         except Exception:
             pass
+        lib = _no_activate_lib()
+        if lib:
+            # Inherited by chromedriver / uc → Chrome. Only Chrome for Testing
+            # loads it (branded Chrome is hardened and ignores DYLD_*); other
+            # children never touch NSApplication, so the stubs never run there.
+            os.environ["DYLD_INSERT_LIBRARIES"] = lib
     return [OFF_SCREEN, *_NO_THROTTLE]
+
+
+_NO_ACTIVATE_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "noactivate.m")
+
+
+def _no_activate_lib():
+    """Build (once per source version) the dylib that stops Chrome activating itself.
+
+    The guard can only undo a focus steal (10–70 ms each, ~7/min while applying)
+    and every one still drops the user's keystrokes or closes their menus.
+    None if the Xcode command-line tools are missing — the guard then still works.
+    """
+    try:
+        with open(_NO_ACTIVATE_SRC, "rb") as f:
+            tag = hashlib.sha1(f.read()).hexdigest()[:12]
+        out = os.path.join(os.path.expanduser("~/.cache/jobagent"), f"noactivate-{tag}-universal.dylib")
+        if not os.path.exists(out):
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            tmp = f"{out}.{os.getpid()}"
+            # Universal: an inherited DYLD_INSERT_LIBRARIES with a wrong-arch lib
+            # aborts the child (seen: uc's x86_64 chromedriver under Rosetta).
+            subprocess.run(["xcrun", "clang", "-dynamiclib", "-framework", "AppKit",
+                            "-arch", "arm64", "-arch", "x86_64",
+                            "-o", tmp, _NO_ACTIVATE_SRC], check=True, capture_output=True, timeout=120)
+            os.replace(tmp, out)
+        return out
+    except Exception:
+        return None
+
+
+def testing_chrome():
+    """(browser_path, driver_path) of Chrome for Testing, or None.
+
+    Background agents on macOS use it instead of the user's Chrome: branded
+    Chrome is hardened, so the no-activate library can't be loaded into it.
+    Same build ContextFill already uses, so no second download.
+    """
+    if sys.platform != "darwin" or not _no_activate_lib():
+        return None
+    try:
+        from selenium.webdriver.common.selenium_manager import SeleniumManager
+        sm = SeleniumManager()
+        out = sm.run([str(sm.get_binary()), "--browser", "chrome",
+                      "--browser-version", os.environ.get("CONTEXTFILL_CHROME", "beta")])
+        return out["browser_path"], out["driver_path"]
+    except Exception:
+        return None
 
 
 def show_browser(config: dict) -> bool:

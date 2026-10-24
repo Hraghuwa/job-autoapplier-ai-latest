@@ -53,6 +53,8 @@ class _FakeDriver:
 @pytest.fixture(autouse=True)
 def _never_spawn_real_guard(monkeypatch):
     monkeypatch.setattr(browser_window, "_start_guard", lambda: None)
+    monkeypatch.setattr(browser_window, "_no_activate_lib", lambda: None)
+    monkeypatch.delenv("DYLD_INSERT_LIBRARIES", raising=False)
 
 
 def _no_guard(monkeypatch, tmp_path):
@@ -200,3 +202,21 @@ def test_guard_sees_the_live_front_app():
     # forever, bouncing the user between apps, or never acted). Spin the run loop.
     js = browser_window._GUARD_JS
     assert "runUntilDate" in js and "delay(" not in js
+
+
+def test_background_chrome_cannot_activate_itself(monkeypatch, tmp_path):
+    # The guard only undoes a steal; each one still drops the user's keystrokes.
+    # The no-activate lib reaches Chrome through the inherited environment.
+    _no_guard(monkeypatch, tmp_path)
+    monkeypatch.setattr(browser_window, "_no_activate_lib", lambda: "/x/noactivate.dylib")
+    window_args(show_browser=True)
+    assert "DYLD_INSERT_LIBRARIES" not in os.environ
+    window_args(show_browser=False)
+    assert os.environ["DYLD_INSERT_LIBRARIES"] == "/x/noactivate.dylib"
+
+
+def test_no_activate_lib_stubs_every_activation_path():
+    src = open(browser_window._NO_ACTIVATE_SRC).read()
+    for sel in ("activateIgnoringOtherApps:", "@selector(activate)", "unhide:",
+                "activateWithOptions:", "NSApplicationActivationPolicyAccessory"):
+        assert sel in src

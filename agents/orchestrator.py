@@ -35,7 +35,7 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
 from config import CONFIG
-from browser_window import window_args, show_browser, send_to_background
+from browser_window import window_args, show_browser, send_to_background, testing_chrome
 from utils.performance import PERFORMANCE_TRACKER, COST_OPTIMIZER
 
 import linkedin_applier
@@ -147,6 +147,8 @@ def create_driver(profile_suffix="", contextfill=False):
     # avoids a runtime webdriver-manager download and Chrome/driver version
     # drift. Falls back to webdriver-manager for local dev.
     chrome_bin, driver_path = _resolve_chrome_paths()
+    if not chrome_bin and not show_browser(CONFIG):
+        chrome_bin, driver_path = testing_chrome() or (None, driver_path)
     if chrome_bin:
         opts.binary_location = chrome_bin
 

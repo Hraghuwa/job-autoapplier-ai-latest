@@ -30,7 +30,7 @@ from datetime import datetime, timedelta
 from selenium import webdriver
 
 from config import CONFIG
-from browser_window import window_args, show_browser, send_to_background
+from browser_window import window_args, show_browser, send_to_background, testing_chrome
 import linkedin_applier
 import job_finder
 import google_form_filler
@@ -164,6 +164,13 @@ def create_driver(headless=False):
         kwargs = {"options": options, "use_subprocess": True}
         if chrome_version:
             kwargs["version_main"] = chrome_version
+        tc = None if show_browser(CONFIG) else testing_chrome()
+        if tc:  # background: Chrome for Testing can be kept from stealing focus
+            import re
+            # Not driver_executable_path: uc patches that file in place, which breaks
+            # its signature (macOS kills it) — and it's ContextFill's shared driver.
+            kwargs.update(browser_executable_path=tc[0],
+                          version_main=int(re.search(r"/(\d+)\.\d+\.\d+\.\d+/", tc[1]).group(1)))
 
         driver = uc.Chrome(**kwargs)
         send_to_background(driver, show_browser(CONFIG))
