@@ -77,6 +77,35 @@ flowchart LR
 
 ## Getting started
 
+### Run it yourself (Docker, one command)
+
+The easiest way to use JobAgent: your own private copy on your own computer. Your data and job-site logins never leave your machine.
+
+1. Install and open [Docker Desktop](https://www.docker.com/products/docker-desktop/). On Windows, run the commands below in WSL or Git Bash.
+2. Get a free Gemini API key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). You can skip this step, but the AI features need the key.
+3. Run:
+
+```bash
+git clone https://github.com/Hraghuwa/job-autoapplier-ai-latest.git
+cd job-autoapplier-ai-latest
+bash setup.sh
+```
+
+4. Open **http://localhost:3000** and register. The first account you create is yours, and nobody else can see it.
+
+| Task | Command |
+|---|---|
+| Stop | `docker compose down` (your data is kept) |
+| Start again | `docker compose up -d` |
+| Update to latest | `git pull && docker compose up -d --build` |
+| See errors | `docker compose logs backend worker` |
+| Add/change Gemini key | edit `SYSTEM_GEMINI_KEY` in `backend/.env`, then `docker compose up -d` |
+| Delete everything | `docker compose down -v` (permanently deletes your data) |
+
+`setup.sh` generates every secret for you (database password, `SECRET_KEY`, `FERNET_KEY`) and never overwrites an existing `.env`.
+
+### Local development (without Docker)
+
 Prerequisites: Python 3.9+, Node 18+, Redis, Google Chrome.
 
 ```bash
@@ -192,7 +221,7 @@ Workers: `workers/agent_tasks.py` (`run_phase_task`, `check_schedules`, quota ch
 
 Tools: `get_profile`, `set_job_targets`, `scan_portals`, `save_mission_targets`, `list_mission_targets`, `remove_mission_target`, `tailor_cv`, `apply_cv_tailoring`, `undo_cv_tailoring`, `launch_mission`, `mission_status`, `mission_logs`, `stop_mission`, `list_applications`, `record_outcome`, `interview_prep`, `followups_due`, `draft_followup`, `skill_gaps`, `study_plan`, `evaluate_offer`.
 
-Claude Code commands in `.claude/commands/`: `job-setup`, `job-apply`, `job-daily`, `job-weekly`, `job-interview`.
+Claude Code commands in `.claude/commands/` (also served as MCP prompts): `job-auto`, `job-setup`, `job-apply`, `job-daily`, `job-weekly`, `job-interview`. Setup guide and the one-line `/job-auto <role>` flow: [docs/MCP_QUICKSTART.md](docs/MCP_QUICKSTART.md).
 
 `chrome_extension/` is a Manifest V3 extension that fills the active tab's application form from a saved profile. Build with `python build_extension.py`.
 

@@ -1,5 +1,4 @@
-version: "3.9"
-
+# Self-host: run `bash setup.sh` (creates .env + backend/.env, then `docker compose up`).
 services:
 
   # ── PostgreSQL ────────────────────────────────────────────────────────────
@@ -12,8 +11,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-jobagent}
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # No host port: only the other containers need it, and 5432 often clashes
+    # with a Postgres already installed on the host.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U jobagent"]
       interval: 5s
@@ -24,8 +23,6 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -50,6 +47,9 @@ services:
       # localhost Redis) from running the backend outside Docker.
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-jobagent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-jobagent}
       - REDIS_URL=redis://redis:6379/0
+      # The `worker` service below is the Celery worker (it has Chrome). Without
+      # this the API can race it on startup and spawn a browserless worker itself.
+      - DISABLE_AGENT_SUPERVISOR=1
     depends_on:
       postgres:
         condition: service_healthy
