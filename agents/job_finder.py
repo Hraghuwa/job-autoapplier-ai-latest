@@ -36,6 +36,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 import google_form_filler
+import obscura_fetch
 import web_search_applier
 
 
@@ -576,17 +577,18 @@ def crawl_career_pages(driver, applied_urls, found_urls, config, max_new_tabs=20
             break
 
         try:
-            domain = urlparse(career_url).netloc.replace("www.", "").split(".")[0]
-            driver.switch_to.window(search_tab)
-            driver.get(career_url)
-            time.sleep(2)
-            scroll_page(driver, 1)
+            # Obscura first: headless, no Chrome tab/focus. Falls back to Chrome if it's missing or fails.
+            hrefs = obscura_fetch.links(career_url)
+            if hrefs is None:
+                driver.switch_to.window(search_tab)
+                driver.get(career_url)
+                time.sleep(2)
+                scroll_page(driver, 1)
+                hrefs = [l.get_attribute("href") or "" for l in driver.find_elements(By.CSS_SELECTOR, "a[href]")]
 
             # Find all links that look like job postings
-            all_links = driver.find_elements(By.CSS_SELECTOR, "a[href]")
-            for link in all_links:
+            for href in hrefs:
                 try:
-                    href = link.get_attribute("href") or ""
                     if len(href) < 20:
                         continue
                     path_lower = href.lower()
