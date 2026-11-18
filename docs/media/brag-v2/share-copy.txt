@@ -1,0 +1,1 @@
+"Why do you want to work here?" Typed by hand, application #4. JobAgent scores every posting, tailors your CV from your own profile, and fills the form in a real browser. Open source, one command to self-host: https://github.com/Hraghuwa/job-autoapplier-ai-latest

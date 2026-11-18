@@ -1,0 +1,1 @@
+Stop spending 3 hours a day manually filling out Workday forms. JobAgent scans roles, scores fit, tailors your CV per job, and auto-applies across 40+ ATS portals while you sleep: https://github.com/Hraghuwa/job-autoapplier-ai-latest
