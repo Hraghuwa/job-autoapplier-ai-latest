@@ -22,6 +22,10 @@ Open-source job auto-applier that finds roles, scores fit, tailors your resume p
   <a href="https://github.com/Hraghuwa/job-autoapplier-ai-latest/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Hraghuwa/job-autoapplier-ai-latest?style=social"></a>
 </p>
 
+<p align="center">
+  <a href="docs/media/brag-v2/brag.mp4"><img alt="JobAgent in 20 seconds (click for the video with sound)" src="docs/media/brag-v2/brag-preview.gif" width="720"></a>
+</p>
+
 > **Who is it for?** Students and job seekers applying at volume (internships, entry-level and full-time roles) who want quality-gated, tailored applications instead of spray-and-pray. If it saves you time, a star helps others find it.
 
 ## Table of contents
